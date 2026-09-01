@@ -28,6 +28,24 @@ CALCULATOR_TOOL = {
 }
 
 
+MIGRATION_STATUS_TOOL = {
+    "type": "function",
+    "name": "get_migration_status",
+    "description": (
+        "Get the actual migration status and error details "
+        "for a specific batch ID."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "batch_id": {"type": "integer"},
+        },
+        "required": ["batch_id"],
+        "additionalProperties": False,
+    },
+}
+
+
 class ModelProvider(ABC):
 
     @abstractmethod
@@ -45,12 +63,16 @@ class OpenAIModelProvider(ModelProvider):
             model="gpt-5.4-mini",
             input=message,
         )
+
         return response.output_text
 
     def generate_with_tools(self, input_items):
         return self.client.responses.create(
             model="gpt-5.4-mini",
             input=input_items,
-            tools=[CALCULATOR_TOOL],
+            tools=[
+                CALCULATOR_TOOL,
+                MIGRATION_STATUS_TOOL,
+            ],
             parallel_tool_calls=False,
         )

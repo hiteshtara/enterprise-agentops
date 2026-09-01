@@ -18,6 +18,9 @@ def health() -> dict[str, str]:
 
 @app.post("/agent/run", response_model=AgentResponse)
 def run_agent(request: AgentRequest) -> AgentResponse:
-    answer = agent.run(request.message)
+    answer, trace = agent.run(request.message)
 
-    return AgentResponse(answer=answer)
+    return AgentResponse(
+        answer=answer,
+        trace=trace,
+    )
