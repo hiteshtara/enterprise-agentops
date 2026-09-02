@@ -2,23 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from app.agent import AgentService
-from app.approval_store import ApprovalStore
+from app.approval_store import ApprovalStatus, ApprovalStore
 from app.audit_store import AuditStore
 from app.database import DEFAULT_DATABASE_URL, Database
-from app.model_provider import ModelProvider
-from app.tool_registry import Tool, ToolRegistry, ToolRisk
-from app.tools import restart_migration
-
-
-class UnusedModelProvider(ModelProvider):
-    """resolve_approval must never call the model; this fails loudly if it does."""
-
-    def generate(self, message: str) -> str:
-        raise AssertionError("The model must not be called.")
-
-    def generate_with_tools(self, input_items, tools):
-        raise AssertionError("The model must not be called.")
+from app.run_store import RunStatus, RunStore
 
 
 def snapshot(path):
@@ -31,30 +18,18 @@ def snapshot(path):
     return (stat.st_size, stat.st_mtime_ns)
 
 
-def build_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-
-    registry.register(
-        Tool(
-            name="restart_migration",
-            description="Restart migration.",
-            function=restart_migration,
-            parameters={},
-            risk=ToolRisk.WRITE,
-        )
-    )
-
-    return registry
-
-
-def test_approval_persists_in_configured_database(database):
-    store = ApprovalStore(database=database)
-
-    created = store.create(
+def make_approval(store: ApprovalStore, run_id: str = "run-1"):
+    return store.create(
         tool="restart_migration",
         arguments={"batch_id": 43},
         risk="WRITE",
+        run_id=run_id,
+        tool_call_id="call-1",
     )
+
+
+def test_approval_persists_in_configured_database(database):
+    created = make_approval(ApprovalStore(database=database))
 
     # A second store on the same Database reads the row back, proving it was
     # committed rather than held in a single session's identity map.
@@ -64,6 +39,8 @@ def test_approval_persists_in_configured_database(database):
     assert reloaded.tool == "restart_migration"
     assert reloaded.arguments == {"batch_id": 43}
     assert reloaded.risk == "WRITE"
+    assert reloaded.run_id == "run-1"
+    assert reloaded.status == ApprovalStatus.PENDING.value
 
 
 def test_audit_events_persist_in_configured_database(database):
@@ -82,8 +59,9 @@ def test_audit_events_persist_in_configured_database(database):
 
 
 def test_each_test_starts_from_an_empty_database(database):
-    # Runs after the two tests above; a leaked database would carry their rows.
     assert AuditStore(database=database).list_events() == []
+    assert ApprovalStore(database=database).list_approvals() == []
+    assert RunStore(database=database).list_runs() == []
 
 
 def test_database_fixture_is_isolated_from_development_database(
@@ -98,110 +76,121 @@ def test_database_fixture_is_isolated_from_development_database(
 
     before = snapshot(development_database_path)
 
-    ApprovalStore(database=database).create(
-        tool="restart_migration",
-        arguments={"batch_id": 99},
-        risk="WRITE",
-    )
+    make_approval(ApprovalStore(database=database))
     AuditStore(database=database).record("TOOL_REQUESTED", {"tool": "x"})
+    RunStore(database=database).create_run("hello")
 
     assert snapshot(development_database_path) == before
 
 
-def test_removing_an_approval_deletes_the_row(database):
+def test_resolved_approvals_are_kept_not_deleted(database):
     store = ApprovalStore(database=database)
 
-    created = store.create(
-        tool="restart_migration",
-        arguments={"batch_id": 43},
-        risk="WRITE",
-    )
+    created = make_approval(store)
 
-    store.remove(created.approval_id)
+    store.resolve(created.approval_id, approved=True)
 
-    assert store.get(created.approval_id) is None
+    reloaded = store.get(created.approval_id)
 
-    # remove() is idempotent: a second call must not raise.
-    store.remove(created.approval_id)
+    assert reloaded is not None
+    assert reloaded.status == ApprovalStatus.APPROVED.value
+    assert reloaded.decision == ApprovalStatus.APPROVED.value
+    assert reloaded.resolved_at is not None
 
 
-def test_resolving_an_approval_executes_the_tool_and_clears_it(database):
-    approval_store = ApprovalStore(database=database)
-    audit_store = AuditStore(database=database)
+def test_rejected_approvals_are_kept(database):
+    store = ApprovalStore(database=database)
 
-    agent = AgentService(
-        model=UnusedModelProvider(),
-        tool_registry=build_registry(),
-        approval_store=approval_store,
-        audit_store=audit_store,
-    )
+    created = make_approval(store)
 
-    pending = approval_store.create(
-        tool="restart_migration",
-        arguments={"batch_id": 43},
-        risk="WRITE",
-    )
+    store.resolve(created.approval_id, approved=False)
 
-    result = agent.resolve_approval(
-        approval_id=pending.approval_id,
-        approved=True,
-    )
+    assert store.get(created.approval_id).status == ApprovalStatus.REJECTED.value
 
-    assert result["approved"] is True
-    assert result["tool"] == "restart_migration"
-    assert result["result"]["status"] == "RESTARTED"
+    rejected = store.list_approvals(status=ApprovalStatus.REJECTED.value)
 
-    assert approval_store.get(pending.approval_id) is None
-
-    event_types = [event["event_type"] for event in audit_store.list_events()]
-
-    assert "APPROVAL_GRANTED" in event_types
-    assert "TOOL_EXECUTED" in event_types
+    assert len(rejected) == 1
+    assert rejected[0]["approval_id"] == created.approval_id
 
 
-def test_denying_an_approval_clears_it_without_executing(database):
-    approval_store = ApprovalStore(database=database)
-    audit_store = AuditStore(database=database)
+def test_approvals_filter_by_status_and_run(database):
+    store = ApprovalStore(database=database)
 
-    agent = AgentService(
-        model=UnusedModelProvider(),
-        tool_registry=build_registry(),
-        approval_store=approval_store,
-        audit_store=audit_store,
-    )
+    first = make_approval(store, run_id="run-a")
+    make_approval(store, run_id="run-b")
 
-    pending = approval_store.create(
-        tool="restart_migration",
-        arguments={"batch_id": 43},
-        risk="WRITE",
-    )
+    store.resolve(first.approval_id, approved=True)
 
-    result = agent.resolve_approval(
-        approval_id=pending.approval_id,
-        approved=False,
-    )
-
-    assert result["approved"] is False
-    assert result["result"] is None
-
-    assert approval_store.get(pending.approval_id) is None
-
-    event_types = [event["event_type"] for event in audit_store.list_events()]
-
-    assert "APPROVAL_DENIED" in event_types
-    assert "TOOL_EXECUTED" not in event_types
+    assert len(store.list_approvals()) == 2
+    assert len(store.list_approvals(status=ApprovalStatus.PENDING.value)) == 1
+    assert len(store.list_approvals(run_id="run-a")) == 1
 
 
-def test_unknown_approval_id_is_rejected(database):
-    agent = AgentService(
-        model=UnusedModelProvider(),
-        tool_registry=build_registry(),
-        approval_store=ApprovalStore(database=database),
-        audit_store=AuditStore(database=database),
-    )
-
+def test_resolving_an_unknown_approval_is_rejected(database):
     with pytest.raises(ValueError, match="does-not-exist"):
-        agent.resolve_approval(approval_id="does-not-exist", approved=True)
+        ApprovalStore(database=database).resolve("does-not-exist", approved=True)
+
+
+def test_runs_persist_and_reload(database):
+    store = RunStore(database=database)
+
+    run_id = store.create_run("Investigate batch 43.")
+
+    reloaded = RunStore(database=database).get_run(run_id)
+
+    assert reloaded is not None
+    assert reloaded.status == RunStatus.RUNNING.value
+    assert reloaded.user_message == "Investigate batch 43."
+    assert reloaded.final_answer is None
+
+
+def test_run_lifecycle_transitions(database):
+    store = RunStore(database=database)
+
+    run_id = store.create_run("hello")
+
+    store.await_approval(run_id, [{"role": "user", "content": "hello"}])
+
+    assert store.get_run(run_id).status == RunStatus.WAITING_FOR_APPROVAL.value
+
+    store.resume(run_id)
+
+    assert store.get_run(run_id).status == RunStatus.RUNNING.value
+
+    store.complete(run_id, "done")
+
+    record = store.get_run(run_id)
+
+    assert record.status == RunStatus.COMPLETED.value
+    assert record.final_answer == "done"
+
+
+def test_run_steps_are_numbered_and_ordered(database):
+    from app.run_store import StepType
+
+    store = RunStore(database=database)
+
+    run_id = store.create_run("hello")
+
+    store.add_step(run_id, StepType.MODEL_RESPONSE, result={"text": None})
+    store.add_step(run_id, StepType.TOOL_REQUESTED, tool_name="t", arguments={"a": 1})
+    store.add_step(run_id, StepType.TOOL_EXECUTED, tool_name="t", result={"ok": True})
+
+    steps = RunStore(database=database).list_steps(run_id)
+
+    assert [step["step_number"] for step in steps] == [1, 2, 3]
+    assert [step["step_type"] for step in steps] == [
+        "MODEL_RESPONSE",
+        "TOOL_REQUESTED",
+        "TOOL_EXECUTED",
+    ]
+    assert steps[1]["arguments"] == {"a": 1}
+    assert steps[2]["result"] == {"ok": True}
+
+
+def test_updating_an_unknown_run_is_rejected(database):
+    with pytest.raises(ValueError, match="Unknown run ID"):
+        RunStore(database=database).complete("nope", "answer")
 
 
 def test_two_databases_do_not_share_rows(tmp_path):

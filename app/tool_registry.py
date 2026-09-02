@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from app.protocol import ToolDefinition
+
 
 class ToolRisk(str, Enum):
     READ = "READ"
@@ -18,13 +20,13 @@ class Tool:
     parameters: dict[str, Any]
     risk: ToolRisk = ToolRisk.READ
 
-    def schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
-        }
+    def definition(self) -> ToolDefinition:
+        """The provider-neutral advertisement of this tool."""
+        return ToolDefinition(
+            name=self.name,
+            description=self.description,
+            parameters=self.parameters,
+        )
 
 
 class ApprovalRequired(Exception):
@@ -71,7 +73,14 @@ class ToolRegistry:
 
         return tool.function(**arguments)
 
-    def schemas(
+    def definitions(
         self,
-    ) -> list[dict[str, Any]]:
-        return [tool.schema() for tool in self._tools.values()]
+    ) -> list[ToolDefinition]:
+        """Every registered tool, in provider-neutral form."""
+        return [tool.definition() for tool in self._tools.values()]
+
+    def get(
+        self,
+        name: str,
+    ) -> Tool | None:
+        return self._tools.get(name)

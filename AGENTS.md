@@ -168,11 +168,11 @@ the contract — match it when adding behaviour.
 | Outcome | Audit | Loop | Returned to caller |
 |---|---|---|---|
 | Model returns no `function_call` | — | ends | the answer |
-| `ApprovalRequired` (WRITE/DANGEROUS) | `APPROVAL_REQUIRED` | ends | `approval_required` populated |
+| `ApprovalRequired` (WRITE/DANGEROUS) | `APPROVAL_REQUIRED` | parks run | `approval_required` populated |
 | `ValueError` / `TypeError` from a tool | `TOOL_FAILED` | **continues** | — model retries |
-| Malformed JSON in `function_call.arguments` | `TOOL_FAILED` | **continues** | — model retries |
-| Any other exception from a tool | `AGENT_FAILED` | ends | generic message |
-| Iteration budget exhausted | `AGENT_MAX_ITERATIONS` | ends | "stopped after N iterations" |
+| `ToolCall.argument_error` set by the provider | `TOOL_FAILED` | **continues** | — model retries |
+| Any other exception from a tool | `AGENT_FAILED` | ends; run `FAILED` | generic message |
+| Iteration budget exhausted | `AGENT_MAX_ITERATIONS` | ends; run `FAILED` | "stopped after N iterations" |
 
 Invariants that tests enforce — don't break them silently:
 
@@ -200,6 +200,38 @@ Invariants that tests enforce — don't break them silently:
   FastAPI returns 500 — an infrastructure failure, deliberately distinct from a tool
   failure.
 
+### Durable-run invariants
+
+- **Every `/agent/run` creates a `Run`.** `AgentService` owns the lifecycle:
+  `RUNNING` → `COMPLETED` / `FAILED`, or → `WAITING_FOR_APPROVAL` → `RUNNING` →
+  `COMPLETED`, or → `CANCELLED` on rejection. Status is a `RunStatus` enum value,
+  never free text.
+- **Approval resumes the original run.** `resolve_approval` reloads the persisted
+  conversation, executes the pending tool, appends the result, and re-enters the
+  loop. The caller never resends the prompt. An approval can be resolved once.
+- **Only JSON is persisted.** A run's conversation is `list[ModelMessage]` serialised
+  through `to_dict()`. Never persist a provider SDK object, and never pickle.
+- **`run_steps` and `audit_events` are different histories.** Steps are what the
+  runtime did and what resumption needs (including `MODEL_RESPONSE`); audit events
+  are what a reviewer needs. Don't merge them or mirror one into the other.
+- **Approvals are never deleted.** Resolution sets `status` / `decision` /
+  `resolved_at` so history stays queryable.
+- **Audit events carry an indexed `run_id` column**, not a key buried in
+  `details_json`, so the timeline can be filtered per run.
+- **The iteration budget is per drive, not per run.** A resumed run starts a fresh
+  `max_iterations` budget; each segment is bounded, the whole run is not.
+
+### Provider-neutral protocol
+
+- **`AgentService` and `ToolRegistry` must never reference a vendor SDK type.** They
+  speak only `app/protocol.py`: `ToolDefinition`, `ToolCall`, `ModelResponse`,
+  `ModelMessage`. `ToolRegistry.definitions()` returns `ToolDefinition`, not JSON.
+- **`ModelProvider` owns all translation.** `OpenAIModelProvider` converts in both
+  directions; a new vendor is a new subclass and nothing else.
+- **A provider never raises on model-authored garbage.** Unparsable tool arguments
+  become a `ToolCall` with empty `arguments` and an `argument_error`, which the
+  runtime turns into a recoverable `TOOL_FAILED`.
+
 ### Audit event types
 
 `TOOL_REQUESTED`, `TOOL_EXECUTED`, `TOOL_FAILED`, `APPROVAL_REQUIRED`,
@@ -207,10 +239,12 @@ Invariants that tests enforce — don't break them silently:
 are bare strings, not an enum — grep `audit_store.record` before adding a new one.
 `GET /audit/events` returns them newest-first.
 
+Every event written during a run carries that run's `run_id`.
+
 `TOOL_REQUESTED` is written *before* execution, so a failed call has a
-`TOOL_REQUESTED` with no matching `TOOL_EXECUTED`. The one exception is malformed
-JSON arguments: parsing precedes the audit, so that path records `TOOL_FAILED` with
-`arguments: null` and no `TOOL_REQUESTED`.
+`TOOL_REQUESTED` with no matching `TOOL_EXECUTED`. The one exception is a tool call
+the provider could not parse: that is detected before the audit, so the path records
+`TOOL_FAILED` with `arguments: null` and no `TOOL_REQUESTED`.
 
 ### The no-arbitrary-SQL rule
 

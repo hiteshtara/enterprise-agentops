@@ -4,6 +4,7 @@ import pytest
 
 from app.database import DEFAULT_DATABASE_URL, Database
 from app.migration_store import MigrationBatchStore
+from app.run_store import RunStore
 from app.seed_data import seed_migration_batches
 from app.tool_registry import ToolRegistry
 from app.tool_setup import build_tool_registry
@@ -48,3 +49,36 @@ def migration_store(seeded_database: Database) -> MigrationBatchStore:
 def registry(migration_store: MigrationBatchStore) -> ToolRegistry:
     """The real application tool registry, backed by the isolated database."""
     return build_tool_registry(migration_store=migration_store)
+
+
+@pytest.fixture
+def run_store(database: Database) -> RunStore:
+    return RunStore(database=database)
+
+
+@pytest.fixture
+def agent_factory(database: Database, registry: ToolRegistry):
+    """Build an AgentService against the isolated database.
+
+    Takes a model provider so each test scripts its own model behaviour, and
+    optionally a different registry or iteration budget.
+    """
+    from app.agent import DEFAULT_MAX_ITERATIONS, AgentService
+    from app.approval_store import ApprovalStore
+    from app.audit_store import AuditStore
+
+    def build(
+        model,
+        tool_registry: ToolRegistry | None = None,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    ) -> AgentService:
+        return AgentService(
+            model=model,
+            tool_registry=tool_registry or registry,
+            approval_store=ApprovalStore(database=database),
+            audit_store=AuditStore(database=database),
+            run_store=RunStore(database=database),
+            max_iterations=max_iterations,
+        )
+
+    return build

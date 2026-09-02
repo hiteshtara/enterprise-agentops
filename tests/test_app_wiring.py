@@ -25,7 +25,7 @@ def test_app_main_imports_without_openai_api_key(tmp_path):
     source = (
         "import os; assert 'OPENAI_API_KEY' not in os.environ; "
         "import app.main; "
-        "print(sorted(t['name'] for t in app.main.tool_registry.schemas()))"
+        "print(sorted(d.name for d in app.main.tool_registry.definitions()))"
     )
 
     completed = subprocess.run(
@@ -135,11 +135,19 @@ def test_agent_run_route_uses_the_registry(monkeypatch, tmp_path):
     module.database.create_all()
 
     from app.seed_data import seed_migration_batches
-    from tests.test_migration_tool import FakeQueryModelProvider
+    from tests.fakes import ScriptedModelProvider, final_response, tool_response
 
     seed_migration_batches(module.database)
 
-    module.agent.model = FakeQueryModelProvider()
+    module.agent.model = ScriptedModelProvider(
+        [
+            tool_response(
+                "query_migration_batches",
+                {"status": "FAILED", "limit": 5},
+            ),
+            final_response("Five batches failed."),
+        ]
+    )
 
     client = TestClient(module.app)
 

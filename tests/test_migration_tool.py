@@ -1,61 +1,20 @@
-from types import SimpleNamespace
-
 import pytest
 
-from app.agent import AgentService
-from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
 from app.migration_store import (
     ALLOWED_STATUSES,
     MAX_LIMIT,
     MIN_LIMIT,
 )
-from app.model_provider import ModelProvider
 from app.seed_data import DEVELOPMENT_BATCHES
 from app.tool_registry import ToolRisk
+from tests.fakes import ScriptedModelProvider, final_response, tool_response
 
 TOOL_NAME = "query_migration_batches"
 
 
-class FakeQueryModelProvider(ModelProvider):
-    """Requests the database tool once, then answers from the tool output."""
-
-    def __init__(self, arguments: str = '{"status": "FAILED", "limit": 5}') -> None:
-        self.arguments = arguments
-        self.call_count = 0
-        self.tool_output_seen: str | None = None
-
-    def generate(self, message: str) -> str:
-        raise AssertionError("generate() must not be used by the agent loop.")
-
-    def generate_with_tools(self, input_items, tools):
-        self.call_count += 1
-
-        if self.call_count == 1:
-            return SimpleNamespace(
-                output=[
-                    SimpleNamespace(
-                        type="function_call",
-                        name=TOOL_NAME,
-                        arguments=self.arguments,
-                        call_id="query-call-1",
-                    )
-                ],
-                output_text="",
-            )
-
-        for item in input_items:
-            if isinstance(item, dict) and item.get("type") == "function_call_output":
-                self.tool_output_seen = item["output"]
-
-        return SimpleNamespace(
-            output=[],
-            output_text="Batches 43, 46, 49, 53 and 57 failed.",
-        )
-
-
 def test_tool_is_registered_as_read(registry):
-    schema_names = [schema["name"] for schema in registry.schemas()]
+    schema_names = [definition.name for definition in registry.definitions()]
 
     assert TOOL_NAME in schema_names
 
@@ -70,9 +29,9 @@ def test_tool_requires_no_approval(registry):
 
 
 def test_tool_schema_constrains_status_and_limit(registry):
-    schema = next(s for s in registry.schemas() if s["name"] == TOOL_NAME)
+    definition = next(d for d in registry.definitions() if d.name == TOOL_NAME)
 
-    parameters = schema["parameters"]
+    parameters = definition.parameters
 
     assert parameters["additionalProperties"] is False
     assert set(parameters["properties"]) == {"status", "limit"}
@@ -91,9 +50,9 @@ def test_tool_schema_constrains_status_and_limit(registry):
 
 def test_tool_schema_exposes_no_sql_surface(registry):
     """The model must have no way to supply SQL, columns, tables or ordering."""
-    schema = next(s for s in registry.schemas() if s["name"] == TOOL_NAME)
+    definition = next(d for d in registry.definitions() if d.name == TOOL_NAME)
 
-    properties = schema["parameters"]["properties"]
+    properties = definition.parameters["properties"]
 
     forbidden = {
         "sql",
@@ -132,32 +91,33 @@ def test_registry_rejects_out_of_range_limit_through_the_tool(registry):
         registry.execute(TOOL_NAME, {"limit": 500})
 
 
-def test_agent_executes_the_database_tool(registry, seeded_database):
-    model = FakeQueryModelProvider()
-
-    agent = AgentService(
-        model=model,
-        tool_registry=registry,
-        approval_store=ApprovalStore(database=seeded_database),
-        audit_store=AuditStore(database=seeded_database),
+def failed_query_script():
+    return ScriptedModelProvider(
+        [
+            tool_response(
+                TOOL_NAME,
+                {"status": "FAILED", "limit": 5},
+                call_id="query-call-1",
+            ),
+            final_response("Batches 43, 46, 49, 53 and 57 failed."),
+        ]
     )
 
-    result = agent.run("Show me failed migration batches.")
+
+def test_agent_executes_the_database_tool(agent_factory):
+    model = failed_query_script()
+
+    result = agent_factory(model).run("Show me failed migration batches.")
 
     assert result["approval_required"] is None
     assert result["answer"] == "Batches 43, 46, 49, 53 and 57 failed."
     assert model.call_count == 2
 
 
-def test_execution_trace_contains_the_database_tool(registry, seeded_database):
-    agent = AgentService(
-        model=FakeQueryModelProvider(),
-        tool_registry=registry,
-        approval_store=ApprovalStore(database=seeded_database),
-        audit_store=AuditStore(database=seeded_database),
+def test_execution_trace_contains_the_database_tool(agent_factory):
+    result = agent_factory(failed_query_script()).run(
+        "Show me failed migration batches.",
     )
-
-    result = agent.run("Show me failed migration batches.")
 
     assert len(result["trace"]) == 1
 
@@ -168,19 +128,11 @@ def test_execution_trace_contains_the_database_tool(registry, seeded_database):
     assert all(row["status"] == "FAILED" for row in step["result"])
 
 
-def test_audit_records_tool_requested_and_executed(registry, seeded_database):
-    audit_store = AuditStore(database=seeded_database)
+def test_audit_records_tool_requested_and_executed(agent_factory, seeded_database):
 
-    agent = AgentService(
-        model=FakeQueryModelProvider(),
-        tool_registry=registry,
-        approval_store=ApprovalStore(database=seeded_database),
-        audit_store=audit_store,
-    )
+    agent_factory(failed_query_script()).run("Show me failed migration batches.")
 
-    agent.run("Show me failed migration batches.")
-
-    events = audit_store.list_events()
+    events = AuditStore(database=seeded_database).list_events()
 
     by_type = {event["event_type"]: event for event in events}
 
@@ -199,34 +151,31 @@ def test_audit_records_tool_requested_and_executed(registry, seeded_database):
     assert all(row["status"] == "FAILED" for row in executed["result"])
 
 
-def test_model_receives_authoritative_rows_not_invented_ones(
-    registry,
-    seeded_database,
-):
+def test_model_receives_authoritative_rows_not_invented_ones(agent_factory):
     """The tool output fed back to the model must be real database rows."""
-    model = FakeQueryModelProvider(arguments='{"status": "RUNNING"}')
-
-    agent = AgentService(
-        model=model,
-        tool_registry=registry,
-        approval_store=ApprovalStore(database=seeded_database),
-        audit_store=AuditStore(database=seeded_database),
+    model = ScriptedModelProvider(
+        [
+            tool_response(TOOL_NAME, {"status": "RUNNING"}),
+            final_response("One migration is running."),
+        ]
     )
 
-    agent.run("Which migrations are still running?")
+    agent_factory(model).run("Which migrations are still running?")
 
-    assert model.tool_output_seen is not None
+    seen = model.tool_results_seen()
+
+    assert seen
 
     running_batch_ids = [
         spec[0] for spec in DEVELOPMENT_BATCHES if spec[1].value == "RUNNING"
     ]
 
     for batch_id in running_batch_ids:
-        assert f'"batch_id": {batch_id}' in model.tool_output_seen
+        assert f'"batch_id": {batch_id}' in seen[0]
 
 
 def test_all_original_tools_are_still_registered(registry):
-    names = {schema["name"] for schema in registry.schemas()}
+    names = {definition.name for definition in registry.definitions()}
 
     assert names == {
         "calculator",

@@ -1,8 +1,13 @@
-# Enterprise AgentOps
+# AgentGuard
 
-A FastAPI service that wraps a self-built LLM tool-calling agent in the controls an
-enterprise actually needs: risk-tiered tools, human approval for anything that
-writes, a durable audit trail, and database access the model cannot abuse.
+*Repository: `enterprise-agentops`*
+
+A model-independent control plane that sits between an LLM agent and real enterprise
+systems: risk-tiered tools, human approval for anything that writes, durable run
+state that survives an approval wait, an audit trail, and database access the model
+cannot abuse.
+
+The model reasons and **proposes** actions. AgentGuard decides whether they execute.
 
 The agent runtime is implemented directly against the OpenAI Responses API. There is
 no LangChain, LangGraph, or LlamaIndex — the loop is deliberately hand-written so the
@@ -11,49 +16,80 @@ governance boundaries are explicit and inspectable.
 ## Architecture
 
 ```
-                       HTTP client
-                            |
-            +---------------v----------------+
-            |          FastAPI app           |   app/main.py
-            |  /health                       |   (composition + routes only)
-            |  /agent/run                    |
-            |  /agent/approvals/{id}         |
-            |  /audit/events                 |
-            +---------------+----------------+
-                            |
-            +---------------v----------------+
-            |         AgentService           |   app/agent.py
-            |  - owns the reasoning loop     |
-            |  - knows NO individual tool    |
-            +--+----------+----------+-------+
-               |          |          |
-     schemas() |   execute|          | record()
-               |          |          |
-    +----------v--+  +----v---------------+  +--v---------------+
-    | ToolRegistry|  |  Risk gate         |  |   AuditStore     |
-    |  (built by  |  |  READ -> run       |  | TOOL_REQUESTED   |
-    | tool_setup) |  |  WRITE/DANGEROUS   |  | TOOL_EXECUTED    |
-    +------+------+  |    -> ApprovalReq. |  | APPROVAL_*       |
-           |         +----+---------------+  +--------+---------+
-           |              |                           |
-           |              v                           |
-           |     +--------+---------+                 |
-           |     |  ApprovalStore   |                 |
-           |     | pending_approvals|                 |
-           |     +--------+---------+                 |
-           |              |                           |
-    +------v--------------v---------------------------v-------+
-    |                      Database                           |  app/database.py
-    |        injectable engine + session factory              |
-    |          sqlite:///./agentops.db (default)              |
-    +---------------------------+-----------------------------+
+                         HTTP client
+                              |
+              +---------------v----------------+
+              |          FastAPI app           |   app/main.py
+              |  /health        /runs          |   (composition + routes only)
+              |  /agent/run     /runs/{id}     |
+              |  /agent/approvals/{id}         |
+              |  /audit/events?run_id=         |
+              +---------------+----------------+
+                              |
+              +---------------v----------------+
+              |         AgentService           |   app/agent.py
+              |  bounded loop, 1 tool/iteration|
+              |  speaks ONLY neutral protocol  |
+              +--+--------+---------+-------+--+
+                 |        |         |       |
+     definitions |        | execute |       | persist
+                 |        |         |       |
+    +------------v-+  +---v---------v--+  +-v---------------+
+    | ToolRegistry |  |   Risk gate    |  |    RunStore     |
+    | ToolDefinition| |  READ -> run   |  | runs / run_steps|
+    +------+-------+  |  WRITE/DANGER  |  | RUNNING         |
+           |          |  -> ApprovalReq|  | WAITING_FOR_    |
+           |          +---+------------+  |   APPROVAL      |
+           |              |               | COMPLETED       |
+           |              v               | FAILED          |
+           |     +--------+--------+      | CANCELLED       |
+           |     |  ApprovalStore  |      +-----------------+
+           |     | PENDING/APPROVED|
+           |     |    /REJECTED    |      +-----------------+
+           |     +--------+--------+      |   AuditStore    |
+           |              |               | run_id-indexed  |
+           |              |               +--------+--------+
+    +------v--------------v------------------------v-------+
+    |                      Database                        |  app/database.py
+    |          injectable engine + session factory         |
+    |            sqlite:///./agentops.db (default)         |
+    +---------------------------+--------------------------+
                                 |
                     +-----------v------------+
                     |  MigrationBatchStore   |  app/migration_store.py
                     |  SQLAlchemy expressions|
                     |  built in Python only  |
                     +------------------------+
+
+                     ModelProvider  (app/model_provider.py)
+                            |
+              +-------------+-------------+
+              v             v             v
+           OpenAI      (Anthropic)    (Bedrock)
+        implemented       future        future
 ```
+
+## Provider-neutral model protocol
+
+`AgentService` never touches a vendor SDK object. It speaks only the types in
+`app/protocol.py`:
+
+| Type | Purpose |
+|---|---|
+| `ToolDefinition` | a tool as advertised to a model (name, description, JSON Schema) |
+| `ToolCall` | a model's request to invoke one tool (id, name, `arguments` dict) |
+| `ModelResponse` | one model turn: `text` and/or `tool_calls` |
+| `ModelMessage` | one entry of durable conversation state (user / assistant / tool) |
+
+`ModelProvider` is the only place a vendor's wire format exists.
+`OpenAIModelProvider` translates in both directions — `ToolDefinition` becomes an
+OpenAI function tool, `ModelMessage` becomes Responses API input items, and the raw
+response becomes a `ModelResponse`. Adding Anthropic or Bedrock means writing one
+subclass; the runtime and the registry do not change.
+
+Every protocol type is JSON-serialisable, which is what makes a run's conversation
+safe to persist and resume. **No provider SDK object is ever written to the
+database.**
 
 ## The agent loop
 
@@ -72,6 +108,61 @@ governance boundaries are explicit and inspectable.
 `parallel_tool_calls=False` is intentional. The loop reads only the first
 `function_call` in a response, so one call per iteration keeps the audit trail and
 the approval gate strictly ordered. Enabling parallel calls would silently drop work.
+
+## Durable runs
+
+Every request to `/agent/run` creates a **Run** with a `run_id`, and every meaningful
+step is persisted as it happens.
+
+```
+RUNNING ──────────────► COMPLETED     model produced a final answer
+   │
+   ├──────────────────► FAILED        unexpected tool error, or iteration budget spent
+   │
+   └─► WAITING_FOR_APPROVAL
+            │
+            ├─ approved ─► RUNNING ─► COMPLETED
+            └─ rejected ─► CANCELLED
+```
+
+A run stores its conversation as JSON, so it outlives the process that started it.
+
+### Approval resumes the original run
+
+Approval no longer executes a tool in isolation. Resolving an approval reloads the
+run, executes the pending tool, appends the real result to the stored conversation,
+and **re-enters the agent loop** — the model sees the tool output and writes the final
+answer. The user never resends the prompt.
+
+```
+POST /agent/run   "Investigate migration batch 43 and restart it if needed."
+
+  RUNNING              query_migration_batches  -> authoritative rows
+  WAITING_FOR_APPROVAL restart_migration        -> blocked, risk=WRITE
+
+POST /agent/approvals/{id}  {"approved": true}
+
+  RUNNING              restart_migration executed
+  COMPLETED            "Batch 43 failed because of an Oracle connection timeout.
+                        The approved restart was executed successfully."
+```
+
+Rejecting records the decision, executes nothing, and ends the run `CANCELLED`.
+
+### RunStep vs. AuditEvent
+
+Two histories with different jobs — deliberately not the same table:
+
+| | `run_steps` | `audit_events` |
+|---|---|---|
+| Question it answers | *what did the runtime do, and how do I resume?* | *what happened, for review?* |
+| Scope | one run, ordered by `step_number` | every run, newest first |
+| Consumers | resumption, the run timeline view | compliance, the audit page |
+| Includes | model responses, tool arguments and results | tool and approval events |
+
+`RunStep` records `MODEL_RESPONSE` — which the audit log does not — because replay
+needs it. Audit events carry an indexed `run_id`, so `GET /audit/events?run_id=…`
+scopes the compliance timeline to one run.
 
 ### Bounded iterations
 
@@ -148,25 +239,31 @@ POST /agent/run  {"message": "Restart migration batch 43."}
 
   -> model requests restart_migration
   -> ToolRegistry raises ApprovalRequired (risk = WRITE)
-  -> row written to pending_approvals, APPROVAL_REQUIRED audited
-  -> 200 {"answer": "Approval required before executing restart_migration.",
-          "trace": [],
-          "approval_required": {"approval_id": "...", "tool": "restart_migration",
+  -> run parks in WAITING_FOR_APPROVAL with its conversation persisted
+  -> approvals row written (PENDING, linked to run_id), APPROVAL_REQUIRED audited
+  -> 200 {"run_id": "...", "status": "WAITING_FOR_APPROVAL",
+          "answer": "Approval required before executing restart_migration.",
+          "trace": [...],
+          "approval_required": {"approval_id": "...", "run_id": "...",
+                                "tool": "restart_migration",
                                 "arguments": {"batch_id": 43}, "risk": "WRITE"}}
 
 POST /agent/approvals/{approval_id}  {"approved": true}
 
+  -> approval marked APPROVED (the row is kept, not deleted)
   -> tool executes with approved=True
-  -> APPROVAL_GRANTED + TOOL_EXECUTED audited, pending row deleted
+  -> APPROVAL_GRANTED + TOOL_EXECUTED audited against the same run_id
+  -> result appended to the stored conversation, agent loop resumes
   -> 200 {"approval_id": "...", "approved": true, "tool": "restart_migration",
-          "result": {...}}
+          "result": {...}, "run_id": "...", "run_status": "COMPLETED",
+          "answer": "<final answer from the resumed run>", "trace": [...]}
 ```
 
-Denying instead deletes the pending row, audits `APPROVAL_DENIED`, and executes
-nothing. Approvals survive a restart because they live in SQLite, not memory.
+Denying marks the approval `REJECTED`, audits `APPROVAL_DENIED`, executes nothing,
+and ends the run `CANCELLED`.
 
-Resolving an approval executes exactly the one pending call and returns its result.
-It does not re-enter the model loop, and conversation state is not persisted.
+Approvals are never deleted, so Pending / Approved / Rejected stay queryable.
+Approvals and runs both survive a restart because they live in SQLite, not memory.
 
 ## Audit logging
 
@@ -311,9 +408,11 @@ globals. The URL comes from `AGENTOPS_DATABASE_URL`, defaulting to
 
 | Table | Purpose |
 |---|---|
+| `runs` | One agent request: status, prompt, final answer, resumable conversation |
+| `run_steps` | Ordered execution history for replay and the run timeline |
+| `approvals` | Approval requests and their decisions, kept after resolution |
+| `audit_events` | Append-only compliance record, indexed by `run_id` |
 | `migration_batches` | Authoritative batch records read by `query_migration_batches` |
-| `pending_approvals` | Human-in-the-loop approvals awaiting a decision |
-| `audit_events` | Append-only record of tool and approval activity |
 
 `migration_batches` columns: `id`, `batch_id` (unique, indexed), `status` (indexed),
 `records`, `duration_seconds`, `error` (nullable), `created_at` (ISO-8601 UTC string).
@@ -337,8 +436,21 @@ uv run uvicorn app.main:app --reload    # http://127.0.0.1:8000
 curl -s localhost:8000/health
 curl -s localhost:8000/agent/run -H 'content-type: application/json' \
   -d '{"message": "Show me failed migration batches."}'
-curl -s localhost:8000/audit/events
+curl -s localhost:8000/runs
+curl -s localhost:8000/runs/<run_id>
+curl -s "localhost:8000/audit/events?run_id=<run_id>"
+curl -s localhost:8000/agent/approvals/<approval_id> \
+  -H 'content-type: application/json' -d '{"approved": true}'
 ```
+
+> **Upgrading an existing `agentops.db`.** `create_all()` creates missing tables but
+> cannot add a column to an existing one, so a database created before durable runs
+> will not have `audit_events.run_id` and audit reads will fail with
+> `no such column`. Reset it explicitly — this is not done automatically:
+>
+> ```bash
+> rm agentops.db && uv run python -m app.init_db
+> ```
 
 Point at a different database with `AGENTOPS_DATABASE_URL=sqlite:///./scratch.db`.
 
