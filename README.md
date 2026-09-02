@@ -13,6 +13,34 @@ The agent runtime is implemented directly against the OpenAI Responses API. Ther
 no LangChain, LangGraph, or LlamaIndex — the loop is deliberately hand-written so the
 governance boundaries are explicit and inspectable.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Agent page with an approval card](docs/screenshots/agent-approval.png) | ![The same run after approval](docs/screenshots/agent-completed.png) |
+| **Agent** — a WRITE action is blocked and surfaced for a human decision. | **Agent** — the same run resumed and completed after approval. |
+| ![Run detail timeline](docs/screenshots/rundetail.png) | ![Audit page](docs/screenshots/audit.png) |
+| **Run detail** — the full execution timeline across the approval pause. | **Audit** — the governed action chain, filterable by run and event. |
+| ![Overview dashboard](docs/screenshots/overview.png) | ![Tools page](docs/screenshots/tools.png) |
+| **Overview** — activity and governance posture. | **Tools** — every capability and how it is governed. |
+
+## The AgentGuard demo
+
+```
+"Investigate migration batch 43 and restart it if needed."
+
+  RUNNING                 agent queries authoritative migration data
+                          READ tool executes immediately
+  WAITING_FOR_APPROVAL    agent proposes restart_migration (WRITE)
+                          AgentGuard blocks it; approval card appears
+  [ human clicks Approve ]
+  RUNNING                 the SAME run resumes, restart executes
+  COMPLETED               "Batch 43 had failed with an Oracle connection
+                           timeout. I restarted it successfully."
+```
+
+Runs, Approvals and Audit then all show the persisted history for that `run_id`.
+
 ## Architecture
 
 ```
@@ -422,15 +450,65 @@ import. `init_database()` creates tables; seeding is opt-in via `seed=True`, and
 `seed_migration_batches()` inserts only batch IDs that are missing, so re-running it
 never duplicates or overwrites rows.
 
+## Web console
+
+`frontend/` is the AgentGuard console: React 19 + TypeScript on Vite, plain CSS, no
+UI framework and no global state library.
+
+```
+frontend/src
+  api/          types.ts mirrors the backend contracts; client.ts wraps fetch;
+                agentguard.ts is the only place the console calls the API
+  components/   Badges, ApprovalCard, Timeline, TraceList, Json, States, Layout
+  pages/        Overview, Agent, Runs, RunDetail, Approvals, Audit, Tools
+  hooks/        useAsync — loading / error / reload for every page
+```
+
+Two rules the console holds to:
+
+- **No component calls `fetch` directly.** Everything goes through
+  `src/api/agentguard.ts`, so contracts and error handling live in one place.
+- **The console never executes a tool.** Approve and Reject both post to
+  `/agent/approvals/{id}`; the backend decides and resumes the run.
+
+Errors are rendered from `ApiError` only. A 5xx body is replaced with a generic
+message and any non-`ApiError` exception renders as "Something went wrong" — a raw
+exception message never reaches the screen.
+
+| Page | Reads |
+|---|---|
+| Overview | `GET /overview` |
+| Agent | `POST /agent/run`, `POST /agent/approvals/{id}` |
+| Runs | `GET /runs`, `GET /runs/{run_id}` |
+| Approvals | `GET /approvals?status=`, `POST /agent/approvals/{id}` |
+| Audit | `GET /audit/events?run_id=&event_type=` |
+| Tools | `GET /tools` |
+
 ## Running locally
+
+Two terminals.
+
+**Terminal 1 — API**
 
 ```bash
 uv sync
-
 export OPENAI_API_KEY=sk-...            # only needed for real model calls
 uv run python -m app.init_db            # create tables + seed 24 demo batches
 uv run uvicorn app.main:app --reload    # http://127.0.0.1:8000
 ```
+
+**Terminal 2 — console**
+
+```bash
+cd frontend
+npm install
+npm run dev                             # http://localhost:5173
+```
+
+The API allows CORS from `http://localhost:5173` and `http://127.0.0.1:5173` only —
+never a wildcard. Point the console elsewhere with `VITE_API_BASE_URL`
+(see `frontend/.env.example`); in production both are served from one origin and the
+CORS list is unused.
 
 ```bash
 curl -s localhost:8000/health
@@ -461,6 +539,17 @@ uv run pytest -v          # deterministic; never calls OpenAI
 uv run ruff format .
 uv run ruff check .
 ```
+
+```bash
+cd frontend
+npm run test              # vitest; the API module is mocked
+npm run typecheck
+npm run lint
+npm run format:check
+npm run build
+```
+
+Frontend tests mock `src/api/agentguard.ts`, so no test reaches the network.
 
 Tests never touch `./agentops.db`. A `database` fixture builds a fresh SQLite file
 under pytest's `tmp_path` for each test, and tests seed their own data explicitly.

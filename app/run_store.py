@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.database import Database, get_database
 from app.db_models import RunRecord, RunStepRecord
@@ -122,6 +122,23 @@ class RunStore:
             )
 
             return [run_to_dict(record) for record in session.scalars(statement)]
+
+    def status_counts(self) -> dict[str, int]:
+        statement = select(RunRecord.status, func.count(RunRecord.run_id)).group_by(
+            RunRecord.status
+        )
+
+        with self._database.session() as session:
+            return dict(session.execute(statement).all())
+
+    def count_created_on(self, day: str) -> int:
+        """Runs created on an ISO date (YYYY-MM-DD), matched on the ISO prefix."""
+        statement = select(func.count(RunRecord.run_id)).where(
+            RunRecord.created_at.startswith(day)
+        )
+
+        with self._database.session() as session:
+            return session.scalar(statement) or 0
 
     def list_stale_running(
         self,

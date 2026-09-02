@@ -74,7 +74,7 @@ represented in the code today. What follows, and the seams to leave open:
 
 ## Commands
 
-Everything runs through `uv`; the project targets Python 3.13.
+Backend runs through `uv` (Python 3.13); the console through `npm` in `frontend/`.
 
 ```bash
 uv sync                                    # install deps (incl. dev group)
@@ -85,6 +85,13 @@ uv run pytest                              # full suite
 uv run pytest tests/test_agent.py::test_agent_blocks_write_tool_without_approval
 uv run ruff check .                        # lint  (ruff is a dev dep; no config = defaults)
 uv run ruff format .                       # format
+```
+
+```bash
+cd frontend && npm install
+npm run dev                                # console on :5173 (API must be on :8000)
+npm run test                               # vitest; API module is mocked
+npm run typecheck && npm run lint && npm run build
 ```
 
 `OPENAI_API_KEY` is needed only for real model calls. Tests inject fakes, and
@@ -268,6 +275,29 @@ The pattern to follow instead (see `app/migration_store.py` + `app/tool_setup.py
 `tests/test_migration_tool.py::test_tool_schema_exposes_no_sql_surface` enforces this
 generically: it rejects any free-text string argument on the tool. New database tools
 should be covered by a similar assertion.
+
+### Console architecture
+
+`frontend/` is React 19 + TypeScript on Vite, plain CSS, react-router. No UI kit, no
+global state library — don't add either without a concrete reason.
+
+- **`src/api/agentguard.ts` is the only place the console calls the backend.** No
+  component calls `fetch`. `src/api/types.ts` mirrors `app/models.py` by hand; a
+  drift shows up as a typecheck failure.
+- **The console never executes a tool.** Approve/Reject post to
+  `/agent/approvals/{id}` and the backend decides. Never add a client-side path that
+  reaches a tool directly — that would put execution authority in the browser.
+- **Only `ApiError` messages reach the screen.** `client.ts` replaces 5xx bodies with
+  a generic line, and `ErrorState` renders anything that is not an `ApiError` as a
+  generic message. Never surface a raw exception or a server body to a user.
+- **`GET /tools` exposes governance metadata; `definitions()` does not.**
+  `ToolRegistry.describe()` includes `risk` for the console;
+  `ToolRegistry.definitions()` deliberately omits it, because the model must not be
+  told how a tool is governed. Keep those two methods distinct.
+- **CORS is an explicit local-dev origin list**, never a wildcard. Production serves
+  console and API from one origin.
+- **Tone classes are shared** between badges and other elements; a badge tone carries
+  a pill background, so bare-text usages must clear it (see `.stat-value.tone-*`).
 
 ## Gotchas
 

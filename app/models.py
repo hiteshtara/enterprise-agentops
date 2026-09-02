@@ -101,3 +101,23 @@ class ReconciledRun(BaseModel):
 class ReconcileResponse(BaseModel):
     reconciled: list[ReconciledRun] = []
     count: int
+
+
+class ToolSummary(BaseModel):
+    name: str
+    description: str
+    risk: str
+    parameters: dict[str, Any]
+
+
+class Overview(BaseModel):
+    runs_today: int
+    runs_total: int
+    runs_by_status: dict[str, int]
+    approvals_by_status: dict[str, int]
+    pending_approvals: int
+    tool_executions: int
+    tool_failures: int
+    events_by_type: dict[str, int]
+    recent_runs: list[RunSummary] = []
+    recent_events: list[AuditEvent] = []

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent import AgentService
 from app.approval_store import ApprovalStore
@@ -13,10 +14,13 @@ from app.models import (
     ApprovalResponse,
     ApprovalSummary,
     AuditEvent,
+    Overview,
     ReconcileResponse,
     RunDetail,
     RunSummary,
+    ToolSummary,
 )
+from app.overview import OverviewService
 from app.reconciliation import (
     DEFAULT_STALE_AFTER_SECONDS,
     MAX_STALE_AFTER_SECONDS,
@@ -27,6 +31,22 @@ from app.run_store import RunStore
 from app.tool_setup import build_tool_registry
 
 app = FastAPI(title="AgentGuard")
+
+# Local development only: the Vite dev server runs on a different port, so the
+# console origin is named explicitly. Never a wildcard. In production the
+# console and API are served from one origin and this list is not used.
+LOCAL_CONSOLE_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=LOCAL_CONSOLE_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 database = Database()
 
@@ -41,6 +61,12 @@ tool_registry = build_tool_registry(migration_store=migration_store)
 
 reconciliation = ReconciliationService(
     run_store=run_store,
+    audit_store=audit_store,
+)
+
+overview_service = OverviewService(
+    run_store=run_store,
+    approval_store=approval_store,
     audit_store=audit_store,
 )
 
@@ -91,6 +117,23 @@ def resolve_approval(
         ) from exc
 
     return ApprovalResponse(**result)
+
+
+@app.get(
+    "/overview",
+    response_model=Overview,
+)
+def get_overview() -> Overview:
+    return Overview(**overview_service.build())
+
+
+@app.get(
+    "/tools",
+    response_model=list[ToolSummary],
+)
+def list_tools() -> list[ToolSummary]:
+    """Registered tools and their governance metadata. No callables."""
+    return [ToolSummary(**tool) for tool in tool_registry.describe()]
 
 
 @app.get(
@@ -180,7 +223,13 @@ def get_run(
 )
 def get_audit_events(
     run_id: str | None = Query(default=None),
+    event_type: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> list[AuditEvent]:
-    events = audit_store.list_events(run_id=run_id)
+    events = audit_store.list_events(
+        run_id=run_id,
+        event_type=event_type,
+        limit=limit,
+    )
 
     return [AuditEvent(**event) for event in events]

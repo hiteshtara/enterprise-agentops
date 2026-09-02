@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.database import Database, get_database
 from app.db_models import AuditEventRecord
@@ -33,6 +33,8 @@ class AuditStore:
     def list_events(
         self,
         run_id: str | None = None,
+        event_type: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Newest first. Pass run_id to scope the timeline to a single run."""
         statement = select(AuditEventRecord)
@@ -40,7 +42,13 @@ class AuditStore:
         if run_id is not None:
             statement = statement.where(AuditEventRecord.run_id == run_id)
 
+        if event_type is not None:
+            statement = statement.where(AuditEventRecord.event_type == event_type)
+
         statement = statement.order_by(AuditEventRecord.id.desc())
+
+        if limit is not None:
+            statement = statement.limit(limit)
 
         with self._database.session() as session:
             events = session.scalars(statement).all()
@@ -55,3 +63,12 @@ class AuditStore:
                 }
                 for event in events
             ]
+
+    def count_by_type(self) -> dict[str, int]:
+        statement = select(
+            AuditEventRecord.event_type,
+            func.count(AuditEventRecord.id),
+        ).group_by(AuditEventRecord.event_type)
+
+        with self._database.session() as session:
+            return dict(session.execute(statement).all())

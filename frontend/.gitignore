@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+coverage/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

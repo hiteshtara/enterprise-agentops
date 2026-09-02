@@ -11,6 +11,11 @@ wheels/
 .venv/
 venv/
 
+# Frontend
+node_modules/
+frontend/dist/
+.playwright-mcp/
+
 # Tooling caches
 .pytest_cache/
 .ruff_cache/

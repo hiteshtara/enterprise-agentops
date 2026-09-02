@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.database import Database, get_database
 from app.db_models import ApprovalRecord
@@ -145,6 +145,15 @@ class ApprovalStore:
             session.refresh(approval)
 
             return approval
+
+    def count_by_status(self) -> dict[str, int]:
+        statement = select(
+            ApprovalRecord.status,
+            func.count(ApprovalRecord.approval_id),
+        ).group_by(ApprovalRecord.status)
+
+        with self._database.session() as session:
+            return dict(session.execute(statement).all())
 
     def list_approvals(
         self,

@@ -84,3 +84,22 @@ class ToolRegistry:
         name: str,
     ) -> Tool | None:
         return self._tools.get(name)
+
+    def describe(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Operator-facing metadata for the console.
+
+        Includes the risk tier, which definitions() deliberately omits -- the
+        model has no business knowing how a tool is governed. Metadata only:
+        the callable itself is never exposed.
+        """
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "risk": tool.risk.value,
+                "parameters": tool.parameters,
+            }
+            for tool in self._tools.values()
+        ]
