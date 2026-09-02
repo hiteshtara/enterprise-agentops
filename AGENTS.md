@@ -48,15 +48,17 @@ main.py            wiring + routes only; tools come from app/tool_setup.py
        │    raises ApprovalRequired if risk != READ and not approved
        ├─ audit: TOOL_EXECUTED  →  append to trace
        ├─ serialise_tool_result(result) → JSON back to the model
-       └─ loop until the model returns no function_call
+       └─ loop until the model returns no function_call, an approval is
+          required, a tool fails unexpectedly, or max_iterations is hit
 ```
 
 Key structural facts that are not obvious from any single file:
 
-- **The agent loop is single-threaded and synchronous by design.**
+- **The agent loop is single-threaded, synchronous, and bounded.**
   `parallel_tool_calls=False` means `AgentService.run` only ever looks for the
   *first* `function_call` in `response.output`. Enabling parallel tool calls would
-  silently drop calls.
+  silently drop calls. The loop is `for _ in range(self.max_iterations)`, never
+  `while True` — see the loop-failure semantics below before changing it.
 - **Approval is an exception, not a return value.** `ToolRegistry.execute` raises
   `ApprovalRequired`; `AgentService.run` catches it, persists a
   `PendingApprovalRecord`, and returns early with `approval_required` populated and
@@ -102,11 +104,57 @@ Key structural facts that are not obvious from any single file:
   used to JSON-encode `dict` alone, which sent list-returning tools to the model as
   a Python `repr` (single quotes, `None`). Keep new tool return types JSON-safe.
 
+### Loop-failure semantics
+
+`AgentService.run` classifies every way an iteration can end. The classification is
+the contract — match it when adding behaviour.
+
+| Outcome | Audit | Loop | Returned to caller |
+|---|---|---|---|
+| Model returns no `function_call` | — | ends | the answer |
+| `ApprovalRequired` (WRITE/DANGEROUS) | `APPROVAL_REQUIRED` | ends | `approval_required` populated |
+| `ValueError` / `TypeError` from a tool | `TOOL_FAILED` | **continues** | — model retries |
+| Malformed JSON in `function_call.arguments` | `TOOL_FAILED` | **continues** | — model retries |
+| Any other exception from a tool | `AGENT_FAILED` | ends | generic message |
+| Iteration budget exhausted | `AGENT_MAX_ITERATIONS` | ends | "stopped after N iterations" |
+
+Invariants that tests enforce — don't break them silently:
+
+- **`max_iterations` bounds the number of model calls**, default
+  `DEFAULT_MAX_ITERATIONS = 10`, injected via the constructor and validated `>= 1`.
+  Every path that `continue`s a failed call still consumes an iteration, so a model
+  stuck in a correction loop terminates. No tool executes after the budget is spent.
+- **`ApprovalRequired` is not a failure.** It must never produce `TOOL_FAILED`, and
+  it is caught *before* the recoverable-error handler. It is not a `ValueError`, so
+  the ordering is defensive rather than load-bearing — keep it that way.
+- **`trace` holds successful executions only.** Failures live in the audit log. This
+  is deliberate: `ToolTrace` requires a `result`, so putting failures in the trace
+  would change the `AgentResponse` contract.
+- **Recoverable failures reach the model as `{"error": {"type", "message"}}`** built
+  by `tool_failure_output` — the exception type and `str(exc)`, never a traceback.
+- **Non-recoverable failures never reach the model at all.** The run ends and the
+  caller gets `AGENT_FAILED_ANSWER`; the exception type and message go to the audit
+  log only. The `except Exception` doing this carries a `# noqa: BLE001` and is an
+  intentional safety net, not an oversight.
+- **`RECOVERABLE_TOOL_ERRORS = (ValueError, TypeError)`.** A tool that raises
+  something else is treated as broken. Note `ToolRegistry.execute` raises
+  `ValueError` for an unknown tool name, so a hallucinated tool is recoverable and
+  the model can correct it.
+- **Model-provider exceptions are not caught.** An OpenAI outage propagates and
+  FastAPI returns 500 — an infrastructure failure, deliberately distinct from a tool
+  failure.
+
 ### Audit event types
 
-`TOOL_REQUESTED`, `TOOL_EXECUTED`, `APPROVAL_REQUIRED`, `APPROVAL_GRANTED`,
-`APPROVAL_DENIED`. These are bare strings, not an enum — grep `audit_store.record`
-before adding a new one. `GET /audit/events` returns them newest-first.
+`TOOL_REQUESTED`, `TOOL_EXECUTED`, `TOOL_FAILED`, `APPROVAL_REQUIRED`,
+`APPROVAL_GRANTED`, `APPROVAL_DENIED`, `AGENT_FAILED`, `AGENT_MAX_ITERATIONS`. These
+are bare strings, not an enum — grep `audit_store.record` before adding a new one.
+`GET /audit/events` returns them newest-first.
+
+`TOOL_REQUESTED` is written *before* execution, so a failed call has a
+`TOOL_REQUESTED` with no matching `TOOL_EXECUTED`. The one exception is malformed
+JSON arguments: parsing precedes the audit, so that path records `TOOL_FAILED` with
+`arguments: null` and no `TOOL_REQUESTED`.
 
 ### The no-arbitrary-SQL rule
 
@@ -141,10 +189,6 @@ should be covered by a similar assertion.
 - **This is a non-package project** (`[tool.uv] package = false`). There is no
   build backend and no console script; `uv sync` installs dependencies only. All
   code lives in `app/`, importable because `pythonpath = ["."]`.
-- **Tool exceptions propagate to a 500.** `AgentService.run` does not catch tool
-  failures, so a rejected status or limit surfaces as an unhandled error rather than
-  being fed back for the model to correct. The JSON-schema enum makes this unlikely
-  in practice; see the deferred-work note before relying on it.
 - **`app/tools.py` still holds the legacy in-memory `MIGRATION_BATCHES` dict** used
   by `get_migration_status`. That tool is a hardcoded lookup and is *not* backed by
   the database; `query_migration_batches` is the authoritative path. Don't confuse

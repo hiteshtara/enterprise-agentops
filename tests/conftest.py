@@ -5,6 +5,8 @@ import pytest
 from app.database import DEFAULT_DATABASE_URL, Database
 from app.migration_store import MigrationBatchStore
 from app.seed_data import seed_migration_batches
+from app.tool_registry import ToolRegistry
+from app.tool_setup import build_tool_registry
 
 
 @pytest.fixture
@@ -40,3 +42,9 @@ def seeded_database(database: Database) -> Database:
 @pytest.fixture
 def migration_store(seeded_database: Database) -> MigrationBatchStore:
     return MigrationBatchStore(database=seeded_database)
+
+
+@pytest.fixture
+def registry(migration_store: MigrationBatchStore) -> ToolRegistry:
+    """The real application tool registry, backed by the isolated database."""
+    return build_tool_registry(migration_store=migration_store)

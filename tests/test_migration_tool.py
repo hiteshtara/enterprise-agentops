@@ -13,7 +13,6 @@ from app.migration_store import (
 from app.model_provider import ModelProvider
 from app.seed_data import DEVELOPMENT_BATCHES
 from app.tool_registry import ToolRisk
-from app.tool_setup import build_tool_registry
 
 TOOL_NAME = "query_migration_batches"
 
@@ -53,11 +52,6 @@ class FakeQueryModelProvider(ModelProvider):
             output=[],
             output_text="Batches 43, 46, 49, 53 and 57 failed.",
         )
-
-
-@pytest.fixture
-def registry(migration_store):
-    return build_tool_registry(migration_store=migration_store)
 
 
 def test_tool_is_registered_as_read(registry):

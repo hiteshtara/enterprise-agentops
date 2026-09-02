@@ -57,7 +57,7 @@ governance boundaries are explicit and inspectable.
 
 ## The agent loop
 
-`AgentService.run` is a synchronous loop, one tool call per iteration:
+`AgentService.run` is a synchronous, **bounded** loop — one tool call per iteration:
 
 1. Send the conversation plus `tool_registry.schemas()` to the model.
 2. If the response contains no `function_call`, return the answer, the execution
@@ -72,6 +72,55 @@ governance boundaries are explicit and inspectable.
 `parallel_tool_calls=False` is intentional. The loop reads only the first
 `function_call` in a response, so one call per iteration keeps the audit trail and
 the approval gate strictly ordered. Enabling parallel calls would silently drop work.
+
+### Bounded iterations
+
+The loop runs at most `max_iterations` times (default **10**, injected through the
+`AgentService` constructor). A model that never stops requesting tools cannot spin
+indefinitely or burn unbounded tokens: when the budget is spent the agent executes no
+further tool, audits `AGENT_MAX_ITERATIONS`, and returns a controlled answer saying it
+stopped. Every failed-and-retried call consumes an iteration too, so even a model
+stuck in a correction loop terminates.
+
+### Tool self-correction
+
+When a tool rejects the model's arguments — an invalid status, a limit outside
+`[1, 100]`, a hallucinated tool name, malformed JSON — that is a bad request, not a
+broken system. The agent audits `TOOL_FAILED` and hands the model a structured
+result:
+
+```json
+{"error": {"type": "ValueError",
+           "message": "Unsupported status: 'BROKEN'. Allowed values: SUCCESS, FAILED, RUNNING, PENDING."}}
+```
+
+The model gets another iteration to correct itself, and normally does:
+
+```
+iteration 1   query_migration_batches {"status": "BROKEN"}   -> TOOL_FAILED
+iteration 2   query_migration_batches {"status": "FAILED"}   -> TOOL_EXECUTED
+iteration 3   final answer
+```
+
+Only the error type and message cross that boundary — never a traceback. A tool
+failure is a normal outcome and returns HTTP 200, not a 500.
+
+### Failure auditing
+
+Every outcome is recorded, so a run can be reconstructed from the audit log alone:
+
+| Outcome | Audit event | Loop |
+|---|---|---|
+| Tool rejected the arguments | `TOOL_FAILED` | continues; model retries |
+| Tool raised something unexpected | `AGENT_FAILED` | ends safely |
+| Iteration budget exhausted | `AGENT_MAX_ITERATIONS` | ends |
+| Approval needed | `APPROVAL_REQUIRED` | ends; waits for a human |
+
+An unexpected exception (a dead connection pool, a bug) is *not* retried — retrying
+cannot help. The run ends, the exception type and message go to the audit log, and
+the caller gets a generic message with no internal detail. The execution trace
+carries successful executions only; failures live in the audit log, which keeps the
+`AgentResponse` contract unchanged.
 
 ## Tool registry and risk governance
 
@@ -122,9 +171,10 @@ It does not re-enter the model loop, and conversation state is not persisted.
 ## Audit logging
 
 Every tool request and every approval decision is appended to `audit_events`:
-`TOOL_REQUESTED`, `TOOL_EXECUTED`, `APPROVAL_REQUIRED`, `APPROVAL_GRANTED`,
-`APPROVAL_DENIED`. `GET /audit/events` returns them newest first. There is exactly
-one audit mechanism; nothing writes an audit record outside `AuditStore`.
+`TOOL_REQUESTED`, `TOOL_EXECUTED`, `TOOL_FAILED`, `APPROVAL_REQUIRED`,
+`APPROVAL_GRANTED`, `APPROVAL_DENIED`, `AGENT_FAILED`, `AGENT_MAX_ITERATIONS`.
+`GET /audit/events` returns them newest first. There is exactly one audit mechanism;
+nothing writes an audit record outside `AuditStore`.
 
 A database query produces both a `TOOL_REQUESTED` record (with the exact arguments
 the model chose) and a `TOOL_EXECUTED` record (with the rows returned), so any answer
