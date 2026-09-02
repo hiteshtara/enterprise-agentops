@@ -4,10 +4,18 @@ from openai import OpenAI
 
 
 class ModelProvider(ABC):
+
     @abstractmethod
     def generate(self, message: str) -> str:
         pass
 
+    @abstractmethod
+    def generate_with_tools(
+        self,
+        input_items,
+        tools,
+    ):
+        pass
 
 class OpenAIModelProvider(ModelProvider):
     def __init__(self) -> None:
