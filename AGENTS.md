@@ -4,17 +4,73 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-`enterprise-agentops` is a FastAPI service that wraps an LLM tool-calling agent with
-two governance layers that a plain agent loop does not have:
+**AgentGuard** is the product. `enterprise-agentops` is the repository name and does
+not change.
+
+AgentGuard is a model-independent control plane that sits between an LLM agent and
+real enterprise systems — *give AI agents access to real business systems without
+giving them uncontrolled power*. The model reasons and **proposes** actions;
+AgentGuard decides whether they may actually execute, and records what happened.
+
+Implemented today, that is two governance layers a plain agent loop does not have:
 
 1. **Risk-gated tool execution** — every tool is registered with a `ToolRisk`
    (`READ` / `WRITE` / `DANGEROUS`). Anything above `READ` cannot execute until a
    human approves it out-of-band.
-2. **Durable audit trail** — every tool request, execution, and approval decision is
-   written to SQLite so the run can be reconstructed after the fact.
+2. **Durable audit trail** — every tool request, execution, failure, and approval
+   decision is written to SQLite so a run can be reconstructed after the fact.
 
-The migration-batch tools are a demo domain (an Oracle data migration that fails on
-batch 43); the interesting code is the governance plumbing around them.
+The migration-batch tools are a **demo domain** (an Oracle migration failing on batch
+43), not the product. Keep the runtime generic: `AgentService`, `ToolRegistry`, and
+the stores must never know that migrations exist.
+
+## Durable principles
+
+These outlive any single milestone. Breaking one is an explicit decision, not a
+drive-by refactor.
+
+1. **Model intent is never authorization.** The model may *propose*
+   `restart_service(service="payments")`. Whether that tool exists, whether the
+   arguments are valid, who may call it, its risk tier, whether approval is required,
+   and how it is audited are decided by AgentGuard — never inferred from the fact
+   that the model asked.
+2. **Never execute LLM-authored SQL**, or any other general-purpose execution
+   surface. See [the no-arbitrary-SQL rule](#the-no-arbitrary-sql-rule).
+3. **Validate tool arguments deterministically**, in Python — in the schema the model
+   sees *and* again at execution time, from shared constants.
+4. **Sensitive actions require human approval**, and the tool must not run before the
+   decision is recorded.
+5. **Every meaningful event is auditable** through the single `AuditStore`. Never add
+   a second audit mechanism.
+6. **Never expose stack traces** to the model or the API client.
+7. **Tools receive the minimum authority necessary.** Prefer a narrow, typed,
+   constrained tool over a general-purpose one.
+8. **No secrets in source control. No development database in tests. No import-time
+   side effects** in providers, stores, or seeding.
+9. **Stay model-independent.** OpenAI is the first `ModelProvider`, not the design.
+   Nothing OpenAI-specific belongs in `AgentService`; the loop consumes only the
+   duck-typed `.output` / `.output_text` shape.
+
+## Roadmap direction
+
+Runtime foundation, governance, safe enterprise data access, and loop resilience are
+represented in the code today. What follows, and the seams to leave open:
+
+- **Web console** is the next product surface. The HTTP API is the contract it will
+  consume, so treat response shapes as public.
+- **Durable runs** (`Run` / `RunStep` / `ToolExecution`) will replace today's
+  stateless request, with statuses like `RUNNING` / `WAITING_FOR_APPROVAL` /
+  `COMPLETED` / `FAILED`. Approval will eventually **resume the original run** rather
+  than execute one tool and return its raw result — so the current shape of
+  `AgentService.resolve_approval` is provisional, not a contract to defend.
+- **Policy engine.** `ToolRisk` is deliberately the *first* policy model, not the
+  last; it grows into contextual policy (arguments, user, role, amount, environment,
+  prior evidence). Keep that decision inside the `ToolRegistry.execute` gate rather
+  than scattering risk checks into tools, routes, or the agent loop.
+- **AuthN/RBAC, connectors (GitHub / AWS / REST / MCP), observability, evaluation,
+  PostgreSQL + Alembic, AWS deployment** come later. Don't pre-build them — but don't
+  foreclose them either. Concretely: avoid hard-coding single-user, single-agent, or
+  SQLite-only assumptions, and keep `Database` the only place a URL is resolved.
 
 ## Commands
 
