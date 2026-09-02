@@ -1,13 +1,17 @@
 import json
 
 from app.model_provider import OpenAIModelProvider
-from app.tools import calculator, get_migration_status
+from app.tool_registry import ToolRegistry
 
 
 class AgentService:
-
-    def __init__(self, model: OpenAIModelProvider) -> None:
+    def __init__(
+        self,
+        model: OpenAIModelProvider,
+        tool_registry: ToolRegistry,
+    ) -> None:
         self.model = model
+        self.tool_registry = tool_registry
 
     def run(self, message: str) -> tuple[str, list[dict]]:
         input_items = [
@@ -20,7 +24,10 @@ class AgentService:
         trace = []
 
         while True:
-            response = self.model.generate_with_tools(input_items)
+            response = self.model.generate_with_tools(
+                input_items,
+                self.tool_registry.schemas(),
+            )
 
             function_call = None
 
@@ -34,22 +41,10 @@ class AgentService:
 
             arguments = json.loads(function_call.arguments)
 
-            if function_call.name == "calculator":
-                result = calculator(
-                    a=arguments["a"],
-                    b=arguments["b"],
-                    operation=arguments["operation"],
-                )
-
-            elif function_call.name == "get_migration_status":
-                result = get_migration_status(
-                    batch_id=arguments["batch_id"],
-                )
-
-            else:
-                raise ValueError(
-                    f"Unknown tool: {function_call.name}"
-                )
+            result = self.tool_registry.execute(
+                function_call.name,
+                arguments,
+            )
 
             trace.append(
                 {
