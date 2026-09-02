@@ -11,9 +11,17 @@ from app.models import (
     AgentResponse,
     ApprovalDecision,
     ApprovalResponse,
+    ApprovalSummary,
     AuditEvent,
+    ReconcileResponse,
     RunDetail,
     RunSummary,
+)
+from app.reconciliation import (
+    DEFAULT_STALE_AFTER_SECONDS,
+    MAX_STALE_AFTER_SECONDS,
+    MIN_STALE_AFTER_SECONDS,
+    ReconciliationService,
 )
 from app.run_store import RunStore
 from app.tool_setup import build_tool_registry
@@ -30,6 +38,11 @@ run_store = RunStore(database=database)
 migration_store = MigrationBatchStore(database=database)
 
 tool_registry = build_tool_registry(migration_store=migration_store)
+
+reconciliation = ReconciliationService(
+    run_store=run_store,
+    audit_store=audit_store,
+)
 
 agent = AgentService(
     model=model_provider,
@@ -78,6 +91,51 @@ def resolve_approval(
         ) from exc
 
     return ApprovalResponse(**result)
+
+
+@app.get(
+    "/approvals",
+    response_model=list[ApprovalSummary],
+)
+def list_approvals(
+    status: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[ApprovalSummary]:
+    try:
+        approvals = approval_store.list_approvals(
+            status=status,
+            run_id=run_id,
+            limit=limit,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return [ApprovalSummary(**approval) for approval in approvals]
+
+
+@app.post(
+    "/runs/reconcile",
+    response_model=ReconcileResponse,
+)
+def reconcile_runs(
+    stale_after_seconds: int = Query(
+        default=DEFAULT_STALE_AFTER_SECONDS,
+        ge=MIN_STALE_AFTER_SECONDS,
+        le=MAX_STALE_AFTER_SECONDS,
+    ),
+) -> ReconcileResponse:
+    """Mark RUNNING runs abandoned by a crashed process as FAILED."""
+    service = ReconciliationService(
+        run_store=run_store,
+        audit_store=audit_store,
+        stale_after_seconds=stale_after_seconds,
+    )
+
+    reconciled = service.reconcile()
+
+    return ReconcileResponse(reconciled=reconciled, count=len(reconciled))
 
 
 @app.get(

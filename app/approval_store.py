@@ -22,6 +22,47 @@ class ApprovalStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+ALLOWED_STATUSES: tuple[str, ...] = tuple(status.value for status in ApprovalStatus)
+
+DEFAULT_LIMIT = 20
+
+MIN_LIMIT = 1
+
+MAX_LIMIT = 100
+
+
+def validate_status(status: str | None) -> str | None:
+    """Return the status unchanged, or raise if it is not an allowed value."""
+    if status is None:
+        return None
+
+    if status not in ALLOWED_STATUSES:
+        raise ValueError(
+            f"Unsupported approval status: {status!r}. "
+            f"Allowed values: {', '.join(ALLOWED_STATUSES)}."
+        )
+
+    return status
+
+
+def validate_limit(limit: int) -> int:
+    """Return the limit unchanged, or raise if it is not a valid limit.
+
+    Raises:
+        TypeError: If limit is not an integer.
+        ValueError: If limit is outside [MIN_LIMIT, MAX_LIMIT].
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError(f"limit must be an integer, got {type(limit).__name__}.")
+
+    if limit < MIN_LIMIT or limit > MAX_LIMIT:
+        raise ValueError(
+            f"limit must be between {MIN_LIMIT} and {MAX_LIMIT}, got {limit}."
+        )
+
+    return limit
+
+
 def approval_to_dict(record: ApprovalRecord) -> dict[str, Any]:
     return {
         "approval_id": record.approval_id,
@@ -109,16 +150,27 @@ class ApprovalStore:
         self,
         status: str | None = None,
         run_id: str | None = None,
+        limit: int = DEFAULT_LIMIT,
     ) -> list[dict[str, Any]]:
+        """Durable approval history, newest first.
+
+        Raises:
+            ValueError: If status is not an allowed value, or limit is out of range.
+        """
+        validated_status = validate_status(status)
+        validated_limit = validate_limit(limit)
+
         statement = select(ApprovalRecord)
 
-        if status is not None:
-            statement = statement.where(ApprovalRecord.status == status)
+        if validated_status is not None:
+            statement = statement.where(ApprovalRecord.status == validated_status)
 
         if run_id is not None:
             statement = statement.where(ApprovalRecord.run_id == run_id)
 
-        statement = statement.order_by(ApprovalRecord.created_at.desc())
+        statement = statement.order_by(ApprovalRecord.created_at.desc()).limit(
+            validated_limit
+        )
 
         with self._database.session() as session:
             return [approval_to_dict(record) for record in session.scalars(statement)]

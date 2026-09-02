@@ -77,3 +77,27 @@ class RunSummary(BaseModel):
 
 class RunDetail(RunSummary):
     steps: list[RunStep] = []
+
+
+class ApprovalSummary(BaseModel):
+    approval_id: str
+    run_id: str
+    tool: str
+    arguments: dict[str, Any]
+    risk: str
+    status: str
+    created_at: str
+    resolved_at: str | None = None
+    decision: str | None = None
+
+
+class ReconciledRun(BaseModel):
+    run_id: str
+    previous_status: str
+    status: str
+    reason: str
+
+
+class ReconcileResponse(BaseModel):
+    reconciled: list[ReconciledRun] = []
+    count: int

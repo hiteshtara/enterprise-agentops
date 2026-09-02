@@ -37,6 +37,7 @@ class StepType(str, Enum):
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     APPROVAL_GRANTED = "APPROVAL_GRANTED"
     APPROVAL_DENIED = "APPROVAL_DENIED"
+    RUN_RECONCILED = "RUN_RECONCILED"
 
 
 def now() -> str:
@@ -121,6 +122,25 @@ class RunStore:
             )
 
             return [run_to_dict(record) for record in session.scalars(statement)]
+
+    def list_stale_running(
+        self,
+        cutoff: str,
+    ) -> list[str]:
+        """Run IDs still RUNNING whose updated_at is older than an ISO cutoff.
+
+        Only RUNNING is considered. A run parked in WAITING_FOR_APPROVAL is
+        waiting on a human, not stalled, however long it has been.
+        """
+        statement = (
+            select(RunRecord.run_id)
+            .where(RunRecord.status == RunStatus.RUNNING.value)
+            .where(RunRecord.updated_at < cutoff)
+            .order_by(RunRecord.updated_at)
+        )
+
+        with self._database.session() as session:
+            return list(session.scalars(statement))
 
     def save_conversation(
         self,
