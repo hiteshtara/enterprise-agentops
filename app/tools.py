@@ -1,4 +1,8 @@
-def calculator(a: float, b: float, operation: str) -> float:
+def calculator(
+    a: float,
+    b: float,
+    operation: str,
+) -> float:
     if operation == "add":
         return a + b
 
@@ -11,6 +15,7 @@ def calculator(a: float, b: float, operation: str) -> float:
     if operation == "divide":
         if b == 0:
             raise ValueError("Cannot divide by zero")
+
         return a / b
 
     raise ValueError(f"Unsupported operation: {operation}")
@@ -44,7 +49,9 @@ MIGRATION_BATCHES = {
 }
 
 
-def get_migration_status(batch_id: int) -> dict:
+def get_migration_status(
+    batch_id: int,
+) -> dict:
     if batch_id not in MIGRATION_BATCHES:
         return {
             "batch_id": batch_id,
@@ -54,4 +61,13 @@ def get_migration_status(batch_id: int) -> dict:
     return {
         "batch_id": batch_id,
         **MIGRATION_BATCHES[batch_id],
+    }
+
+
+def restart_migration(
+    batch_id: int,
+) -> dict:
+    return {
+        "batch_id": batch_id,
+        "status": "RESTARTED",
     }

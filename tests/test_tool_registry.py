@@ -1,5 +1,16 @@
-from app.tool_registry import Tool, ToolRegistry
-from app.tools import calculator, get_migration_status
+import pytest
+
+from app.tool_registry import (
+    ApprovalRequired,
+    Tool,
+    ToolRegistry,
+    ToolRisk,
+)
+from app.tools import (
+    calculator,
+    get_migration_status,
+    restart_migration,
+)
 
 
 def test_calculator_tool():
@@ -48,3 +59,49 @@ def test_migration_status_tool():
     assert result["status"] == "FAILED"
     assert result["records"] == 495
     assert result["error"] == "Oracle connection timeout"
+
+
+def test_write_tool_requires_approval():
+    registry = ToolRegistry()
+
+    registry.register(
+        Tool(
+            name="restart_migration",
+            description="Restart migration.",
+            function=restart_migration,
+            parameters={},
+            risk=ToolRisk.WRITE,
+        )
+    )
+
+    with pytest.raises(ApprovalRequired):
+        registry.execute(
+            "restart_migration",
+            {
+                "batch_id": 43,
+            },
+        )
+
+
+def test_write_tool_executes_when_approved():
+    registry = ToolRegistry()
+
+    registry.register(
+        Tool(
+            name="restart_migration",
+            description="Restart migration.",
+            function=restart_migration,
+            parameters={},
+            risk=ToolRisk.WRITE,
+        )
+    )
+
+    result = registry.execute(
+        "restart_migration",
+        {
+            "batch_id": 43,
+        },
+        approved=True,
+    )
+
+    assert result["status"] == "RESTARTED"

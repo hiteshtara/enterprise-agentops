@@ -8,3 +8,27 @@ wheels/
 
 # Virtual environments
 .venv
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime database artifacts
+agentops.db
+agentops.db-shm
+agentops.db-wal
+*.sqlite
+*.sqlite3
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

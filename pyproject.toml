@@ -1,7 +1,7 @@
 [project]
 name = "enterprise-agentops"
 version = "0.1.0"
-description = "Add your description here"
+description = "Enterprise AgentOps: a governed LLM agent runtime with risk-tiered tools, human approval, and audit logging."
 readme = "README.md"
 authors = [
     { name = "hitesh", email = "mukadder@bu.edu" }
@@ -11,17 +11,18 @@ dependencies = [
     "fastapi>=0.141.1",
     "openai>=3.6.0",
     "pydantic>=2.13.5",
+    "sqlalchemy>=2.0.52",
     "uvicorn>=0.52.4",
 ]
+
+# This is a deployable application, not a distributable library, so uv installs
+# the dependencies without building the project itself.
+[tool.uv]
+package = false
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-[project.scripts]
-enterprise-agentops = "enterprise_agentops:main"
-
-[build-system]
-requires = ["uv_build>=0.12.8,<0.13.0"]
-build-backend = "uv_build"
 
 [dependency-groups]
 dev = [

@@ -1,6 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
+
+
+class ToolRisk(str, Enum):
+    READ = "READ"
+    WRITE = "WRITE"
+    DANGEROUS = "DANGEROUS"
 
 
 @dataclass
@@ -9,6 +16,7 @@ class Tool:
     description: str
     function: Callable[..., Any]
     parameters: dict[str, Any]
+    risk: ToolRisk = ToolRisk.READ
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -19,26 +27,51 @@ class Tool:
         }
 
 
+class ApprovalRequired(Exception):
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        risk: ToolRisk,
+    ) -> None:
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.risk = risk
+
+        super().__init__(f"Approval required for {tool_name}")
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool) -> None:
+    def register(
+        self,
+        tool: Tool,
+    ) -> None:
         self._tools[tool.name] = tool
 
     def execute(
         self,
         name: str,
         arguments: dict[str, Any],
+        approved: bool = False,
     ) -> Any:
         if name not in self._tools:
             raise ValueError(f"Unknown tool: {name}")
 
         tool = self._tools[name]
+
+        if tool.risk != ToolRisk.READ and not approved:
+            raise ApprovalRequired(
+                tool_name=name,
+                arguments=arguments,
+                risk=tool.risk,
+            )
+
         return tool.function(**arguments)
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [
-            tool.schema()
-            for tool in self._tools.values()
-        ]
+    def schemas(
+        self,
+    ) -> list[dict[str, Any]]:
+        return [tool.schema() for tool in self._tools.values()]
