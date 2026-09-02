@@ -63,3 +63,38 @@ class AuditEventRecord(Base):
         nullable=False,
         default=lambda: datetime.now(UTC).isoformat(),
     )
+
+
+class MigrationBatchRecord(Base):
+    __tablename__ = "migration_batches"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    batch_id: Mapped[int] = mapped_column(
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        index=True,
+    )
+
+    records: Mapped[int] = mapped_column(nullable=False)
+
+    duration_seconds: Mapped[int] = mapped_column(nullable=False)
+
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+    )

@@ -10,6 +10,20 @@ from app.tool_registry import (
 )
 
 
+def serialise_tool_result(result: Any) -> str:
+    """Render a tool result as JSON for the model.
+
+    Any JSON-serialisable result -- including lists of rows -- is encoded as
+    JSON so the model receives well-formed data rather than a Python repr.
+    Anything else falls back to str().
+    """
+    try:
+        return json.dumps(result)
+
+    except (TypeError, ValueError):
+        return str(result)
+
+
 class AgentService:
     def __init__(
         self,
@@ -119,10 +133,7 @@ class AgentService:
                 }
             )
 
-            if isinstance(result, dict):
-                tool_output = json.dumps(result)
-            else:
-                tool_output = str(result)
+            tool_output = serialise_tool_result(result)
 
             input_items.extend(
                 [

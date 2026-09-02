@@ -4,9 +4,8 @@ from app.agent import AgentService
 from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
 from app.database import Database
-from app.model_provider import (
-    OpenAIModelProvider,
-)
+from app.migration_store import MigrationBatchStore
+from app.model_provider import OpenAIModelProvider
 from app.models import (
     AgentRequest,
     AgentResponse,
@@ -14,97 +13,19 @@ from app.models import (
     ApprovalResponse,
     AuditEvent,
 )
-from app.tool_registry import (
-    Tool,
-    ToolRegistry,
-    ToolRisk,
-)
-from app.tools import (
-    calculator,
-    get_migration_status,
-    restart_migration,
-)
+from app.tool_setup import build_tool_registry
 
 app = FastAPI(title="Enterprise AgentOps")
 
-model_provider = OpenAIModelProvider()
-
 database = Database()
 
-tool_registry = ToolRegistry()
+model_provider = OpenAIModelProvider()
+
 approval_store = ApprovalStore(database=database)
 audit_store = AuditStore(database=database)
+migration_store = MigrationBatchStore(database=database)
 
-
-tool_registry.register(
-    Tool(
-        name="calculator",
-        description=("Perform a basic arithmetic operation."),
-        function=calculator,
-        risk=ToolRisk.READ,
-        parameters={
-            "type": "object",
-            "properties": {
-                "a": {"type": "number"},
-                "b": {"type": "number"},
-                "operation": {
-                    "type": "string",
-                    "enum": [
-                        "add",
-                        "subtract",
-                        "multiply",
-                        "divide",
-                    ],
-                },
-            },
-            "required": [
-                "a",
-                "b",
-                "operation",
-            ],
-            "additionalProperties": False,
-        },
-    )
-)
-
-
-tool_registry.register(
-    Tool(
-        name="get_migration_status",
-        description=(
-            "Get the actual migration status and error details for a specific batch ID."
-        ),
-        function=get_migration_status,
-        risk=ToolRisk.READ,
-        parameters={
-            "type": "object",
-            "properties": {
-                "batch_id": {"type": "integer"},
-            },
-            "required": ["batch_id"],
-            "additionalProperties": False,
-        },
-    )
-)
-
-
-tool_registry.register(
-    Tool(
-        name="restart_migration",
-        description=("Restart a failed migration batch."),
-        function=restart_migration,
-        risk=ToolRisk.WRITE,
-        parameters={
-            "type": "object",
-            "properties": {
-                "batch_id": {"type": "integer"},
-            },
-            "required": ["batch_id"],
-            "additionalProperties": False,
-        },
-    )
-)
-
+tool_registry = build_tool_registry(migration_store=migration_store)
 
 agent = AgentService(
     model=model_provider,
