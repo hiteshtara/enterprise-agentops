@@ -499,3 +499,174 @@ class HistoricalReplyExampleRecord(Base):
             return []
 
         return value if isinstance(value, list) else []
+
+
+class HospitalityKnowledgeRecord(Base):
+    """One piece of Priyanka Homes operational knowledge.
+
+    Distillation may *propose* these; only a human may approve one. That
+    asymmetry is the whole point of the table: historical frequency is not
+    truth, and twenty old replies saying parking is free do not make parking
+    free today.
+
+    The content is human-readable text on purpose. An owner has to be able to
+    read, edit and reject a rule without a tool, and a rule nobody can read is
+    a rule nobody can govern.
+
+    `decided_at` / `decided_by_user_id` cover approval, rejection and
+    supersession uniformly -- one decision, one actor, whichever way it went.
+    Edits are recorded in the audit log rather than in another column pair.
+    """
+
+    __tablename__ = "hospitality_knowledge"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    knowledge_ref: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    # NULL means global -- true of every property. Scope defaults to a single
+    # property precisely because widening is the dangerous direction.
+    property_slug: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+        index=True,
+    )
+
+    topic: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        index=True,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        index=True,
+    )
+
+    source_type: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    # Who a rule may be said to. Guest drafting reads GUEST_FACING only; an
+    # internal procedure is useful to keep and wrong to volunteer.
+    audience: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="INTERNAL_OPERATION",
+        index=True,
+    )
+
+    # SAFE / REVIEW_NUMERIC_FACT. A rule carrying a perishable operational
+    # number is worth keeping and must not be approved without a human
+    # confirming the number is still true.
+    safety_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="SAFE",
+        index=True,
+    )
+
+    safety_reasons_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+    )
+
+    # Why the model proposed it. Kept for the reviewer, never shown to a guest.
+    reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # Evidence is counts and references. The historical examples already exist;
+    # copying guest content into a second table would double the exposure for
+    # no gain.
+    evidence_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    evidence_property_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    evidence_refs_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+    )
+
+    first_observed_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    last_observed_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    created_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )
+
+    updated_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )
+
+    decided_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    decided_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    @property
+    def evidence_refs(self) -> list[str]:
+        return self.decode(self.evidence_refs_json)
+
+    @property
+    def safety_reasons(self) -> list[str]:
+        return self.decode(self.safety_reasons_json)
+
+    @staticmethod
+    def decode(raw: str) -> list[str]:
+        try:
+            value = json.loads(raw)
+
+        except (TypeError, ValueError):
+            return []
+
+        return value if isinstance(value, list) else []

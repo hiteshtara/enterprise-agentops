@@ -256,3 +256,75 @@ class GuestReplyRequest(BaseModel):
 
     subject: str = Field(min_length=1)
     message: str = Field(min_length=1)
+
+
+class KnowledgeItemSummary(BaseModel):
+    """One piece of hospitality knowledge, as the console sees it."""
+
+    knowledge_ref: str
+    property_slug: str | None = None
+    scope: str
+    topic: str
+    title: str
+    content: str
+    status: str
+    source_type: str
+    audience: str
+    safety_status: str
+    safety_reasons: list[str] = []
+    reason: str | None = None
+    evidence_count: int
+    evidence_property_count: int
+    first_observed_at: str | None = None
+    last_observed_at: str | None = None
+    created_at: str
+    updated_at: str
+    decided_at: str | None = None
+    decided_by_user_id: str | None = None
+
+
+class KnowledgeConflictSummary(BaseModel):
+    """Approved rules that overlap. Surfaced, never resolved automatically."""
+
+    scope: str
+    topic: str
+    reason: str
+    message: str
+    knowledge_refs: list[str] = []
+
+
+class KnowledgePage(BaseModel):
+    items: list[KnowledgeItemSummary] = []
+    counts: dict[str, int] = {}
+    conflicts: list[KnowledgeConflictSummary] = []
+
+
+class KnowledgeCreate(BaseModel):
+    """A rule the owner writes themselves.
+
+    Lands APPROVED: an owner authoring a sentence by hand *is* the review, so
+    asking them to approve it a moment later would be ceremony. The control that
+    matters -- ADMIN only, actor recorded -- is unchanged.
+    """
+
+    property_slug: str | None = None
+    topic: str = Field(min_length=1, max_length=60)
+    title: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    audience: str = Field(default="GUEST_FACING")
+
+
+class KnowledgeSupersede(BaseModel):
+    """Replacement wording for an approved rule. The old one is kept."""
+
+    title: str | None = Field(default=None, min_length=1)
+    content: str | None = Field(default=None, min_length=1)
+
+
+class KnowledgeEdit(BaseModel):
+    """An owner rewriting a candidate. Editing never approves it."""
+
+    title: str | None = Field(default=None, min_length=1)
+    content: str | None = Field(default=None, min_length=1)
+    property_slug: str | None = None
+    scope_to_global: bool = False

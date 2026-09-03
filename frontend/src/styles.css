@@ -892,3 +892,52 @@ a.card.conversation-row:hover {
   color: var(--ok);
   margin-bottom: 4px;
 }
+
+/* ---- knowledge ---- */
+
+.knowledge-card {
+  display: block;
+}
+
+.knowledge-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  margin: 8px 0 10px;
+}
+
+.knowledge-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.55;
+  margin-bottom: 10px;
+}
+
+.knowledge-warning,
+.knowledge-internal {
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.knowledge-warning {
+  border: 1px solid rgba(210, 153, 34, 0.4);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.knowledge-internal {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.knowledge-warning strong,
+.knowledge-internal strong {
+  display: block;
+  margin-bottom: 2px;
+}

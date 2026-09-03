@@ -19,6 +19,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.historical_replies import topics_for
+
+# Sender type of an outbound message, mirroring the connector's vocabulary.
+# Duplicated rather than imported so this module stays free of the connector.
+SENDER_OWNER = "Owner"
+
 
 @dataclass(frozen=True)
 class ReplyRule:
@@ -585,20 +591,144 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
 
 AUTHORITY_ORDER: tuple[str, ...] = (
     (
-        "1. CURRENT AUTHORITATIVE DATA -- tool results, live availability and "
-        "pricing, and the Priyanka Homes rules in this guidance. These win over "
-        "everything else, always."
+        "1. LIVE AUTHORITATIVE SYSTEM DATA -- tool results: live availability, "
+        "current pricing, reservation state. Always wins."
     ),
     (
-        "2. THE CURRENT CONVERSATION -- what this guest and this host have "
-        "actually said in this thread."
+        "2. AN EXPLICIT COMMITMENT ALREADY MADE TO THIS GUEST in this "
+        "conversation. If the host has already told this guest something "
+        "specific, that stands -- even where general policy says otherwise. See "
+        "current_conversation_exceptions."
     ),
     (
-        "3. HISTORICAL EXAMPLES -- how the owner has answered similar questions "
+        "3. OWNER-APPROVED PRIYANKA HOMES KNOWLEDGE -- the reviewed rules in "
+        "approved_knowledge, together with the standing topic rules in `rules`. "
+        "Both are authoritative for anything not already promised above. Where "
+        "an approved rule scoped to this property and a general topic rule "
+        "disagree, the property-scoped one is more specific and wins; where "
+        "they genuinely conflict about what may be promised, take the more "
+        "cautious of the two and say you will confirm."
+    ),
+    (
+        "4. THE CURRENT CONVERSATION -- everything else this guest and this host "
+        "have said in this thread."
+    ),
+    (
+        "5. HISTORICAL EXAMPLES -- how the owner has answered similar questions "
         "before. Style and precedent only, never facts."
     ),
-    "4. YOUR OWN GENERAL KNOWLEDGE -- last, and never about this property.",
+    "6. YOUR OWN GENERAL KNOWLEDGE -- last, and never about this property.",
 )
+
+# -- commitments already made ---------------------------------------------
+#
+# Rank 2 exists because approved policy and a promise can disagree, and the
+# promise has to win. If the owner told this guest "you can check in at noon",
+# a general rule saying early check-in is never guaranteed must not cause the
+# next draft to walk that back. Retracting a promise costs more trust than the
+# inconsistency costs.
+#
+# The exception is scoped to this guest and this thread. It is a fact about one
+# conversation, never a new rule -- which is the other half of the semantics:
+# honour it here, and do not generalise it.
+
+COMMITMENT_MARKERS: tuple[str, ...] = (
+    "you can",
+    "you may",
+    "you're welcome to",
+    "you are welcome to",
+    "that works",
+    "that's fine",
+    "no problem",
+    "confirmed",
+    "i've arranged",
+    "i have arranged",
+    "it's arranged",
+    "i've booked",
+    "we've held",
+    "i'll hold",
+    "we can do",
+    "go ahead",
+    "sure",
+    "yes",
+)
+
+CONVERSATION_EXCEPTION_LABEL = "CURRENT_CONVERSATION_EXCEPTION"
+
+CONVERSATION_EXCEPTION_GUIDANCE = (
+    "The host has already committed to something for this guest that the "
+    "approved rule below does not generally allow. Honour the commitment: write "
+    "as though it stands, because it does. Do not repeat the general policy at "
+    "the guest, do not hedge the promise, and do not apologise for the "
+    "inconsistency. Equally, do not treat this as a new rule -- it applies to "
+    "this guest and this conversation only, and the approved knowledge is "
+    "unchanged for everyone else."
+)
+
+
+def looks_like_commitment(text: str) -> bool:
+    """Whether an owner message reads as a specific promise to this guest.
+
+    Deliberately loose. A false positive shows the model a commitment marker it
+    can weigh against the thread it can already see; a false negative lets a
+    draft contradict a promise the host actually made, which a guest experiences
+    as the business going back on its word.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+
+    lowered = normalise_text(text)
+
+    return contains_marker(lowered, COMMITMENT_MARKERS)
+
+
+def conversation_exceptions(
+    messages: Any,
+    approved: Any = (),
+) -> list[dict[str, Any]]:
+    """Approved rules this conversation has already made an exception to.
+
+    An exception is recorded when an owner message in this thread both reads as
+    a commitment and touches the same topic as an approved rule. That is a
+    heuristic pairing, and it is presented as one: the model gets the rule, the
+    message, and an instruction to honour what was actually said.
+    """
+    rows = [row for row in (messages or []) if isinstance(row, dict)]
+
+    commitments = [
+        row.get("message") or ""
+        for row in rows
+        if row.get("sender") == SENDER_OWNER
+        and looks_like_commitment(row.get("message") or "")
+    ]
+
+    if not commitments:
+        return []
+
+    exceptions: list[dict[str, Any]] = []
+
+    for item in approved or ():
+        topic = item.get("topic") if isinstance(item, dict) else None
+
+        if not topic:
+            continue
+
+        for commitment in commitments:
+            if topic in topics_for(commitment):
+                exceptions.append(
+                    {
+                        "marker": CONVERSATION_EXCEPTION_LABEL,
+                        "topic": topic,
+                        "approved_rule": item.get("content"),
+                        "commitment_made_in_this_thread": commitment,
+                        "instruction": CONVERSATION_EXCEPTION_GUIDANCE,
+                    }
+                )
+
+                break
+
+    return exceptions
+
 
 HISTORICAL_EXAMPLE_CAVEAT = (
     "These are real past replies from this owner, retrieved because the guest's "
@@ -614,7 +744,10 @@ HISTORICAL_EXAMPLE_CAVEAT = (
 )
 
 
-def reply_guidance(messages: Any = ()) -> dict[str, Any]:
+def reply_guidance(
+    messages: Any = (),
+    approved_knowledge: Any = (),
+) -> dict[str, Any]:
     """The knowledge a model needs to draft a Priyanka Homes reply.
 
     Returned alongside a conversation rather than exposed as its own tool: the
@@ -625,8 +758,20 @@ def reply_guidance(messages: Any = ()) -> dict[str, Any]:
     produce a reply about every subject the thread has ever touched; the state
     block is what makes a reply about the subject still open.
     """
-    return {
+    knowledge = [item for item in (approved_knowledge or ()) if isinstance(item, dict)]
+
+    exceptions = conversation_exceptions(messages, knowledge)
+
+    guidance: dict[str, Any] = {
         "authority_order": list(AUTHORITY_ORDER),
+        "approved_knowledge": knowledge,
+        "approved_knowledge_authority": (
+            "Rank 3 of 6. These are reviewed and approved by the owner and are "
+            "authoritative -- unlike historical examples. State them as fact. "
+            "The one thing that outranks them is a commitment already made to "
+            "this guest in this thread."
+        ),
+        "current_conversation_exceptions": exceptions,
         "conversation_state": analyse_conversation(messages),
         "how_to_read_the_conversation": list(CONVERSATION_STATE_RULES),
         "no_reply_needed": NO_REPLY_GUIDANCE,
@@ -649,9 +794,12 @@ def reply_guidance(messages: Any = ()) -> dict[str, Any]:
             "promise with words like 'should have' or 'I believe'."
         ),
         "escalation": (
-            "If the question touches anything in do_not_answer_from_memory, or "
-            "anything the rules do not cover, use the acknowledgement and let a "
-            "person answer. An honest 'I'll check' is always acceptable; a "
-            "confident guess is not."
+            "If the question touches anything in do_not_answer_from_memory and "
+            "is not covered by approved_knowledge, use the acknowledgement and "
+            "let a person answer. Approved knowledge is the exception: it has "
+            "been reviewed, so answer from it directly. An honest 'I'll check' "
+            "is always acceptable; a confident guess is not."
         ),
     }
+
+    return guidance

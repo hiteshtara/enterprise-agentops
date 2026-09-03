@@ -291,3 +291,55 @@ export interface SendOutcome {
   message: string
   messages: SentMessageSummary[]
 }
+
+export type KnowledgeStatus = 'PROPOSED' | 'APPROVED' | 'REJECTED' | 'SUPERSEDED'
+
+export type KnowledgeAudience = 'GUEST_FACING' | 'INTERNAL_OPERATION'
+
+export type KnowledgeSafetyStatus = 'SAFE' | 'REVIEW_NUMERIC_FACT' | 'REJECT_SENSITIVE'
+
+export interface KnowledgeItem {
+  knowledge_ref: string
+  property_slug: string | null
+  scope: string
+  topic: string
+  title: string
+  content: string
+  status: KnowledgeStatus
+  source_type: 'HISTORICAL_DISTILLATION' | 'MANUAL'
+  audience: KnowledgeAudience
+  safety_status: KnowledgeSafetyStatus
+  safety_reasons: string[]
+  reason: string | null
+  evidence_count: number
+  evidence_property_count: number
+  first_observed_at: string | null
+  last_observed_at: string | null
+  created_at: string
+  updated_at: string
+  decided_at: string | null
+  decided_by_user_id: string | null
+}
+
+/** Approved rules that overlap. Surfaced for a person; never auto-resolved. */
+export interface KnowledgeConflict {
+  scope: string
+  topic: string
+  reason: string
+  message: string
+  knowledge_refs: string[]
+}
+
+export interface KnowledgePage {
+  items: KnowledgeItem[]
+  counts: Record<KnowledgeStatus, number>
+  conflicts: KnowledgeConflict[]
+}
+
+export interface KnowledgeCreate {
+  property_slug: string | null
+  topic: string
+  title: string
+  content: string
+  audience: KnowledgeAudience
+}

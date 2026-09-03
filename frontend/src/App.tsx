@@ -9,6 +9,7 @@ import { ApprovalsPage } from './pages/ApprovalsPage'
 import { AuditPage } from './pages/AuditPage'
 import { ConversationPage } from './pages/ConversationPage'
 import { InboxPage } from './pages/InboxPage'
+import { KnowledgePage } from './pages/KnowledgePage'
 import { LoginPage } from './pages/LoginPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { RunDetailPage } from './pages/RunDetailPage'
@@ -27,6 +28,7 @@ function Console() {
         <Route path="/agent" element={<AgentPage />} />
         <Route path="/inbox" element={<InboxPage />} />
         <Route path="/inbox/:conversationRef" element={<ConversationPage />} />
+        <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:runId" element={<RunDetailPage />} />
         <Route path="/approvals" element={<ApprovalsPage />} />

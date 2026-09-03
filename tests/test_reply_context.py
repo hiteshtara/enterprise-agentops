@@ -148,21 +148,37 @@ def test_examples_are_labelled_non_authoritative(store):
     assert "never reproduce one" in caveat
 
     # And the rank is stated next to the examples, not only in the guidance.
-    assert "rank 3 of 4" in block["authority"].lower()
+    assert "rank 5 of 6" in block["authority"].lower()
 
 
-def test_the_authority_order_puts_current_data_first_and_history_third(store):
+def test_the_authority_order_ranks_live_data_first_and_history_fifth(store):
     order = tools_for([OPEN_QUESTION], store).get_guest_conversation(REF)[
         "reply_guidance"
     ]["authority_order"]
 
-    assert len(order) == 4
-    assert order[0].startswith("1. CURRENT AUTHORITATIVE DATA")
-    assert order[1].startswith("2. THE CURRENT CONVERSATION")
-    assert order[2].startswith("3. HISTORICAL EXAMPLES")
-    assert order[3].startswith("4. YOUR OWN GENERAL KNOWLEDGE")
+    assert len(order) == 6
+    assert order[0].startswith("1. LIVE AUTHORITATIVE SYSTEM DATA")
+    assert order[1].startswith("2. AN EXPLICIT COMMITMENT")
+    assert order[2].startswith("3. OWNER-APPROVED PRIYANKA HOMES KNOWLEDGE")
+    assert order[3].startswith("4. THE CURRENT CONVERSATION")
+    assert order[4].startswith("5. HISTORICAL EXAMPLES")
+    assert order[5].startswith("6. YOUR OWN GENERAL KNOWLEDGE")
 
     assert list(AUTHORITY_ORDER) == order
+
+
+def test_owner_approved_knowledge_outranks_historical_examples(store):
+    guidance = tools_for([OPEN_QUESTION], store).get_guest_conversation(REF)[
+        "reply_guidance"
+    ]
+
+    order = guidance["authority_order"]
+
+    approved_rank = next(i for i, line in enumerate(order) if "OWNER-APPROVED" in line)
+    history_rank = next(i for i, line in enumerate(order) if "HISTORICAL" in line)
+
+    assert approved_rank < history_rank
+    assert "authoritative" in guidance["approved_knowledge_authority"].lower()
 
 
 def test_a_historical_fact_cannot_outrank_current_policy(database):
@@ -200,7 +216,7 @@ def test_a_historical_fact_cannot_outrank_current_policy(database):
         "parking is free"
         in result["reply_guidance"]["historical_examples_caveat"].lower()
     )
-    assert result["reply_guidance"]["authority_order"][0].startswith("1. CURRENT")
+    assert result["reply_guidance"]["authority_order"][0].startswith("1. LIVE")
 
 
 def test_the_caveat_forbids_copying_specifics(store):

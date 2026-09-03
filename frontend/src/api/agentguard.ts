@@ -7,6 +7,10 @@ import type {
   ConversationDetail,
   CurrentUser,
   InboxPage,
+  KnowledgeCreate,
+  KnowledgeItem,
+  KnowledgePage,
+  KnowledgeStatus,
   LoginResponse,
   ApprovalResponse,
   ApprovalStatus,
@@ -139,5 +143,55 @@ export function requestGuestReply(
   return request<AgentResponse>(`/inbox/${conversationRef}/reply`, {
     method: 'POST',
     body: JSON.stringify({ subject, message }),
+  })
+}
+
+export function listKnowledge(options?: {
+  status?: KnowledgeStatus
+  propertySlug?: string
+}): Promise<KnowledgePage> {
+  return request<KnowledgePage>(
+    `/knowledge${query({
+      status: options?.status,
+      property_slug: options?.propertySlug,
+    })}`,
+  )
+}
+
+export function decideKnowledge(
+  knowledgeRef: string,
+  decision: 'approve' | 'reject',
+): Promise<KnowledgeItem> {
+  return request<KnowledgeItem>(`/knowledge/${knowledgeRef}/${decision}`, {
+    method: 'POST',
+  })
+}
+
+/** Edits a candidate's wording. Deliberately does not approve it. */
+export function editKnowledge(
+  knowledgeRef: string,
+  edit: { title?: string; content?: string },
+): Promise<KnowledgeItem> {
+  return request<KnowledgeItem>(`/knowledge/${knowledgeRef}`, {
+    method: 'PATCH',
+    body: JSON.stringify(edit),
+  })
+}
+
+export function createKnowledge(payload: KnowledgeCreate): Promise<KnowledgeItem> {
+  return request<KnowledgeItem>('/knowledge', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/** Replaces an approved rule. The old wording is kept as SUPERSEDED. */
+export function supersedeKnowledge(
+  knowledgeRef: string,
+  replacement: { title?: string; content?: string },
+): Promise<KnowledgeItem> {
+  return request<KnowledgeItem>(`/knowledge/${knowledgeRef}/supersede`, {
+    method: 'POST',
+    body: JSON.stringify(replacement),
   })
 }

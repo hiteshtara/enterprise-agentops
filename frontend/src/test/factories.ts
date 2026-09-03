@@ -1,5 +1,8 @@
 import type {
   AgentResponse,
+  KnowledgeConflict,
+  KnowledgeItem,
+  KnowledgePage,
   ApprovalRequest,
   ConversationDetail,
   InboxPage,
@@ -569,4 +572,108 @@ export const confirmedFailed: SendOutcome = {
   conversation_ref: CONVERSATION_REF,
   message: 'Nothing was sent. The provider rejected the message (400).',
   messages: [],
+}
+
+export const KNOWLEDGE_REF = 'kn-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+function knowledge(overrides: Partial<KnowledgeItem> = {}): KnowledgeItem {
+  return {
+    knowledge_ref: KNOWLEDGE_REF,
+    property_slug: 'renovated-2nd-floor-home',
+    scope: 'renovated-2nd-floor-home',
+    topic: 'parking',
+    title: 'Shared parking',
+    content: 'Parking is shared between guests and is not allocated to a unit.',
+    status: 'PROPOSED',
+    source_type: 'HISTORICAL_DISTILLATION',
+    audience: 'GUEST_FACING',
+    safety_status: 'SAFE',
+    safety_reasons: [],
+    reason: 'Observed repeatedly.',
+    evidence_count: 6,
+    evidence_property_count: 1,
+    first_observed_at: '2026-03-01T09:00:00',
+    last_observed_at: '2026-04-01T09:00:00',
+    created_at: '2026-09-03T09:00:00',
+    updated_at: '2026-09-03T09:00:00',
+    decided_at: null,
+    decided_by_user_id: null,
+    ...overrides,
+  }
+}
+
+export const readyCandidate = knowledge()
+
+export const numericCandidate = knowledge({
+  knowledge_ref: 'kn-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  topic: 'location',
+  title: 'Transit access',
+  content: 'The nearest stop is about two blocks from the front of the house.',
+  safety_status: 'REVIEW_NUMERIC_FACT',
+  safety_reasons: ['numeric:distance'],
+})
+
+export const internalCandidate = knowledge({
+  knowledge_ref: 'kn-cccccccccccccccccccccccccccccccc',
+  topic: 'cancellation',
+  title: 'Calendar stays blocked',
+  content: 'Staff should treat the dates as taken until the platform updates.',
+  audience: 'INTERNAL_OPERATION',
+})
+
+export const globalCandidate = knowledge({
+  knowledge_ref: 'kn-dddddddddddddddddddddddddddddddd',
+  property_slug: null,
+  scope: 'global',
+  topic: 'early_check_in',
+  title: 'Early check-in is not guaranteed',
+  content: 'Early check-in depends on the previous checkout and on cleaning.',
+  evidence_property_count: 3,
+})
+
+export const approvedInternal = knowledge({
+  knowledge_ref: 'kn-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  status: 'APPROVED',
+  audience: 'INTERNAL_OPERATION',
+  title: 'Internal booking record',
+  content: 'Staff should treat the internal record as authoritative for dates.',
+  decided_at: '2026-09-03T10:00:00',
+  decided_by_user_id: 'user-admin-1',
+})
+
+export const supersededItem = knowledge({
+  knowledge_ref: 'kn-ffffffffffffffffffffffffffffffff',
+  status: 'SUPERSEDED',
+  title: 'Older parking wording',
+  content: 'Parking used to be described this way before it was replaced.',
+  decided_at: '2026-09-03T11:00:00',
+  decided_by_user_id: 'user-admin-1',
+})
+
+export const rejectedItem = knowledge({
+  knowledge_ref: 'kn-99999999999999999999999999999999',
+  status: 'REJECTED',
+  title: 'Rejected wording',
+  content: 'A candidate the owner decided not to keep at all.',
+  decided_at: '2026-09-03T11:30:00',
+  decided_by_user_id: 'user-admin-1',
+})
+
+export function knowledgePage(
+  items: KnowledgeItem[],
+  conflicts: KnowledgeConflict[] = [],
+): KnowledgePage {
+  return {
+    items,
+    counts: { PROPOSED: 3, APPROVED: 1, REJECTED: 1, SUPERSEDED: 1 },
+    conflicts,
+  }
+}
+
+export const parkingConflict: KnowledgeConflict = {
+  scope: 'renovated-2nd-floor-home',
+  topic: 'parking',
+  reason: 'duplicate_scope_topic',
+  message: 'More than one approved rule covers this topic at this scope.',
+  knowledge_refs: [KNOWLEDGE_REF, 'kn-other'],
 }

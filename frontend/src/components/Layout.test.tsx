@@ -5,7 +5,7 @@ import { renderWithRouter } from '../test/render'
 import { adminUser } from '../test/factories'
 
 describe('Layout navigation', () => {
-  it('offers Inbox between Agent and Runs', () => {
+  it('offers Inbox and Knowledge between Agent and Runs', () => {
     renderWithRouter(
       <Layout>
         <div />
@@ -19,6 +19,7 @@ describe('Layout navigation', () => {
       'Overview',
       'Agent',
       'Inbox',
+      'Knowledge',
       'Runs',
       'Approvals',
       'Audit',
@@ -39,7 +40,20 @@ describe('Layout navigation', () => {
     )
   })
 
-  it('hides Inbox from a user who cannot view runs', () => {
+  it('links Knowledge to its route', () => {
+    renderWithRouter(
+      <Layout>
+        <div />
+      </Layout>,
+    )
+
+    expect(screen.getByRole('link', { name: 'Knowledge' })).toHaveAttribute(
+      'href',
+      '/knowledge',
+    )
+  })
+
+  it('hides Inbox and Knowledge from a user who cannot view runs', () => {
     renderWithRouter(
       <Layout>
         <div />
@@ -48,5 +62,6 @@ describe('Layout navigation', () => {
     )
 
     expect(screen.queryByRole('link', { name: 'Inbox' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Knowledge' })).not.toBeInTheDocument()
   })
 })

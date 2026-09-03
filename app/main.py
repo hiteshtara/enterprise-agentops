@@ -6,6 +6,7 @@ from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
 from app.auth import (
     current_user,
+    require_administer,
     require_reconcile_runs,
     require_run_agent,
     require_view_approvals,
@@ -27,6 +28,9 @@ from app.connectors.lodgify.tools import LodgifyTools
 from app.database import Database
 from app.historical_replies import HistoricalReplyStore
 from app.identity import PermissionDenied, User
+from app.knowledge import KnowledgeStatus, KnowledgeStore
+from app.knowledge_conflicts import find_conflicts
+from app.knowledge_topics import GUEST_FACING, INTERNAL_OPERATION
 from app.migration_store import MigrationBatchStore
 from app.model_provider import OpenAIModelProvider
 from app.models import (
@@ -40,6 +44,12 @@ from app.models import (
     CurrentUser,
     GuestReplyRequest,
     InboxPage,
+    KnowledgeConflictSummary,
+    KnowledgeCreate,
+    KnowledgeEdit,
+    KnowledgeItemSummary,
+    KnowledgePage,
+    KnowledgeSupersede,
     LoginRequest,
     LoginResponse,
     Overview,
@@ -125,6 +135,10 @@ lodgify_inbox = (
 # returns nothing and drafting works exactly as it did before.
 historical_replies = HistoricalReplyStore(database=database)
 
+# Owner-approved knowledge. Only APPROVED rows are ever read for drafting; a
+# PROPOSED candidate is a suggestion awaiting a human and never reaches a guest.
+knowledge_store = KnowledgeStore(database=database)
+
 tool_registry = build_tool_registry(
     migration_store=migration_store,
     lodgify=lodgify_tools,
@@ -132,6 +146,7 @@ tool_registry = build_tool_registry(
         LodgifyMessagingTools(
             lodgify_inbox,
             retriever=HistoricalReplyRetriever(historical_replies),
+            knowledge=knowledge_store,
         )
         if lodgify_inbox is not None
         else None
@@ -396,6 +411,250 @@ def request_guest_reply(
     )
 
     return AgentResponse(**result)
+
+
+KNOWLEDGE_DECISIONS = {
+    "approve": KnowledgeStatus.APPROVED,
+    "reject": KnowledgeStatus.REJECTED,
+}
+
+
+@app.get(
+    "/knowledge",
+    response_model=KnowledgePage,
+)
+def list_knowledge(
+    user: User = Depends(require_view_runs),
+    status: str | None = Query(default=None),
+    property_slug: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> KnowledgePage:
+    """Every rule and candidate. Readable by anyone signed in; deciding is not."""
+    try:
+        items = knowledge_store.list_knowledge(
+            status=status,
+            property_slug=property_slug,
+            limit=limit,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Conflicts are computed across every approved rule, not just the filtered
+    # page: a clash the current filter hides is still a clash.
+    approved = knowledge_store.list_knowledge(
+        status=KnowledgeStatus.APPROVED.value,
+        limit=1000,
+    )
+
+    return KnowledgePage(
+        items=[KnowledgeItemSummary(**item.to_dict()) for item in items],
+        counts=knowledge_store.counts(),
+        conflicts=[
+            KnowledgeConflictSummary(**conflict.to_dict())
+            for conflict in find_conflicts(approved)
+        ],
+    )
+
+
+KNOWLEDGE_AUDIENCES = {GUEST_FACING, INTERNAL_OPERATION}
+
+
+@app.post(
+    "/knowledge",
+    response_model=KnowledgeItemSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_knowledge(
+    payload: KnowledgeCreate,
+    user: User = Depends(require_administer),
+) -> KnowledgeItemSummary:
+    """Author a rule directly. ADMIN only, and immediately approved."""
+    if payload.audience not in KNOWLEDGE_AUDIENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"audience must be one of {sorted(KNOWLEDGE_AUDIENCES)}.",
+        )
+
+    try:
+        item = knowledge_store.create_manual(
+            property_slug=payload.property_slug,
+            topic=payload.topic,
+            title=payload.title,
+            content=payload.content,
+            audience=payload.audience,
+            actor_user_id=user.user_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Two events, not one: authorship and approval are separate facts, and a
+    # query for "everything ever approved" must find this row.
+    for event in ("KNOWLEDGE_PROPOSED", "KNOWLEDGE_APPROVED"):
+        audit_store.record(
+            event,
+            {
+                "knowledge_ref": item.knowledge_ref,
+                "topic": item.topic,
+                "scope": item.scope,
+                "audience": item.audience,
+                "title": item.title,
+                "content": item.content,
+                "source_type": item.source_type,
+            },
+            actor_user_id=user.user_id,
+        )
+
+    return KnowledgeItemSummary(**item.to_dict())
+
+
+@app.post(
+    "/knowledge/{knowledge_ref}/supersede",
+    response_model=KnowledgeItemSummary,
+)
+def supersede_knowledge(
+    knowledge_ref: str,
+    payload: KnowledgeSupersede,
+    user: User = Depends(require_administer),
+) -> KnowledgeItemSummary:
+    """Replace an approved rule, keeping the old wording as SUPERSEDED.
+
+    Editing approved knowledge in place would rewrite history -- a guest was
+    told the old wording, and the trail has to be able to show that.
+    """
+    try:
+        old, replacement = knowledge_store.supersede(
+            knowledge_ref=knowledge_ref,
+            actor_user_id=user.user_id,
+            title=payload.title,
+            content=payload.content,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    audit_store.record(
+        "KNOWLEDGE_SUPERSEDED",
+        {
+            "knowledge_ref": old.knowledge_ref,
+            "replaced_by": replacement.knowledge_ref,
+            "topic": old.topic,
+            "scope": old.scope,
+            "previous_content": old.content,
+            "content": replacement.content,
+        },
+        actor_user_id=user.user_id,
+    )
+
+    return KnowledgeItemSummary(**replacement.to_dict())
+
+
+@app.get(
+    "/knowledge/{knowledge_ref}",
+    response_model=KnowledgeItemSummary,
+)
+def get_knowledge(
+    knowledge_ref: str,
+    user: User = Depends(require_view_runs),
+) -> KnowledgeItemSummary:
+    item = knowledge_store.get(knowledge_ref)
+
+    if item is None:
+        raise HTTPException(status_code=404, detail="Unknown knowledge reference.")
+
+    return KnowledgeItemSummary(**item.to_dict())
+
+
+@app.post(
+    "/knowledge/{knowledge_ref}/{decision}",
+    response_model=KnowledgeItemSummary,
+)
+def decide_knowledge(
+    knowledge_ref: str,
+    decision: str,
+    user: User = Depends(require_administer),
+) -> KnowledgeItemSummary:
+    """Approve or reject a candidate. **The only path to APPROVED.**
+
+    ADMIN-gated and always attributed: promoting a distilled guess into
+    something a guest will be told is exactly the decision that needs a name
+    against it. Distillation cannot reach this route.
+    """
+    status = KNOWLEDGE_DECISIONS.get(decision)
+
+    if status is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown decision: {decision!r}",
+        )
+
+    try:
+        item = knowledge_store.decide(
+            knowledge_ref=knowledge_ref,
+            status=status,
+            actor_user_id=user.user_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    audit_store.record(
+        f"KNOWLEDGE_{status.value}",
+        {
+            "knowledge_ref": item.knowledge_ref,
+            "topic": item.topic,
+            "scope": item.scope,
+            "title": item.title,
+            "content": item.content,
+        },
+        actor_user_id=user.user_id,
+    )
+
+    return KnowledgeItemSummary(**item.to_dict())
+
+
+@app.patch(
+    "/knowledge/{knowledge_ref}",
+    response_model=KnowledgeItemSummary,
+)
+def edit_knowledge(
+    knowledge_ref: str,
+    edit: KnowledgeEdit,
+    user: User = Depends(require_administer),
+) -> KnowledgeItemSummary:
+    """Rewrite a rule. Deliberately does not approve it.
+
+    An owner who edits a candidate still has to approve it, so a careless edit
+    cannot promote anything on its own.
+    """
+    try:
+        item = knowledge_store.update(
+            knowledge_ref=knowledge_ref,
+            actor_user_id=user.user_id,
+            title=edit.title,
+            content=edit.content,
+            property_slug=edit.property_slug,
+            scope_to_global=edit.scope_to_global,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    audit_store.record(
+        "KNOWLEDGE_EDITED",
+        {
+            "knowledge_ref": item.knowledge_ref,
+            "topic": item.topic,
+            "scope": item.scope,
+            "title": item.title,
+            "content": item.content,
+            "status": item.status,
+        },
+        actor_user_id=user.user_id,
+    )
+
+    return KnowledgeItemSummary(**item.to_dict())
 
 
 @app.get(

@@ -32,6 +32,7 @@ from app.connectors.lodgify.inbox import (
 )
 from app.connectors.lodgify.models import unknown
 from app.hospitality import HISTORICAL_EXAMPLE_CAVEAT, reply_guidance
+from app.knowledge import KnowledgeStore
 from app.reply_retrieval import HistoricalReplyRetriever
 
 
@@ -49,9 +50,29 @@ class LodgifyMessagingTools:
         self,
         inbox: LodgifyInbox,
         retriever: HistoricalReplyRetriever | None = None,
+        knowledge: KnowledgeStore | None = None,
     ) -> None:
         self._inbox = inbox
         self._retriever = retriever
+        self._knowledge = knowledge
+
+    def approved_knowledge(self, property_slug: str | None) -> list[dict[str, Any]]:
+        """Owner-approved rules for this property, plus global ones.
+
+        Only APPROVED rows are readable from here. A PROPOSED candidate is a
+        suggestion awaiting a human, and a suggestion must never reach a guest.
+        """
+        if self._knowledge is None:
+            return []
+
+        try:
+            return [
+                item.for_drafting()
+                for item in self._knowledge.approved_for(property_slug)
+            ]
+
+        except Exception:  # noqa: BLE001 -- knowledge is enrichment, not a dependency
+            return []
 
     def historical_examples(
         self,
@@ -140,7 +161,9 @@ class LodgifyMessagingTools:
         # the model remembering to look them up. The guidance is computed *from*
         # the messages, so it reports what is still open rather than every topic
         # the thread has ever mentioned.
-        guidance = reply_guidance(conversation.get("messages"))
+        knowledge = self.approved_knowledge(conversation.get("property_slug"))
+
+        guidance = reply_guidance(conversation.get("messages"), knowledge)
 
         examples = self.historical_examples(conversation, guidance)
 
@@ -152,8 +175,10 @@ class LodgifyMessagingTools:
             result["historical_examples"] = {
                 "how_to_use": HISTORICAL_EXAMPLE_CAVEAT,
                 "authority": (
-                    "Rank 3 of 4 -- see reply_guidance.authority_order. Current "
-                    "rules and this conversation both outrank these."
+                    "Rank 5 of 6 -- see reply_guidance.authority_order. Live "
+                    "data, a commitment already made to this guest, "
+                    "owner-approved knowledge and this conversation all outrank "
+                    "these."
                 ),
                 "examples": examples,
             }
