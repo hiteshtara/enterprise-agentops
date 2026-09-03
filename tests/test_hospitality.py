@@ -313,13 +313,17 @@ def test_guidance_is_json_serialisable_for_the_model():
 
 # -- closing messages that are not merely "thanks" -------------------------
 #
-# The second live regression: the guest accepted an answer, withdrew their own
-# request and said what they would do instead. The old word-count rule could
-# only see short acknowledgements, so this drew a reply nobody needed.
+# The shape of the second regression: the guest accepted an answer, withdrew
+# their own request and said what they would do instead. The old word-count rule
+# could only see short acknowledgements, so this drew a reply nobody needed.
+#
+# Invented, like every other fixture here. It reproduces the *structure* that
+# broke -- de-escalation plus first-person intent, well over the old six-word
+# cap, with "ok" hiding inside "look" -- without copying a real guest's words.
 
-LIVE_CLOSING = (
-    "Hi, I don't worry, I was more curious and also want to plan for me and "
-    "my friends. I'll have a look outside anyway :-)"
+SENTENCE_LENGTH_CLOSING = (
+    "Hi, no need to worry, I was mainly curious so I can plan with my friends. "
+    "I'll have a look around myself anyway :-)"
 )
 
 
@@ -336,7 +340,7 @@ LIVE_CLOSING = (
         "Got it.",
         "We'll bring one.",
         "That works for us.",
-        LIVE_CLOSING,
+        SENTENCE_LENGTH_CLOSING,
     ],
 )
 def test_conversational_closings_need_no_reply(text):
@@ -363,12 +367,12 @@ def test_a_closing_wrapper_does_not_hide_a_live_request(text, expected_signal):
     assert is_closing_message(text) is False
 
 
-def test_the_live_regression_message_is_a_closing():
+def test_a_sentence_length_closing_is_recognised():
     state = analyse_conversation(
         [
             guest("Could I come and view the apartment?", "2026-09-01T09:00:00"),
-            owner("We are fully booked on those dates.", "2026-09-01T10:00:00"),
-            guest(LIVE_CLOSING, "2026-09-01T11:00:00"),
+            owner("Those dates are already taken, I'm afraid.", "2026-09-01T10:00:00"),
+            guest(SENTENCE_LENGTH_CLOSING, "2026-09-01T11:00:00"),
         ]
     )
 
