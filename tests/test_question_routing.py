@@ -432,3 +432,37 @@ def test_the_escalation_rule_is_still_present_and_topic_gated():
     assert "do_not_answer_from_memory" in escalation
     assert "approved_knowledge" in escalation
     assert "confident guess" in escalation
+
+
+# -- layer 1: asking where to park is a property question ------------------
+#
+# "do you have any recommendations where we could park?" routed as a general
+# question, because the parking group held the noun "parking" and a couple of
+# fixed phrases but not the way most guests actually ask. The fix stays inside
+# the marker mechanism: verb-shaped phrases, never a bare "park", because a
+# bare "park" would swallow the ordinary local questions below.
+
+PARKING_QUESTIONS: tuple[str, ...] = (
+    "Do you have any recommendations where we could park?",
+    "Where can we park the car?",
+)
+
+
+@pytest.mark.parametrize("text", PARKING_QUESTIONS)
+def test_asking_where_to_park_is_business_sensitive(text):
+    assert is_business_sensitive(text) is True
+    assert "parking" in business_categories(text)
+
+
+PARK_THE_PLACE_QUESTIONS: tuple[str, ...] = (
+    "Any nice parks around here?",
+    "Is there a park nearby?",
+)
+
+
+@pytest.mark.parametrize("text", PARK_THE_PLACE_QUESTIONS)
+def test_asking_about_a_park_stays_a_general_question(text):
+    # The protection a previous change put in deliberately: a park is a place
+    # in the city, and nothing about one is the owner's decision.
+    assert is_business_sensitive(text) is False
+    assert business_categories(text) == ()

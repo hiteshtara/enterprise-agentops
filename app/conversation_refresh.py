@@ -61,6 +61,64 @@ NO_REPLY_DETAIL = (
     "no reply was prepared."
 )
 
+# What each analyser signal is called on an operator's screen. The raw names
+# are runtime vocabulary; the person reading the Inbox needs the plain word,
+# and naming the signal is what makes the review actionable without quoting a
+# single character of what the guest wrote.
+OPEN_SIGNAL_LABELS: dict[str, str] = {
+    "question_mark": "question",
+    "question": "question",
+    "request": "request",
+    "problem": "problem",
+    "plan_change": "change of plan",
+}
+
+UNKNOWN_SIGNAL_LABEL = "something still open"
+
+
+def describe_open_signals(signals: Any) -> str:
+    """The analyser's signals as operator-facing words, deduplicated in order.
+
+    Two raw signals map to "question", so the mapping is many-to-one and the
+    order the analyser produced is kept -- a stable sentence is easier to scan
+    than an alphabetised one that changes when a marker is added.
+    """
+    labels: list[str] = []
+
+    for signal in signals or ():
+        label = OPEN_SIGNAL_LABELS.get(signal, UNKNOWN_SIGNAL_LABEL)
+
+        if label not in labels:
+            labels.append(label)
+
+    return ", ".join(labels) or UNKNOWN_SIGNAL_LABEL
+
+
+def conflicted_silence_detail(signals: Any) -> str:
+    """Why a person is being asked to look, in terms of what was detected."""
+    return (
+        f"The guest still has an open {describe_open_signals(signals)} waiting, "
+        f"but the model proposed sending nothing. Nothing was drafted and the "
+        f"conversation was not closed -- read it and reply, or use Regenerate."
+    )
+
+
+def retried_silence_detail(signals: Any) -> str:
+    """The same conflict, after a person has already asked for another go.
+
+    Only reached with `force`, which nothing automatic sets, so this sentence
+    means exactly one thing: the retry happened and produced silence again.
+    It deliberately does not offer Regenerate, because Regenerate is the button
+    that just came back empty -- repeating that advice is what made a real
+    second model call look like a broken button.
+    """
+    return (
+        f"AgentGuard tried again and still could not prepare a safe reply to "
+        f"the open {describe_open_signals(signals)}. Write one by hand, or read "
+        f"the conversation and decide what it needs."
+    )
+
+
 ALREADY_REPLIED_DETAIL = (
     "The most recent message in this conversation is ours, so there is nothing "
     "waiting on a reply."
@@ -202,10 +260,13 @@ class ConversationRefreshService:
         if verdict == NO_REPLY_NEEDED and not force:
             # A deterministic closing costs nothing automatically. `force` is the
             # one way past this, and only a person pressing Regenerate sets it:
-            # the rule is advice, and a human asking for a draft outranks it. The
-            # model still gets the same analysis and may answer NO_REPLY_NEEDED
-            # itself -- which is the conservative direction, since an unnecessary
-            # draft is cheaper than a wrongly-withheld one.
+            # the rule is advice, and a human asking for a draft outranks it.
+            # Past this branch the analyser's verdict still travels with the
+            # request, because it -- not the model -- owns whether a reply is
+            # owed. A model that answers NO_REPLY_NEEDED over an open question
+            # is not being conservative: it produces silence for a guest who
+            # asked something, which is the expensive error. An unnecessary
+            # draft costs a glance; a withheld reply costs a guest.
             return self._record(
                 conversation_ref,
                 fingerprint,
@@ -273,6 +334,8 @@ class ConversationRefreshService:
             force,
             escalate=escalate,
             escalation_reason=reason,
+            reply_required=verdict == REPLY_NEEDED,
+            open_signals=tuple(analysis.get("open_signals") or ()),
         )
 
     def _same_day_checkout(self, conversation_ref: str) -> bool | None:
@@ -306,6 +369,8 @@ class ConversationRefreshService:
         force: bool,
         escalate: bool = False,
         escalation_reason: str | None = None,
+        reply_required: bool = False,
+        open_signals: tuple[str, ...] = (),
     ) -> RefreshResult:
         """Write a reply through the ordinary agent run.
 
@@ -338,6 +403,38 @@ class ConversationRefreshService:
         run_id = outcome.get("run_id")
 
         if is_no_reply(answer):
+            if reply_required:
+                # The division of labour, enforced rather than asked for: the
+                # deterministic analyser decides *whether* a reply is owed and
+                # the model decides only the wording. When the two disagree the
+                # analyser wins, and the disagreement itself is what a person
+                # is shown -- never a closed conversation, and never the
+                # "nothing is open" line, which would be false here.
+                #
+                # `force` is set by nothing but the console's Regenerate, so it
+                # is exactly the "a person already asked for another go" signal
+                # -- no counter and no extra state to keep in step with the
+                # row. A retry that lands here really did spend a fresh model
+                # call, and the operator must be able to see that from the row:
+                # the wording changes, so a reload shows a new reason instead
+                # of the identical sentence that made the button look dead.
+                return self._record(
+                    conversation_ref,
+                    fingerprint,
+                    property_slug,
+                    DraftStatus.NEEDS_HUMAN_REVIEW,
+                    detail=(
+                        retried_silence_detail(open_signals)
+                        if force
+                        else conflicted_silence_detail(open_signals)
+                    ),
+                    source_run_id=run_id,
+                    model_called=True,
+                    force=force,
+                )
+
+            # The analyser read the thread as closed too, so the sentinel is
+            # agreement rather than an override, and the detail is honest.
             return self._record(
                 conversation_ref,
                 fingerprint,

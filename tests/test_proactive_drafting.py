@@ -13,7 +13,12 @@ import pytest
 
 from app.connectors.lodgify.messaging_models import conversation_fingerprint
 from app.connectors.lodgify.refs import conversation_ref_for
-from app.conversation_refresh import ConversationRefreshService
+from app.conversation_refresh import (
+    NO_REPLY_DETAIL,
+    ConversationRefreshService,
+    conflicted_silence_detail,
+    retried_silence_detail,
+)
 from app.drafts import STALE, DraftStatus, DraftStore
 from tests.fakes import final_response, tool_response
 from tests.lodgify_fakes import THREAD_A, FakeLodgify, booking, message, thread
@@ -386,19 +391,27 @@ def test_a_read_failure_keeps_the_previous_good_draft(database, agent_factory):
     assert drafts.current_for(REF).message == DRAFTED
 
 
-def test_the_model_returning_the_no_reply_sentinel_is_respected(
+def test_the_model_returning_the_no_reply_sentinel_is_respected_when_nothing_is_open(
     database, agent_factory
 ):
+    """The case the sentinel exists for, and the one branch that is unchanged.
+
+    The analyser also read this conversation as closed, so the two agree and
+    the deterministic detail is the honest one.
+    """
     service, _, _, drafts = build(
-        [GUEST_QUESTION],
+        [GUEST_QUESTION, OWNER_REPLY, CLOSING],
         database,
         agent_factory,
         model=CountingModel(answer="NO_REPLY_NEEDED"),
     )
 
-    result = service.process(REF)
+    # Regenerate is the only way the model is asked about a closed thread.
+    result = service.process(REF, force=True)
 
+    assert result.model_called is True
     assert result.status == DraftStatus.NO_REPLY_NEEDED.value
+    assert result.detail == NO_REPLY_DETAIL
     assert drafts.current_for(REF).message is None
 
 
@@ -535,3 +548,334 @@ def test_regenerate_never_drafts_a_reply_to_our_own_last_message(
     assert result.model_called is False
     assert result.status == DraftStatus.NO_REPLY_NEEDED.value
     assert drafts.current_for(REF).message is None
+
+
+# -- the model's silence never overrules the analyser ----------------------
+#
+# The live failure, in shape: an acknowledgement followed by a direct question.
+# The analyser read it correctly as reply_needed, the model answered with the
+# sentinel anyway, and the guest's question got silence stamped with a detail
+# line saying nothing was open. Deterministic Python decides *whether* to
+# reply; the model only decides wording. Wording is invented here, as
+# everywhere in this file.
+
+ACK_THEN_QUESTION = message(
+    "m-guest-4",
+    "Renter",
+    (
+        "Great, thanks for confirming. We're bringing a big van -- is there "
+        "anywhere nearby you'd suggest we leave it?"
+    ),
+    "2026-09-01T14:00:00",
+    message_status=None,
+    route=None,
+)
+
+GENUINE_CLOSING = message(
+    "m-guest-5",
+    "Renter",
+    "Thank you, got it",
+    "2026-09-01T15:00:00",
+    message_status=None,
+    route=None,
+)
+
+
+def test_an_open_question_is_never_silenced_by_the_model(database, agent_factory):
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    result = service.process(REF)
+
+    assert result.status == DraftStatus.NEEDS_HUMAN_REVIEW.value
+    assert result.status != DraftStatus.NO_REPLY_NEEDED.value
+
+    draft = drafts.current_for(REF)
+
+    # Not closed, and not passed off as a prepared reply either.
+    assert draft.status == DraftStatus.NEEDS_HUMAN_REVIEW.value
+    assert draft.message is None
+
+
+def test_the_conflict_detail_explains_itself_without_claiming_nothing_is_open(
+    database, agent_factory
+):
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    detail = service.process(REF).detail.lower()
+
+    assert detail == drafts.current_for(REF).detail.lower()
+    # The false sentence that reached the console.
+    assert "nothing is open" not in detail
+    assert detail != NO_REPLY_DETAIL.lower()
+    # The analyser's own signals, so the console says *why* a person is needed.
+    assert "question" in detail
+    # Operator-facing, and never the guest's words.
+    assert "van" not in detail
+
+
+def test_a_genuine_closing_acknowledgement_still_needs_no_reply(
+    database, agent_factory
+):
+    service, model, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, GENUINE_CLOSING], database, agent_factory
+    )
+
+    result = service.process(REF)
+
+    assert result.status == DraftStatus.NO_REPLY_NEEDED.value
+    assert result.detail == NO_REPLY_DETAIL
+    assert model.model_calls == 0
+    assert drafts.current_for(REF).message is None
+
+
+@pytest.mark.parametrize("answer", [DRAFTED, "NO_REPLY_NEEDED"])
+def test_an_unresolved_question_never_ends_in_silence(database, agent_factory, answer):
+    """Whatever the model says, an open question ends as a reply or as work for
+    a person -- never as a closed conversation."""
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer=answer),
+    )
+
+    result = service.process(REF)
+
+    assert result.status in {
+        DraftStatus.DRAFT_READY.value,
+        DraftStatus.NEEDS_HUMAN_REVIEW.value,
+    }
+    assert drafts.current_for(REF).status != DraftStatus.NO_REPLY_NEEDED.value
+
+
+# -- regenerate on a conflicted silence ------------------------------------
+#
+# The conflict rule above is right, and the second-attempt feedback was wrong.
+# `NEEDS_HUMAN_REVIEW` without text is deliberately not settled, so Regenerate
+# really does make a fresh model call -- but a model that answered the sentinel
+# once usually answers it again, and re-recording the identical first-attempt
+# sentence (which ends "or use Regenerate") made a real retry look like a
+# broken button. `force` is the only signal that distinguishes the two, and it
+# is set by nothing but the console's Regenerate.
+
+
+class RetryingModel(CountingModel):
+    """Scripted per drafting *run* rather than per model call.
+
+    One answer for the first run and another for the next, which is how a
+    retry that finally produces wording is exercised without any real provider.
+    """
+
+    def __init__(self, answers) -> None:
+        super().__init__()
+        self._answers = list(answers)
+        self.runs = 0
+
+    def generate_with_tools(self, messages, tools):
+        self.calls += 1
+
+        if self.calls % 2 == 1:
+            return tool_response(
+                "get_guest_conversation", {"conversation_ref": REF}, call_id="c1"
+            )
+
+        answer = self._answers[min(self.runs, len(self._answers) - 1)]
+        self.runs += 1
+
+        return final_response(answer)
+
+
+def test_regenerate_on_a_conflicted_silence_makes_a_new_model_call(
+    database, agent_factory
+):
+    """It was never a no-op: the row is not settled, so nothing is skipped."""
+    service, model, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    first = service.process(REF)
+
+    assert first.status == DraftStatus.NEEDS_HUMAN_REVIEW.value
+
+    after_first = model.model_calls
+
+    retry = service.process(REF, force=True)
+
+    assert model.model_calls > after_first
+    assert retry.model_called is True
+    assert retry.skipped is False
+    assert drafts.count() == 1
+
+
+def test_a_retry_that_produces_wording_becomes_a_ready_draft(database, agent_factory):
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=RetryingModel(["NO_REPLY_NEEDED", DRAFTED]),
+    )
+
+    service.process(REF)
+
+    result = service.process(REF, force=True)
+
+    assert result.status == DraftStatus.DRAFT_READY.value
+    assert drafts.current_for(REF).message == DRAFTED
+    assert drafts.current_for(REF).status == DraftStatus.DRAFT_READY.value
+
+
+def test_a_second_silence_stays_human_review_with_the_retry_wording(
+    database, agent_factory
+):
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    service.process(REF)
+
+    retry = service.process(REF, force=True)
+
+    assert retry.status == DraftStatus.NEEDS_HUMAN_REVIEW.value
+
+    draft = drafts.current_for(REF)
+
+    assert draft.status == DraftStatus.NEEDS_HUMAN_REVIEW.value
+    assert draft.message is None
+    assert draft.detail == retry.detail
+    assert draft.detail == retried_silence_detail(("question",))
+    # Still no guest text, and still names what is open.
+    assert "van" not in draft.detail.lower()
+    assert "question" in draft.detail.lower()
+
+
+def test_the_retry_detail_visibly_differs_from_the_first_attempt(
+    database, agent_factory
+):
+    """A reload has to show something new, or Regenerate reads as broken."""
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    first = service.process(REF)
+    before = drafts.current_for(REF)
+
+    retry = service.process(REF, force=True)
+    after = drafts.current_for(REF)
+
+    assert retry.detail != first.detail
+    assert after.detail != before.detail
+    assert after.updated_at > before.updated_at
+
+
+def test_the_retry_detail_does_not_invite_another_regenerate(database, agent_factory):
+    """The one thing the first-attempt wording got wrong in this state: the
+    advice it gives is the button that just failed."""
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    service.process(REF)
+    service.process(REF, force=True)
+
+    assert "regenerate" not in drafts.current_for(REF).detail.lower()
+
+
+def test_an_unchanged_fingerprint_does_not_block_an_explicit_regenerate(
+    database, agent_factory
+):
+    """The idempotency guard is for automatic passes only."""
+    service, model, _, drafts = build([GUEST_QUESTION], database, agent_factory)
+
+    service.process(REF)
+
+    before = drafts.current_for(REF)
+    after_first = model.model_calls
+
+    retry = service.process(REF, force=True)
+
+    after = drafts.current_for(REF)
+
+    assert retry.skipped is False
+    assert model.model_calls > after_first
+    # Same conversation state, so the same row -- rewritten, not duplicated.
+    assert after.draft_ref == before.draft_ref
+    assert after.conversation_fingerprint == before.conversation_fingerprint
+    assert drafts.count() == 1
+
+
+def test_a_genuinely_closed_conversation_never_gets_the_retry_wording(
+    database, agent_factory
+):
+    """The analyser agreed with the sentinel, so this is a closing, not a
+    failure to draft -- however many times a person presses the button."""
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, CLOSING],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    service.process(REF, force=True)
+
+    result = service.process(REF, force=True)
+
+    assert result.status == DraftStatus.NO_REPLY_NEEDED.value
+    assert result.detail == NO_REPLY_DETAIL
+    assert drafts.current_for(REF).detail == NO_REPLY_DETAIL
+
+
+def test_a_regenerate_creates_no_approval_and_sends_nothing(database, agent_factory):
+    from app.approval_store import ApprovalStore
+
+    service, _, fake, _ = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    service.process(REF)
+    service.process(REF, force=True)
+
+    assert fake.posts == []
+    assert all(request.method == "GET" for request in fake.requests)
+    assert sum(ApprovalStore(database=database).count_by_status().values()) == 0
+
+
+def test_the_first_attempt_conflict_wording_is_unchanged(database, agent_factory):
+    """A poll or a webhook is a first attempt however often it runs, so it keeps
+    the wording that offers Regenerate as the next step."""
+    service, _, _, drafts = build(
+        [GUEST_QUESTION, OWNER_REPLY, ACK_THEN_QUESTION],
+        database,
+        agent_factory,
+        model=CountingModel(answer="NO_REPLY_NEEDED"),
+    )
+
+    result = service.process(REF)
+
+    assert result.detail == conflicted_silence_detail(("question",))
+    assert drafts.current_for(REF).detail == conflicted_silence_detail(("question",))
+    assert "regenerate" in result.detail.lower()
