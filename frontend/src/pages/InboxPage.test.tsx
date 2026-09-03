@@ -60,7 +60,7 @@ describe('InboxPage', () => {
 
     expect(api.getInbox).toHaveBeenCalledTimes(1)
 
-    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.advanceTimersByTimeAsync(180_000)
 
     await waitFor(() => expect(api.getInbox).toHaveBeenCalledTimes(2))
   })

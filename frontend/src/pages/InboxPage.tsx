@@ -11,8 +11,18 @@ import { Empty, ErrorState, Loading } from '../components/States'
  * The console polls while the page is open; `useAsync` skips hidden tabs and
  * clears the timer on unmount, so nothing calls Lodgify when nobody is looking
  * at the Inbox. No webhook, no background worker, no process to supervise.
+ *
+ * Three minutes rather than thirty seconds because one load is expensive: the
+ * booking list carries no last-message time, so ordering the Inbox means
+ * reading every thread -- about 155 provider requests per load against this
+ * account. At a thirty-second cadence that is sustained load on someone else's
+ * API, and it was caught live returning 429 on the first booking page, which
+ * fails the whole request. This is an operational ceiling, not the fix: the
+ * real one is to order from the persisted activity index and re-read only the
+ * threads on the page. Manual Refresh and the webhook fast path are unchanged,
+ * so noticing a message quickly does not depend on this number.
  */
-const POLL_MS = 30_000
+const POLL_MS = 180_000
 
 /**
  * How often prepared replies are brought up to date while the Inbox is open.
