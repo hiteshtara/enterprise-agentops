@@ -16,6 +16,13 @@ from app.auth import (
 from app.authorization import ensure_can_resolve_approval
 from app.connectors.lodgify.client import LodgifyClient
 from app.connectors.lodgify.config import is_configured, resolve_api_key
+from app.connectors.lodgify.errors import (
+    LodgifyConfigurationError,
+    LodgifyUnavailable,
+)
+from app.connectors.lodgify.inbox import LodgifyInbox
+from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
+from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
 from app.connectors.lodgify.tools import LodgifyTools
 from app.database import Database
 from app.identity import PermissionDenied, User
@@ -28,7 +35,10 @@ from app.models import (
     ApprovalResponse,
     ApprovalSummary,
     AuditEvent,
+    ConversationDetail,
     CurrentUser,
+    GuestReplyRequest,
+    InboxPage,
     LoginRequest,
     LoginResponse,
     Overview,
@@ -91,15 +101,29 @@ user_store = UserStore(database=database)
 
 # The connector is wired only when a credential is configured. Importing the
 # app never reads the key, and its absence is not a startup failure.
+lodgify_configured = is_configured()
+
 lodgify_tools = (
     LodgifyTools(LodgifyClient(api_key_provider=resolve_api_key))
-    if is_configured()
+    if lodgify_configured
+    else None
+)
+
+# The inbox shares the credential resolver but not the read-only client: the
+# messaging transport is the one place that issues a Lodgify write, and it is
+# kept separate so `LodgifyClient` stays a read-only object.
+lodgify_inbox = (
+    LodgifyInbox(LodgifyMessagingClient(api_key_provider=resolve_api_key))
+    if lodgify_configured
     else None
 )
 
 tool_registry = build_tool_registry(
     migration_store=migration_store,
     lodgify=lodgify_tools,
+    lodgify_messaging=(
+        LodgifyMessagingTools(lodgify_inbox) if lodgify_inbox is not None else None
+    ),
 )
 
 # Auth dependencies resolve the store from app state so tests can swap the
@@ -231,6 +255,135 @@ def resolve_approval(
         ) from exc
 
     return ApprovalResponse(**result)
+
+
+SEND_GUEST_REPLY_TOOL = "send_guest_reply"
+
+INBOX_UNAVAILABLE = "The Lodgify connector is not configured."
+
+
+def require_inbox() -> LodgifyInbox:
+    if lodgify_inbox is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=INBOX_UNAVAILABLE,
+        )
+
+    return lodgify_inbox
+
+
+@app.get(
+    "/inbox",
+    response_model=InboxPage,
+)
+def get_inbox(
+    user: User = Depends(require_view_runs),
+    property_slug: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> InboxPage:
+    """Recent guest conversations, read live from Lodgify.
+
+    The console polls this while the Inbox is open, which is the whole of V1's
+    "notice a new message" mechanism -- no webhook, no background worker, no
+    process that keeps calling Lodgify when nobody is looking.
+    """
+    inbox = require_inbox()
+
+    try:
+        conversations = inbox.list_conversations(
+            property_slug=property_slug,
+            limit=limit,
+        )
+
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except LodgifyConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=INBOX_UNAVAILABLE,
+        ) from exc
+
+    except LodgifyUnavailable as exc:
+        # The provider's own words are never forwarded, only our translation.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Conversations could not be loaded from the provider.",
+        ) from exc
+
+    return InboxPage(conversations=conversations, count=len(conversations))
+
+
+@app.get(
+    "/inbox/{conversation_ref}",
+    response_model=ConversationDetail,
+)
+def get_conversation(
+    conversation_ref: str,
+    user: User = Depends(require_view_runs),
+) -> ConversationDetail:
+    inbox = require_inbox()
+
+    try:
+        conversation = inbox.get_conversation(conversation_ref)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except LodgifyConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=INBOX_UNAVAILABLE,
+        ) from exc
+
+    except LodgifyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The conversation could not be loaded from the provider.",
+        ) from exc
+
+    return ConversationDetail(**conversation)
+
+
+@app.post(
+    "/inbox/{conversation_ref}/reply",
+    response_model=AgentResponse,
+)
+def request_guest_reply(
+    conversation_ref: str,
+    reply: GuestReplyRequest,
+    user: User = Depends(require_run_agent),
+) -> AgentResponse:
+    """Submit a composed reply for approval. **This does not send anything.**
+
+    It creates a normal governed run whose single pending action is
+    `send_guest_reply` with exactly the text supplied. The tool is DANGEROUS, so
+    `ToolRegistry.execute` parks it for a human just as it would for a
+    model-initiated call; the console has no path that reaches Lodgify directly.
+
+    The text is passed through untouched so the string an approver reads is the
+    string the guest receives.
+    """
+    require_inbox()
+
+    if tool_registry.get(SEND_GUEST_REPLY_TOOL) is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=INBOX_UNAVAILABLE,
+        )
+
+    result = agent.request_action(
+        tool=SEND_GUEST_REPLY_TOOL,
+        arguments={
+            "conversation_ref": conversation_ref,
+            "subject": reply.subject,
+            "message": reply.message,
+        },
+        summary=f"Send a guest reply on conversation {conversation_ref}.",
+        actor_user_id=user.user_id,
+    )
+
+    return AgentResponse(**result)
 
 
 @app.get(

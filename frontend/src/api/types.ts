@@ -225,3 +225,69 @@ export interface RunMetrics {
   models: ModelExecutionSummary[]
   tools: ToolExecutionSummary[]
 }
+
+export type ConversationStatus = 'needs_attention' | 'responded' | 'unknown'
+
+export type MessageSender = 'Owner' | 'Renter'
+
+export type MessageStatus = 'Delivered' | 'Sent' | 'Failed' | 'Unknown'
+
+export type SendStatus = 'confirmed_sent' | 'confirmed_failed' | 'unknown_send_state'
+
+/**
+ * One sanitized message. `route` is deliberately absent from the contract: a
+ * live send recorded route=null while really being delivered, so it cannot
+ * support a delivery claim (docs/LODGIFY_API.md section 12).
+ */
+export interface ConversationMessage {
+  message_ref: string
+  sender: MessageSender | null
+  subject: string | null
+  message: string
+  created_at: string | null
+  message_status: MessageStatus | null
+}
+
+export interface ConversationSummary {
+  conversation_ref: string
+  property_slug: string | null
+  property_name: string | null
+  source: string | null
+  booking_status: string | null
+  status: ConversationStatus
+  last_message_at: string | null
+  last_message_sender: MessageSender | null
+  last_message_excerpt: string | null
+  message_count: number
+}
+
+export interface InboxPage {
+  conversations: ConversationSummary[]
+  count: number
+}
+
+export interface ConversationDetail {
+  conversation_ref: string
+  property_slug: string | null
+  property_name: string | null
+  source: string | null
+  booking_status: string | null
+  subject: string | null
+  is_read: boolean | null
+  status: ConversationStatus
+  messages: ConversationMessage[]
+}
+
+export interface SentMessageSummary {
+  message_ref: string
+  message_status: MessageStatus | null
+  created_at: string | null
+}
+
+/** The result shape `send_guest_reply` returns as a tool result. */
+export interface SendOutcome {
+  status: SendStatus
+  conversation_ref: string
+  message: string
+  messages: SentMessageSummary[]
+}

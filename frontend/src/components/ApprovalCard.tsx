@@ -12,6 +12,59 @@ export interface ApprovalCardProps {
   evidence?: React.ReactNode
   onDecision: (approved: boolean) => Promise<void> | void
   busy?: boolean
+  /** Extra context for a guest message: property and channel. */
+  context?: { property?: string | null; source?: string | null }
+  requestedBy?: string | null
+}
+
+export const SEND_GUEST_REPLY = 'send_guest_reply'
+
+function text(value: Json): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The outbound message, in full.
+ *
+ * Rendered verbatim and never truncated, collapsed or JSON-escaped: the
+ * approver has to be able to read the exact characters the guest will receive,
+ * because that string is transmitted byte for byte once approved.
+ */
+function GuestMessagePreview({
+  args,
+  context,
+}: {
+  args: Record<string, Json> | null
+  context?: { property?: string | null; source?: string | null }
+}) {
+  return (
+    <div className="guest-send">
+      <div className="approval-grid">
+        {context?.property ? (
+          <div>
+            <div className="approval-term">Property</div>
+            <div>{context.property}</div>
+          </div>
+        ) : null}
+        <div>
+          <div className="approval-term">Conversation</div>
+          <div className="mono truncate">{text(args?.conversation_ref)}</div>
+        </div>
+        {context?.source ? (
+          <div>
+            <div className="approval-term">Channel</div>
+            <div>{context.source}</div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="approval-term">Subject</div>
+      <div className="guest-send-subject">{text(args?.subject)}</div>
+
+      <div className="approval-term">Exact message</div>
+      <div className="guest-send-body">{text(args?.message)}</div>
+    </div>
+  )
 }
 
 const RISK_PERMISSION: Record<ToolRisk, Permission> = {
@@ -28,7 +81,10 @@ export function ApprovalCard({
   evidence,
   onDecision,
   busy = false,
+  context,
+  requestedBy,
 }: ApprovalCardProps) {
+  const guestSend = tool === SEND_GUEST_REPLY
   const [pending, setPending] = useState<'approve' | 'reject' | null>(null)
   const { can } = useAuth()
 
@@ -60,27 +116,40 @@ export function ApprovalCard({
             strokeLinejoin="round"
           />
         </svg>
-        Approval required
+        {guestSend ? 'Send guest message' : 'Approval required'}
       </div>
 
       <p className="page-subtitle" style={{ marginTop: 8 }}>
-        AgentGuard blocked this action because the tool is classified {risk}. It has not
-        been executed.
+        {guestSend
+          ? 'This message has not been sent. Once approved it goes to a real guest, exactly as written below, and cannot be edited or recalled.'
+          : `AgentGuard blocked this action because the tool is classified ${risk}. It has not been executed.`}
       </p>
 
+      {guestSend ? <GuestMessagePreview args={args} context={context} /> : null}
+
       <div className="approval-grid">
-        <div>
-          <div className="approval-term">Tool</div>
-          <div className="mono">{tool}</div>
-        </div>
+        {guestSend ? null : (
+          <>
+            <div>
+              <div className="approval-term">Tool</div>
+              <div className="mono">{tool}</div>
+            </div>
+            <div>
+              <div className="approval-term">Arguments</div>
+              <ArgumentList args={args} />
+            </div>
+          </>
+        )}
         <div>
           <div className="approval-term">Risk</div>
           <RiskBadge risk={risk} />
         </div>
-        <div>
-          <div className="approval-term">Arguments</div>
-          <ArgumentList args={args} />
-        </div>
+        {requestedBy ? (
+          <div>
+            <div className="approval-term">Requested by</div>
+            <div className="mono truncate">{requestedBy}</div>
+          </div>
+        ) : null}
         {runId ? (
           <div>
             <div className="approval-term">Run</div>
@@ -105,7 +174,13 @@ export function ApprovalCard({
               disabled={disabled}
               onClick={() => decide(true)}
             >
-              {pending === 'approve' ? 'Approving…' : 'Approve'}
+              {pending === 'approve'
+                ? guestSend
+                  ? 'Sending…'
+                  : 'Approving…'
+                : guestSend
+                  ? 'Approve & Send'
+                  : 'Approve'}
             </button>
             <button
               type="button"

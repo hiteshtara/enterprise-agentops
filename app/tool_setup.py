@@ -4,6 +4,12 @@ Kept out of main.py so that tool wiring can be constructed and inspected in
 tests without importing the FastAPI app or a model provider.
 """
 
+from app.connectors.lodgify.messaging_tools import (
+    GET_CONVERSATION_SCHEMA,
+    LIST_CONVERSATIONS_SCHEMA,
+    SEND_REPLY_SCHEMA,
+    LodgifyMessagingTools,
+)
 from app.connectors.lodgify.tools import (
     AVAILABILITY_SCHEMA,
     LIST_PROPERTIES_SCHEMA,
@@ -179,9 +185,66 @@ def lodgify_tools(tools: LodgifyTools) -> list[Tool]:
     ]
 
 
+def lodgify_messaging_tools(tools: LodgifyMessagingTools) -> list[Tool]:
+    """Guest conversations: two reads and the one governed send.
+
+    `send_guest_reply` is DANGEROUS, not WRITE. It reaches a real person outside
+    the business, cannot be edited or recalled once sent, and has no provider
+    idempotency key -- so a duplicate is a real duplicate. WRITE would be
+    defensible only if the action were confined to internal records.
+    """
+    return [
+        Tool(
+            name="list_recent_guest_conversations",
+            description=(
+                "List recent guest conversations for the managed properties, "
+                "most recently active first. Each row says whether it appears "
+                "to need attention: 'needs_attention' means the newest message "
+                "is from the guest, 'responded' means the newest is ours, and "
+                "'unknown' means it could not be determined -- treat unknown as "
+                "unknown, not as needing a reply. Use the conversation_ref from "
+                "here for every other conversation tool."
+            ),
+            function=tools.list_recent_guest_conversations,
+            risk=ToolRisk.READ,
+            parameters=LIST_CONVERSATIONS_SCHEMA,
+        ),
+        Tool(
+            name="get_guest_conversation",
+            description=(
+                "Read one guest conversation in full, oldest message first, "
+                "along with the Priyanka Homes reply guidance that governs what "
+                "may be promised. Read this before drafting any reply, and "
+                "follow the guidance it returns -- particularly its list of "
+                "topics that must never be answered from memory."
+            ),
+            function=tools.get_guest_conversation,
+            risk=ToolRisk.READ,
+            parameters=GET_CONVERSATION_SCHEMA,
+        ),
+        Tool(
+            name="send_guest_reply",
+            description=(
+                "Send a reply to a real guest. This is irreversible and "
+                "externally visible: the guest receives it, and it cannot be "
+                "edited or unsent. It requires human approval, and the text is "
+                "sent exactly as written. "
+                "If the result is 'unknown_send_state', the message may already "
+                "have been delivered -- do NOT call this tool again for the "
+                "same conversation. Report the uncertainty and let a person "
+                "check the thread."
+            ),
+            function=tools.send_guest_reply,
+            risk=ToolRisk.DANGEROUS,
+            parameters=SEND_REPLY_SCHEMA,
+        ),
+    ]
+
+
 def build_tool_registry(
     migration_store: MigrationBatchStore,
     lodgify: LodgifyTools | None = None,
+    lodgify_messaging: LodgifyMessagingTools | None = None,
 ) -> ToolRegistry:
     """Assemble every tool the agent may call.
 
@@ -203,6 +266,10 @@ def build_tool_registry(
 
     if lodgify is not None:
         for tool in lodgify_tools(lodgify):
+            registry.register(tool)
+
+    if lodgify_messaging is not None:
+        for tool in lodgify_messaging_tools(lodgify_messaging):
             registry.register(tool)
 
     return registry

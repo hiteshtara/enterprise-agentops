@@ -202,3 +202,57 @@ class RunMetrics(BaseModel):
     estimated_cost_usd: float | None = None
     models: list[ModelExecutionSummary] = []
     tools: list[ToolExecutionSummary] = []
+
+
+class ConversationMessageSummary(BaseModel):
+    """One sanitized message. Carries no provider identifier and no guest
+    contact detail; `route` is deliberately absent because it cannot support a
+    delivery claim (docs/LODGIFY_API.md section 12)."""
+
+    message_ref: str
+    sender: str | None = None
+    subject: str | None = None
+    message: str
+    created_at: str | None = None
+    message_status: str | None = None
+
+
+class ConversationSummary(BaseModel):
+    conversation_ref: str
+    property_slug: str | None = None
+    property_name: str | None = None
+    source: str | None = None
+    booking_status: str | None = None
+    status: str
+    last_message_at: str | None = None
+    last_message_sender: str | None = None
+    last_message_excerpt: str | None = None
+    message_count: int
+
+
+class InboxPage(BaseModel):
+    conversations: list[ConversationSummary] = []
+    count: int
+
+
+class ConversationDetail(BaseModel):
+    conversation_ref: str
+    property_slug: str | None = None
+    property_name: str | None = None
+    source: str | None = None
+    booking_status: str | None = None
+    subject: str | None = None
+    is_read: bool | None = None
+    status: str
+    messages: list[ConversationMessageSummary] = []
+
+
+class GuestReplyRequest(BaseModel):
+    """A reply a person composed in the console.
+
+    The text is carried verbatim into the approval record, so what the approver
+    reads is what the guest receives.
+    """
+
+    subject: str = Field(min_length=1)
+    message: str = Field(min_length=1)

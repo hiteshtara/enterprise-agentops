@@ -1,5 +1,9 @@
 import type {
   AgentResponse,
+  ApprovalRequest,
+  ConversationDetail,
+  InboxPage,
+  SendOutcome,
   CurrentUser,
   RunMetrics,
   ApprovalResponse,
@@ -436,4 +440,133 @@ export const unknownRunMetrics: RunMetrics = {
     },
   ],
   tools: [],
+}
+
+export const CONVERSATION_REF = 'PH-AAAAAAAA'
+
+export const inboxPage: InboxPage = {
+  count: 2,
+  conversations: [
+    {
+      conversation_ref: CONVERSATION_REF,
+      property_slug: 'renovated-2nd-floor-home',
+      property_name: 'Renovated 2nd-Floor Home',
+      source: 'BookingCom',
+      booking_status: 'Booked',
+      status: 'needs_attention',
+      last_message_at: '2026-09-02T17:39:40',
+      last_message_sender: 'Renter',
+      last_message_excerpt: 'Is there parking at the house?',
+      message_count: 2,
+    },
+    {
+      conversation_ref: 'PH-BBBBBBBB',
+      property_slug: 'boston-condo-second-floor',
+      property_name: 'Boston condo second Floor',
+      source: 'HomeAway',
+      booking_status: 'Booked',
+      status: 'responded',
+      last_message_at: '2026-09-01T11:00:00',
+      last_message_sender: 'Owner',
+      last_message_excerpt: 'Parking is shared and there is no extra charge.',
+      message_count: 3,
+    },
+  ],
+}
+
+export const conversationDetail: ConversationDetail = {
+  conversation_ref: CONVERSATION_REF,
+  property_slug: 'renovated-2nd-floor-home',
+  property_name: 'Renovated 2nd-Floor Home',
+  source: 'BookingCom',
+  booking_status: 'Booked',
+  subject: 'Booking enquiry',
+  is_read: true,
+  status: 'needs_attention',
+  messages: [
+    {
+      message_ref: 'm-aaaa',
+      sender: 'Renter',
+      subject: 'Parking',
+      message: 'Is there parking at the house?',
+      created_at: '2026-09-01T10:00:00',
+      message_status: null,
+    },
+    {
+      message_ref: 'm-bbbb',
+      sender: 'Owner',
+      subject: 'Re: Parking',
+      message: 'Parking is shared and there is no extra charge.',
+      created_at: '2026-09-01T11:00:00',
+      message_status: 'Delivered',
+    },
+  ],
+}
+
+export const GUEST_REPLY_SUBJECT = 'Thank you'
+
+export const GUEST_REPLY_BODY =
+  "Thank you for your question. I'll check and get back to you shortly."
+
+export const guestReplyApproval: ApprovalRequest = {
+  approval_id: APPROVAL_ID,
+  run_id: RUN_ID,
+  requested_by_user_id: OPERATOR_ID,
+  tool: 'send_guest_reply',
+  arguments: {
+    conversation_ref: CONVERSATION_REF,
+    subject: GUEST_REPLY_SUBJECT,
+    message: GUEST_REPLY_BODY,
+  },
+  risk: 'DANGEROUS',
+}
+
+export const guestReplyWaiting: AgentResponse = {
+  run_id: RUN_ID,
+  status: 'WAITING_FOR_APPROVAL',
+  answer: 'Approval required before executing send_guest_reply.',
+  trace: [],
+  approval_required: guestReplyApproval,
+}
+
+export function sendResolved(result: SendOutcome): ApprovalResponse {
+  return {
+    approval_id: APPROVAL_ID,
+    approved: true,
+    tool: 'send_guest_reply',
+    result,
+    run_id: RUN_ID,
+    run_status: 'COMPLETED',
+    answer: 'The approved action was executed.',
+    trace: [],
+    approval_required: null,
+  }
+}
+
+export const confirmedSent: SendOutcome = {
+  status: 'confirmed_sent',
+  conversation_ref: CONVERSATION_REF,
+  message: 'Lodgify reports the message as Delivered.',
+  messages: [
+    {
+      message_ref: 'm-cccc',
+      message_status: 'Delivered',
+      created_at: '2026-09-03T03:15:17',
+    },
+  ],
+}
+
+export const unknownSendState: SendOutcome = {
+  status: 'unknown_send_state',
+  conversation_ref: CONVERSATION_REF,
+  message:
+    'Delivery could not be confirmed. Do not resend automatically. Check the Lodgify thread before taking further action.',
+  messages: [],
+}
+
+export const confirmedFailed: SendOutcome = {
+  status: 'confirmed_failed',
+  conversation_ref: CONVERSATION_REF,
+  message: 'Nothing was sent. The provider rejected the message (400).',
+  messages: [],
 }

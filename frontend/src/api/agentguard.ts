@@ -4,7 +4,9 @@
 import { query, request } from './client'
 import type {
   AgentResponse,
+  ConversationDetail,
   CurrentUser,
+  InboxPage,
   LoginResponse,
   ApprovalResponse,
   ApprovalStatus,
@@ -106,4 +108,36 @@ export function reconcileRuns(staleAfterSeconds?: number): Promise<ReconcileResp
     `/runs/reconcile${query({ stale_after_seconds: staleAfterSeconds })}`,
     { method: 'POST' },
   )
+}
+
+export function getInbox(options?: {
+  propertySlug?: string
+  limit?: number
+}): Promise<InboxPage> {
+  return request<InboxPage>(
+    `/inbox${query({
+      property_slug: options?.propertySlug,
+      limit: options?.limit,
+    })}`,
+  )
+}
+
+export function getConversation(conversationRef: string): Promise<ConversationDetail> {
+  return request<ConversationDetail>(`/inbox/${conversationRef}`)
+}
+
+/**
+ * Submits a composed reply for approval. **This sends nothing.** It creates a
+ * governed run whose single pending action is `send_guest_reply`; a human still
+ * has to approve it before anything reaches the guest.
+ */
+export function requestGuestReply(
+  conversationRef: string,
+  subject: string,
+  message: string,
+): Promise<AgentResponse> {
+  return request<AgentResponse>(`/inbox/${conversationRef}/reply`, {
+    method: 'POST',
+    body: JSON.stringify({ subject, message }),
+  })
 }

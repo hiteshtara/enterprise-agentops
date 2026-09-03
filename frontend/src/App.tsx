@@ -7,6 +7,8 @@ import { useAsync } from './hooks/useAsync'
 import { AgentPage } from './pages/AgentPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { AuditPage } from './pages/AuditPage'
+import { ConversationPage } from './pages/ConversationPage'
+import { InboxPage } from './pages/InboxPage'
 import { LoginPage } from './pages/LoginPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { RunDetailPage } from './pages/RunDetailPage'
@@ -23,6 +25,8 @@ function Console() {
       <Routes>
         <Route path="/" element={<OverviewPage />} />
         <Route path="/agent" element={<AgentPage />} />
+        <Route path="/inbox" element={<InboxPage />} />
+        <Route path="/inbox/:conversationRef" element={<ConversationPage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:runId" element={<RunDetailPage />} />
         <Route path="/approvals" element={<ApprovalsPage />} />

@@ -601,6 +601,9 @@ export LODGIFY_API_KEY=...     # unset -> the connector's tools are simply absen
 | `list_properties` | READ | no — configuration only |
 | `get_property_availability` | READ | `GET /v2/availability/{id}` |
 | `get_property_quote` | READ | `GET /v2/quote/{id}` |
+| `list_recent_guest_conversations` | READ | `GET /v2/reservations/bookings` + `GET /v2/messaging/{id}` |
+| `get_guest_conversation` | READ | `GET /v2/messaging/{id}` |
+| `send_guest_reply` | **DANGEROUS** | `POST /v1/reservation/booking/{id}/messages` |
 
 ### The property-slug boundary
 
@@ -644,13 +647,92 @@ observability tables.
 ### What it deliberately cannot do
 
 No reservation creation, no tentative bookings, no calendar or rate writes, no
-messages, payments, cancellations, guest records, webhooks or hosted checkout. The
-Lodgify client exposes exactly two GET methods.
+payments, cancellations, guest records, webhooks or hosted checkout. `LodgifyClient`
+still exposes exactly two GET methods; the one write in the codebase lives in a
+separate messaging client and is covered below.
 
 Argument validation (unknown slug, malformed date, inverted range, window over 31
 days, guest count outside 1–32) raises, which the runtime treats as recoverable — the
 model is told what was wrong and corrects itself. Provider failure is not an argument
 error and never surfaces that way.
+
+## Inbox Assistant — V1
+
+Read guest conversations, draft a reply, approve it, send it once, verify it.
+`send_guest_reply` is the first outward-facing action in AgentGuard: a real person
+outside the business receives it.
+
+```
+Inbox (console polls /inbox every 30s while open)
+  └─ conversation detail
+       ├─ Generate draft   → ordinary /agent/run  (audited, measured, sends nothing)
+       ├─ Send for approval → POST /inbox/{ref}/reply
+       │      └─ AgentService.request_action → run parks WAITING_FOR_APPROVAL
+       └─ Approve & Send   → POST /agent/approvals/{id}   (ADMIN only)
+              └─ snapshot → one POST → re-read → diff → outcome
+```
+
+**The safety model, and why each part exists.** All of it follows from findings
+recorded in [`docs/LODGIFY_API.md`](docs/LODGIFY_API.md).
+
+- **Externally visible and irreversible.** The message reaches a real guest and there
+  is no edit or delete endpoint. That is why it is `DANGEROUS` rather than `WRITE`,
+  and why approval is mandatory every time — there is no auto-approve path in V1.
+- **No automatic retry, ever.** Lodgify offers no idempotency key, so a timeout is
+  ambiguous: the message may already have gone. There is no retry loop around the
+  POST and no generic retry middleware may be added.
+- **The POST returns 200 with an empty body** and no identifier, so the result cannot
+  be correlated from the response. The connector snapshots the thread, sends exactly
+  once, re-reads, and attributes only rows that are new *and* carry the exact subject
+  and body it sent.
+- **One send can produce several rows** — Lodgify fans out per configured route — so
+  verification reports all matches rather than assuming one. Too many rows, or rows
+  spread too far apart in time, means correlation is unsafe and the outcome is
+  unknown.
+- **`route` is not proof of delivery.** A verified live send recorded `route: null`
+  and was genuinely delivered. The field is never read and never emitted; delivery is
+  reported from `message_status` only.
+- **Three outcomes, not two.** `confirmed_sent`, `confirmed_failed`, and
+  `unknown_send_state` — which is *not* a failure, is never retried, and tells both
+  the model and the operator in words to check the thread before acting.
+- **The approved text is the sent text.** Validation rejects; it never rewrites. The
+  approval card renders the full message verbatim, never truncated or JSON-escaped.
+- **OTA routing is unverified.** The one live send went out by email. The UI says
+  "Lodgify reports the message as Delivered" and never "sent to Airbnb".
+
+**What the model may name.** Only a `conversation_ref` — an opaque, deterministic
+digest of the booking id — plus the subject and message. `booking_id`, `thread_uid`,
+`type` and `send_notification` appear in no tool schema; the connector resolves the
+first two and pins the last two (`Owner`, `true`). A fabricated ref resolves against
+real bookings, matches nothing, and raises.
+
+**Needs-attention is deliberately three-valued.** The newest message being from the
+guest means `needs_attention`; from us, `responded`; no messages, an unrecognised
+sender, or an unreadable thread means `unknown`. Nothing infers a reply state from
+booking data, because no proven signal exists there. Uncertainty never becomes
+"needs a reply".
+
+**Polling, not webhooks.** The console polls `GET /inbox` every 30 seconds while the
+page is open and visible, and stops when the tab is hidden or the page unmounts —
+so nothing calls Lodgify when nobody is looking. No background worker, no queue, no
+scheduler to supervise.
+
+**Guest PII.** `guest_name`, `guest_email`, `guest_phone`, `source_text`, financial
+fields and raw payloads are never read. Message *bodies* do reach model context —
+drafting a reply requires reading the question — and the approved outbound text is
+deliberately stored in the audit log, because it is the externally-visible action
+being authorized.
+
+**Known friction.** `APPROVE_DANGEROUS` is ADMIN-only, so every routine guest reply
+needs an ADMIN approver. That is left as-is deliberately: weakening it would weaken
+approval for every dangerous action in the system. A dedicated hospitality permission
+is the likely fix, decided on its own merits.
+
+Priyanka Homes reply rules live in [`app/hospitality.py`](app/hospitality.py),
+separate from transport, and travel with `get_guest_conversation` so drafting never
+depends on the model remembering to look them up. It names the topics it *cannot*
+answer — refunds, pets, check-in times, per-property parking — so the assistant
+acknowledges rather than invents.
 
 ## Observability
 

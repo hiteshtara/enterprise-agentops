@@ -45,6 +45,13 @@ APPROVAL_DENIED_ANSWER = (
     "The requested action was not approved, so nothing was executed."
 )
 
+DIRECT_ACTION_ANSWER = "The approved action was executed."
+
+DIRECT_ACTION_FAILED_ANSWER = (
+    "The approved action could not be executed. The failure has been recorded "
+    "in the audit log."
+)
+
 
 def serialise_tool_result(result: Any) -> str:
     """Render a tool result as JSON for the model.
@@ -152,6 +159,95 @@ class AgentService:
 
         return self.drive(run_id, conversation, [], actor_user_id=actor_user_id)
 
+    def request_action(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        summary: str,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Request one specific tool call, with no model in the loop.
+
+        For an action a person has already composed -- a guest reply typed in
+        the console -- where sending it through the model would risk the model
+        rewriting the very text the human is about to approve.
+
+        The action still goes through the whole governance path: a Run is
+        created, the request is audited, `ToolRegistry.execute` raises
+        `ApprovalRequired` exactly as it would for a model-initiated call, and
+        the run parks until a human decides. Nothing here bypasses approval; it
+        bypasses only the drafting.
+
+        The persisted conversation is deliberately empty. That is what marks the
+        run as direct, so approval executes the tool and stops rather than
+        resuming a model loop that was never running.
+        """
+        run_id = self.run_store.create_run(
+            summary,
+            requested_by_user_id=actor_user_id,
+        )
+
+        self.run_store.save_conversation(run_id, [])
+
+        call = ToolCall(
+            id=f"direct-{run_id}",
+            name=tool,
+            arguments=arguments,
+        )
+
+        self.audit_store.record(
+            "TOOL_REQUESTED",
+            {"tool": tool, "arguments": arguments},
+            run_id=run_id,
+            actor_user_id=actor_user_id,
+        )
+
+        self.run_store.add_step(
+            run_id,
+            StepType.TOOL_REQUESTED,
+            tool_name=tool,
+            arguments=arguments,
+        )
+
+        watch = Stopwatch(self.monotonic_ns)
+
+        try:
+            with watch:
+                result = self.tool_registry.execute(tool, arguments)
+
+        except ApprovalRequired as approval:
+            return self.park(run_id, [], call, approval, [], actor_user_id)
+
+        except RECOVERABLE_TOOL_ERRORS as exc:
+            self.record_tool_execution(run_id, call, watch, exc=exc)
+            self.fail_tool(run_id, call, type(exc).__name__, str(exc), actor_user_id)
+            self.run_store.fail(run_id, DIRECT_ACTION_FAILED_ANSWER)
+
+            return self.finished(
+                run_id,
+                RunStatus.FAILED,
+                DIRECT_ACTION_FAILED_ANSWER,
+                [],
+            )
+
+        except Exception as exc:  # noqa: BLE001 -- deliberate safety net
+            self.record_tool_execution(run_id, call, watch, exc=exc)
+
+            return self.abort(run_id, call, exc, [], actor_user_id)
+
+        # A READ tool needs no approval and simply runs. Governance decided
+        # that, not this method.
+        self.record_tool_execution(run_id, call, watch, result=result)
+        self.record_execution(run_id, call, result, actor_user_id)
+        self.run_store.complete(run_id, DIRECT_ACTION_ANSWER)
+
+        return self.finished(
+            run_id,
+            RunStatus.COMPLETED,
+            DIRECT_ACTION_ANSWER,
+            [{"tool": tool, "arguments": arguments, "result": result}],
+        )
+
     def resolve_approval(
         self,
         approval_id: str,
@@ -238,6 +334,11 @@ class AgentService:
 
         conversation = [ModelMessage.from_dict(entry) for entry in run.conversation]
 
+        # An empty conversation marks a run created by `request_action`: a human
+        # composed the action, so there is no model loop to resume and no answer
+        # for a model to write. Executing the tool *is* the whole run.
+        direct = not conversation
+
         self.approval_store.resolve(
             approval_id,
             approved=True,
@@ -282,13 +383,24 @@ class AgentService:
         except RECOVERABLE_TOOL_ERRORS as exc:
             self.record_tool_execution(run_id, call, watch, exc=exc)
 
-            conversation.append(
-                ModelMessage.tool_result(
-                    call.id,
-                    call.name,
-                    self.fail_tool(run_id, call, type(exc).__name__, str(exc)),
+            failure = self.fail_tool(run_id, call, type(exc).__name__, str(exc))
+
+            if direct:
+                self.run_store.fail(run_id, DIRECT_ACTION_FAILED_ANSWER)
+
+                return self.approval_outcome(
+                    approval_id,
+                    pending.tool,
+                    None,
+                    self.finished(
+                        run_id,
+                        RunStatus.FAILED,
+                        DIRECT_ACTION_FAILED_ANSWER,
+                        [],
+                    ),
                 )
-            )
+
+            conversation.append(ModelMessage.tool_result(call.id, call.name, failure))
 
             outcome = self.drive(run_id, conversation, [], actor_user_id=actor_user_id)
 
@@ -307,14 +419,6 @@ class AgentService:
         self.record_tool_execution(run_id, call, watch, result=result)
         self.record_execution(run_id, call, result, actor_user_id)
 
-        conversation.append(
-            ModelMessage.tool_result(
-                call.id,
-                call.name,
-                serialise_tool_result(result),
-            )
-        )
-
         trace = [
             {
                 "tool": call.name,
@@ -322,6 +426,29 @@ class AgentService:
                 "result": result,
             }
         ]
+
+        if direct:
+            self.run_store.complete(run_id, DIRECT_ACTION_ANSWER)
+
+            return self.approval_outcome(
+                approval_id,
+                pending.tool,
+                result,
+                self.finished(
+                    run_id,
+                    RunStatus.COMPLETED,
+                    DIRECT_ACTION_ANSWER,
+                    trace,
+                ),
+            )
+
+        conversation.append(
+            ModelMessage.tool_result(
+                call.id,
+                call.name,
+                serialise_tool_result(result),
+            )
+        )
 
         outcome = self.drive(run_id, conversation, trace, actor_user_id=actor_user_id)
 
