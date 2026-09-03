@@ -35,6 +35,7 @@ __all__ = [
     "DraftStore",
     "conversation_fingerprint",
     "draft_ref_for",
+    "operator_attention_for",
 ]
 
 
@@ -176,6 +177,76 @@ class ConversationDraft:
             "edited_at": self.edited_at,
             "sent_at": self.sent_at,
         }
+
+
+# Which *current* outcomes leave a person with something to do. The console
+# renders one badge from this, so the mapping is the whole of the rule and is
+# written out rather than inferred from a category.
+#
+# `DISCARDED` is deliberately absent, and so is anything else this table does
+# not name: a discarded outcome is not a conclusion about the conversation, it
+# is the withdrawal of one, so there is nothing to override the provider with
+# and the fallback applies.
+ATTENTION_BY_STATUS: dict[str, bool] = {
+    DraftStatus.NEEDS_HUMAN_REVIEW.value: True,
+    DraftStatus.DRAFT_READY.value: True,
+    DraftStatus.EDITED.value: True,
+    STALE: True,
+    DraftStatus.NO_REPLY_NEEDED.value: False,
+    DraftStatus.SENT.value: False,
+}
+
+# What the provider's own conversation status means when it is all we have.
+PROVIDER_ATTENTION_STATUS = "needs_attention"
+
+
+def operator_attention_for(
+    draft: ConversationDraft | None,
+    current_fingerprint: str | None,
+    provider_status: str | None,
+) -> bool:
+    """Whether a human still has something to do with this conversation.
+
+    Two different facts were being read off one badge. The provider's status
+    says only who spoke last: a guest's closing "thanks, see you then" leaves a
+    thread `needs_attention` forever, because nobody will ever speak after the
+    guest. AgentGuard's outcome says whether there is work -- and once it has
+    processed *this* state and concluded there is none, the provider's status is
+    answering a question nobody asked. Showing both produced "Needs attention"
+    beside "No reply needed" on the same row.
+
+    So the current AgentGuard outcome wins where there is one, and the provider
+    status is the fallback where there is not. This is a projection for our own
+    console: nothing here writes to the provider, and `provider_status` stays
+    on the row untouched for anything that needs the raw fact.
+
+    "Current" is the fingerprint match `status_for` already computes -- not a
+    second staleness rule that could drift from it. That matters most in one
+    direction: a `NO_REPLY_NEEDED` suppresses attention only for the state it
+    was computed on, so a new guest message brings the badge straight back
+    rather than being swallowed by yesterday's decision.
+    """
+    if draft is None:
+        return provider_status == PROVIDER_ATTENTION_STATUS
+
+    status = draft.status_for(current_fingerprint)
+
+    if status == STALE:
+        # A superseded reply somebody could still send is the one thing an
+        # operator most needs to see, so staleness raises attention even though
+        # the outcome behind it is no longer current.
+        return True
+
+    if not draft.is_current(current_fingerprint):
+        # Superseded and not sendable -- `NO_REPLY_NEEDED` for a state the
+        # conversation has moved past. There is no current outcome, so the
+        # provider is authoritative again.
+        return provider_status == PROVIDER_ATTENTION_STATUS
+
+    return ATTENTION_BY_STATUS.get(
+        status,
+        provider_status == PROVIDER_ATTENTION_STATUS,
+    )
 
 
 def to_draft(record: ConversationDraftRecord) -> ConversationDraft:

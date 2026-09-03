@@ -27,7 +27,13 @@ from app.connectors.lodgify.inbox import (
 from app.connectors.lodgify.messaging_client import INBOX_STAY_FILTERS, STAY_FILTER_ALL
 from app.connectors.lodgify.refs import conversation_ref_for
 from app.conversation_activity import ConversationActivityStore
-from app.inbox_view import DiscoveryCache, build_inbox
+from app.inbox_view import (
+    SEED_BATCH,
+    SWEEP_SIZE,
+    DiscoveryCache,
+    build_inbox,
+    prepare_activity_index,
+)
 from tests.lodgify_fakes import FAKE_KEY, FakeLodgify, booking, message, thread
 
 # -- fixtures, all invented -------------------------------------------------
@@ -145,13 +151,30 @@ def refresh_api(api):
     )
     module.inbox_discovery.clear()
 
+    # The Inbox orders from the activity index and never seeds it, so nothing
+    # is renderable until a preparation cycle has read these conversations
+    # once. That is what `POST /inbox/refresh` does in production. Warming it
+    # here and then clearing the request log keeps every count below about the
+    # steady state this file exists to measure, not about cold start -- cold
+    # start has its own counts in `tests/test_activity_index_ordering.py`.
+    prepare_activity_index(module.lodgify_inbox, module.activity_store)
+
+    fake.requests.clear()
+
     api.fake = fake
 
     return api
 
 
 def test_refresh_does_not_repeat_the_inbox_discovery_scan(refresh_api):
-    """The 502 that started this: two full scans for one user action."""
+    """The 502 that started this: two full scans for one user action.
+
+    The refresh does walk the booking list once -- that is the index's
+    preparation cycle, and it is a fixed handful of pages however many
+    conversations the account has. What it must never do again is *discover*
+    what to draft for by reading a thread per conversation: that ordering now
+    comes from the index, for no provider calls at all.
+    """
     fake = refresh_api.fake
     admin = refresh_api.client("ADMIN")
 
@@ -165,12 +188,13 @@ def test_refresh_does_not_repeat_the_inbox_discovery_scan(refresh_api):
 
     assert admin.post("/inbox/refresh").status_code == 200
 
-    # Not one more discovery page. The refresh consumed what the poll found.
-    assert len(discovery_reads(fake)) == after_poll
+    # One booking scan for the preparation cycle, and no second discovery on
+    # top of it: the refresh consumed the pairs the poll published.
+    assert len(discovery_reads(fake)) == after_poll + len(INBOX_STAY_FILTERS)
 
-    # And not one more discovery thread read either: the only new thread reads
-    # are the authoritative per-conversation reads the refresh itself needs.
-    assert len(fake.thread_reads) - threads_after_poll <= 3
+    # Bounded by the sweep budget plus the authoritative per-conversation
+    # reads the refresh itself needs -- never by the size of the account.
+    assert len(fake.thread_reads) - threads_after_poll <= SWEEP_SIZE + 3
 
 
 def test_refresh_processes_the_refs_the_poll_discovered(refresh_api):
@@ -198,15 +222,30 @@ def test_refresh_processes_the_refs_the_poll_discovered(refresh_api):
 
 
 def test_refresh_discovers_once_itself_when_nothing_recent_is_shared(refresh_api):
-    """No poll has run. The refresh may scan -- once."""
+    """No poll has run. The refresh discovers for itself -- from the bookings.
+
+    Two Current+Upcoming walks: the index's preparation cycle, then discovery.
+    Both are a fixed handful of booking pages that does not grow with the
+    account, and neither reads a thread to decide what to draft for. That is
+    the number this file defends -- against the 155-request
+    thread-per-conversation scan discovery used to be, and against an
+    index-only discovery, which costs nothing and hides every conversation the
+    index has not read yet.
+    """
     fake = refresh_api.fake
 
     assert refresh_api.client("ADMIN").post("/inbox/refresh").status_code == 200
 
-    assert len(discovery_reads(fake)) == len(INBOX_STAY_FILTERS)
+    assert len(discovery_reads(fake)) == 2 * len(INBOX_STAY_FILTERS)
 
 
 def test_two_overlapping_refreshes_do_not_multiply_the_scan(refresh_api):
+    """The second refresh reuses the first refresh's published discovery.
+
+    So the second costs its preparation cycle alone: the cost of a refresh
+    stays flat when the console polls faster than the discovery TTL, which is
+    the overlap the shared discovery exists for.
+    """
     fake = refresh_api.fake
     admin = refresh_api.client("ADMIN")
 
@@ -214,9 +253,11 @@ def test_two_overlapping_refreshes_do_not_multiply_the_scan(refresh_api):
 
     after_first = len(discovery_reads(fake))
 
+    assert after_first == 2 * len(INBOX_STAY_FILTERS)
+
     assert admin.post("/inbox/refresh").status_code == 200
 
-    assert len(discovery_reads(fake)) == after_first
+    assert len(discovery_reads(fake)) == after_first + len(INBOX_STAY_FILTERS)
 
 
 def test_the_shared_discovery_holds_no_guest_text(refresh_api):
@@ -247,6 +288,136 @@ def test_a_refresh_sends_nothing(refresh_api):
     assert all(request.method == "GET" for request in refresh_api.fake.requests)
 
 
+def test_a_settled_conversation_is_skipped_on_the_next_refresh(refresh_api):
+    """The fingerprint pre-filter still works when discovery supplies it.
+
+    An indexed ref carries the fingerprint the index stored, which is the same
+    state the draft was worked out for -- so a second refresh spends nothing on
+    a conversation nothing has changed about.
+    """
+    admin = refresh_api.client("ADMIN")
+
+    first = admin.post("/inbox/refresh")
+
+    assert first.status_code == 200, first.text
+    assert first.json()["processed"] == 3
+
+    # Force the fallback: no shared discovery, so the pairs come from the
+    # booking scan and the index rather than from a poll.
+    refresh_api.module.inbox_discovery.clear()
+
+    second = admin.post("/inbox/refresh")
+
+    assert second.status_code == 200, second.text
+    assert second.json() == {
+        "processed": 0,
+        "drafted": 0,
+        "skipped": 3,
+        "no_reply": 0,
+        "failed": 0,
+    }
+
+
+def test_an_empty_fingerprint_cannot_skip_a_conversation(refresh_api):
+    """Why an unindexed ref's empty fingerprint is safe rather than lossy.
+
+    Discovery supplies the empty string for a conversation the index has never
+    read. The pre-filter finds no draft for it, so the refresh *processes* the
+    conversation -- and `process()` re-reads it and computes the authoritative
+    fingerprint itself. The empty value can cost work; it can never skip work.
+    """
+    admin = refresh_api.client("ADMIN")
+
+    assert admin.post("/inbox/refresh").status_code == 200
+
+    module = refresh_api.module
+
+    ref = conversation_ref_for(1001)
+
+    settled = module.draft_store.current_for(ref)
+
+    assert settled is not None
+    assert settled.is_settled()
+
+    assert module.draft_store.for_state(ref, "") is None
+
+
+# -- A warming index must not hide a conversation from drafting -------------
+
+
+@pytest.fixture
+def warming_api(api):
+    """More conversations than one seeding batch, and nothing indexed yet.
+
+    Cold start as the refresh route actually meets it: the preparation cycle
+    seeds `SEED_BATCH` of them and the rest stay unread, which is precisely
+    when an index-only discovery would leave a conversation with no reply
+    prepared and no way to notice.
+    """
+    from app.conversation_refresh import ConversationRefreshService
+
+    module = api.module
+
+    fake = archive(
+        [
+            (3000 + index, f"warm-{index}", "2026-09-01T10:00:00")
+            for index in range(SEED_BATCH + 3)
+        ]
+    )
+
+    module.lodgify_inbox = fake.inbox()
+    module.conversation_refresh = ConversationRefreshService(
+        inbox=module.lodgify_inbox,
+        drafts=module.draft_store,
+        agent=module.agent,
+    )
+    module.inbox_discovery.clear()
+
+    api.fake = fake
+
+    return api
+
+
+def test_the_refresh_prepares_the_conversations_the_index_has_not_reached(warming_api):
+    """The anti-hiding property, end to end through the route.
+
+    Three conversations remain unseeded after the cycle's batch. They are the
+    ones the refresh spends its budget on, because a conversation AgentGuard
+    has never evaluated outranks one it already has.
+    """
+    module = warming_api.module
+
+    every = sorted(
+        conversation_ref_for(3000 + index) for index in range(SEED_BATCH + 3)
+    )
+
+    # A seeding batch takes the unseeded refs in ascending reference order, so
+    # these three are the ones still unread when discovery runs.
+    unseeded = every[SEED_BATCH:]
+
+    result = warming_api.client("ADMIN").post("/inbox/refresh")
+
+    assert result.status_code == 200, result.text
+
+    # Unchanged: the per-poll budget still bounds the work.
+    assert result.json()["processed"] == module.MAX_REFRESH_PER_POLL
+
+    prepared = set(module.draft_store.latest_by_conversation())
+
+    assert set(unseeded) <= prepared
+
+
+def test_the_refresh_still_reads_no_thread_to_discover(warming_api):
+    """Discovery's whole cost is the booking scan, however cold the index is."""
+    fake = warming_api.fake
+
+    assert warming_api.client("ADMIN").post("/inbox/refresh").status_code == 200
+
+    # Two Current+Upcoming walks -- the preparation cycle and discovery -- and
+    # not one thread read attributable to either.
+    assert len(discovery_reads(fake)) == 2 * len(INBOX_STAY_FILTERS)
+
+
 def test_the_request_budget_for_one_poll_cycle(refresh_api):
     """The number this whole file exists to hold down.
 
@@ -259,8 +430,8 @@ def test_the_request_budget_for_one_poll_cycle(refresh_api):
 
     assert admin.get("/inbox").status_code == 200
 
-    #  2 booking pages -- one per Inbox stay filter
-    #  3 thread reads  -- one per candidate conversation
+    #  2 booking pages -- one per Inbox stay filter, to resolve refs to threads
+    #  3 thread reads  -- one per row *on the page*, never per conversation
     assert len(fake.booking_reads) == 2
     assert len(fake.thread_reads) == 3
 
@@ -270,16 +441,18 @@ def test_the_request_budget_for_one_poll_cycle(refresh_api):
 
     assert admin.post("/inbox/refresh").status_code == 200
 
+    #  2 booking pages + 3 thread reads -- the index preparation cycle
     #  0 booking pages for discovery -- reused from the poll
     #  3 booking pages, one per conversation resolved for its authoritative read
     #  3 thread reads
     refresh = len(fake.requests) - poll
 
-    assert refresh == 6
+    assert refresh == 11
 
-    # Before this change the refresh repeated discovery in full: 2 + 3 for the
-    # scan on top of the 6 it actually needed.
-    assert refresh < poll + 6
+    # The poll no longer grows with the account: ordering is an index query.
+    # Three conversations is too small to show that, so it is asserted where a
+    # large fixture makes it visible -- see
+    # `tests/test_activity_index_ordering.py`.
 
 
 def test_resolving_the_same_conversation_twice_walks_the_archive_once():
@@ -510,7 +683,30 @@ def remember_historic(store: ConversationActivityStore) -> None:
     )
 
 
+def seed_full_first_page(store: ConversationActivityStore) -> None:
+    """Index every conversation `full_first_page` puts on booking page one.
+
+    The Inbox never seeds on a read, so a page of rows only exists once a
+    preparation cycle has been through. Written directly rather than by running
+    a cycle so that the request counts in these tests measure the read alone.
+    """
+    for index in range(BOOKING_SCAN_SIZE):
+        store.upsert(
+            conversation_ref=conversation_ref_for(2000 + index),
+            conversation_fingerprint=f"fp-{index}",
+            status="responded",
+            last_message_at=f"2026-01-01T09:00:{index % 60:02d}",
+            last_message_sender="Owner",
+            message_count=1,
+            property_slug="renovated-3rd-floor-retreat-3-beds-roslindale-village",
+            source="BookingCom",
+            booking_status="Booked",
+        )
+
+
 def test_a_partial_scan_marks_the_inbox_incomplete(activity):
+    seed_full_first_page(activity)
+
     fake = full_first_page(booking_page_failures={2: 503})
 
     result = build_inbox(fake.inbox(), activity, limit=20)
@@ -520,6 +716,8 @@ def test_a_partial_scan_marks_the_inbox_incomplete(activity):
 
 
 def test_a_complete_scan_is_not_marked_incomplete(activity):
+    seed_full_first_page(activity)
+
     fake = full_first_page()
 
     assert build_inbox(fake.inbox(), activity, limit=20).incomplete is False

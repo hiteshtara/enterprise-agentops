@@ -1,4 +1,12 @@
-"""Merging live conversations with the persisted activity index."""
+"""Rendering the Inbox page from the persisted activity index.
+
+Ordering comes from the index, so a conversation the index has never seen is
+not on the page however live it is -- seeding belongs to the preparation cycle
+alone (`prepare_activity_index`), and the request-count reasons for that are
+covered in `tests/test_activity_index_ordering.py`. Every test here that wants
+a live booking on the page therefore remembers it first, which is what a
+preparation cycle would have done.
+"""
 
 from app.connectors.lodgify.messaging_client import INBOX_STAY_FILTERS
 from app.connectors.lodgify.messaging_models import ConversationStatus
@@ -100,6 +108,7 @@ def test_live_and_persisted_rows_merge(database):
     fake = live_fake([(1001, "thread-a", "2026-09-02T09:00:00", "Owner")])
     store = ConversationActivityStore(database=database)
 
+    remember(store, conversation_ref_for(1001), "2026-09-02T09:00:00")
     remember(store, "PH-HISTORIC1", "2026-09-01T09:00:00")
 
     rows = build_inbox(fake.inbox(), store).conversations
@@ -177,6 +186,8 @@ def test_ordering_is_by_last_message_at_across_both_sources(database):
     )
     store = ConversationActivityStore(database=database)
 
+    remember(store, conversation_ref_for(1001), "2026-09-02T09:00:00")
+    remember(store, conversation_ref_for(1002), "2026-08-20T09:00:00")
     remember(store, "PH-HISTORIC1", "2026-09-03T12:06:33")
     remember(store, "PH-HISTORIC2", "2026-08-25T09:00:00")
 
@@ -308,10 +319,17 @@ def test_enrichment_updates_the_index_when_it_finds_newer_activity(database):
     )
 
 
-def test_the_live_scan_upserts_the_index(database):
-    """One durable index regardless of trigger."""
+def test_reading_a_page_row_refreshes_its_index_entry(database):
+    """One durable index regardless of trigger.
+
+    Refreshing an existing row is not seeding: the row was already there, and
+    the thread was read because it made the page. What a read must never do is
+    *create* a row -- see below.
+    """
     fake = live_fake([(1001, "thread-a", "2026-09-02T09:00:00", "Owner")])
     store = ConversationActivityStore(database=database)
+
+    remember(store, conversation_ref_for(1001), "2026-01-01T00:00:00")
 
     build_inbox(fake.inbox(), store)
 
@@ -319,6 +337,18 @@ def test_the_live_scan_upserts_the_index(database):
 
     assert stored is not None
     assert stored.last_message_at == "2026-09-02T09:00:00"
+
+
+def test_a_read_never_creates_an_index_row(database):
+    """Seeding is the preparation cycle's job, so no read may trigger one."""
+    fake = live_fake([(1001, "thread-a", "2026-09-02T09:00:00", "Owner")])
+    store = ConversationActivityStore(database=database)
+
+    result = build_inbox(fake.inbox(), store)
+
+    assert result.conversations == []
+    assert result.incomplete is True
+    assert store.for_conversation(conversation_ref_for(1001)) is None
 
 
 def test_a_historic_row_survives_ordinary_polling(database):
@@ -459,6 +489,8 @@ def test_a_failed_enrichment_keeps_its_ordering_position(database):
 
     # Newer than 1001, older than nothing: the top of the page.
     remember(store, HISTORIC_REF, HISTORIC_AT)
+    remember(store, conversation_ref_for(1001), "2026-09-02T09:00:00")
+    remember(store, conversation_ref_for(1002), "2026-08-01T09:00:00")
 
     expected = [
         HISTORIC_REF,
@@ -768,6 +800,8 @@ def test_a_row_preserved_by_the_empty_read_guard_keeps_its_ordering_position(dat
 
     # Newer than 1001, older than nothing: the top of the page.
     remember(store, EMPTY_REF, HISTORIC_AT)
+    remember(store, conversation_ref_for(1001), "2026-09-02T09:00:00")
+    remember(store, conversation_ref_for(1002), "2026-08-01T09:00:00")
 
     expected = [
         EMPTY_REF,

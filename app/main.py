@@ -47,10 +47,16 @@ from app.drafts import (
     SENDABLE_STATUSES,
     DraftStatus,
     DraftStore,
+    operator_attention_for,
 )
 from app.historical_replies import HistoricalReplyStore, index_one_conversation
 from app.identity import PermissionDenied, User
-from app.inbox_view import DiscoveryCache, build_inbox, discover_conversations
+from app.inbox_view import (
+    DiscoveryCache,
+    build_inbox,
+    discover_conversations,
+    prepare_activity_index,
+)
 from app.knowledge import KnowledgeStatus, KnowledgeStore
 from app.knowledge_conflicts import find_conflicts
 from app.knowledge_topics import GUEST_FACING, INTERNAL_OPERATION
@@ -435,11 +441,15 @@ def get_inbox(
     property_slug: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> InboxPage:
-    """Recent guest conversations, read live from Lodgify.
+    """Recent guest conversations, ordered from the index and read live.
 
     The console polls this while the Inbox is open, which is the whole of V1's
     "notice a new message" mechanism -- no webhook, no background worker, no
     process that keeps calling Lodgify when nobody is looking.
+
+    Ordering costs no provider calls: it comes from `conversation_activity`.
+    The provider is asked only which bookings are current or upcoming, and what
+    the threads on this page say now. See `app/inbox_view.build_inbox`.
     """
     inbox = require_inbox()
 
@@ -486,10 +496,21 @@ def get_inbox(
             draft.to_dict(row.get("fingerprint")) if draft is not None else None
         )
 
+        # The two facts meet here and nowhere else: the provider's status came
+        # off the live read, the outcome came out of our store. Deriving it in
+        # this loop keeps `build_inbox` unaware that drafts exist, and the
+        # provider's own `status` untouched on the row.
+        row["operator_attention"] = operator_attention_for(
+            draft,
+            row.get("fingerprint"),
+            row.get("status"),
+        )
+
     return InboxPage(
         conversations=conversations,
         count=len(conversations),
         incomplete=result.incomplete,
+        activity_stale=result.activity_stale,
     )
 
 
@@ -528,6 +549,13 @@ def get_conversation(
     return ConversationDetail(
         **conversation,
         fingerprint=fingerprint,
+        # The same helper the Inbox row uses, so one conversation cannot read
+        # "Needs attention" on one screen and "No reply needed" on the other.
+        operator_attention=operator_attention_for(
+            draft,
+            fingerprint,
+            conversation.get("status"),
+        ),
         draft=(
             DraftSummary(**draft.to_dict(fingerprint)) if draft is not None else None
         ),
@@ -566,12 +594,24 @@ def refresh_inbox(
     number of model calls, not all of them at once. The rest arrive on the next
     poll.
 
+    **Also the index's preparation cycle.** Before any drafting, this seeds the
+    conversations the activity index has never read and re-reads its
+    least-recently-refreshed slice -- both bounded, so the cost of a cycle does
+    not grow with the account. That is what keeps `GET /inbox` able to order
+    from the index without reading every thread, and it is the recovery path
+    for a webhook that never arrived. Metadata only; it drafts nothing and
+    sends nothing.
+
     **Discovery is shared, not repeated.** This used to run its own
     `list_conversations`, which against the live account meant a second
     155-request scan of the provider seconds after the Inbox poll had done the
     identical one -- 350-445 requests inside one poll cycle, and intermittent
     502s from a rate-limited provider. It now works from what the poll already
-    found, and discovers for itself only when nothing recent is available.
+    found, and falls back to the Current+Upcoming booking scan -- ~3 calls and
+    no thread reads -- when nothing recent is available. It deliberately does
+    not fall back to the index alone: an index that has not yet read a
+    conversation would leave it out of the ref set entirely, and nothing else
+    would prepare a reply for it.
 
     The shared fingerprint is a pre-filter and never a decision: `process`
     re-reads the conversation and recomputes it before spending anything, so a
@@ -581,17 +621,24 @@ def refresh_inbox(
     service = require_refresh()
     inbox = require_inbox()
 
+    try:
+        cycle = prepare_activity_index(inbox, activity_store)
+
+    except LodgifyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Conversations could not be loaded from the provider.",
+        ) from exc
+
     discovery = inbox_discovery.recent(limit)
 
     if discovery is None:
-        try:
-            discovery = discover_conversations(inbox, limit=limit)
-
-        except LodgifyUnavailable as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Conversations could not be loaded from the provider.",
-            ) from exc
+        discovery = discover_conversations(
+            inbox,
+            activity_store,
+            limit=limit,
+            incomplete=cycle.incomplete,
+        )
 
         # Publish it in turn, so two refreshes in quick succession -- or a poll
         # arriving behind this one -- do not each pay for a scan.

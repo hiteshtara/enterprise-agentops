@@ -266,6 +266,15 @@ class ConversationSummary(BaseModel):
     source: str | None = None
     booking_status: str | None = None
     status: str
+    # Whether a *person* still has something to do here, as opposed to who
+    # spoke last. `status` is the provider's fact and stays exactly as it was;
+    # this is AgentGuard's own projection, derived by
+    # `app.drafts.operator_attention_for` from the current processing outcome
+    # and falling back to `status` when there is none. Kept as a separate field
+    # rather than folded into `status` so nothing loses the provider's answer.
+    # Defaults True so a row built without it reads as it did before this
+    # existed -- the badge shows, which is the safe direction.
+    operator_attention: bool = True
     last_message_at: str | None = None
     last_message_sender: str | None = None
     last_message_excerpt: str | None = None
@@ -277,11 +286,17 @@ class ConversationSummary(BaseModel):
 class InboxPage(BaseModel):
     conversations: list[ConversationSummary] = []
     count: int
-    # True when a booking page did not answer during discovery, so the archive
-    # may hold conversations this page could not know about. The rows that are
-    # here were still read live; the flag says the list may be short, never that
-    # it is wrong. Defaults False so an older client sees the pre-existing shape.
+    # True when the list may be short: either a booking page did not answer
+    # during discovery, or a conversation exists that the activity index has
+    # not read yet. The rows that are here were still read live; the flag says
+    # the list may be short, never that it is wrong. Defaults False so an older
+    # client sees the pre-existing shape.
     incomplete: bool = False
+    # True when the ordering behind this page came from index rows that have
+    # not been refreshed recently, so a conversation that moved without a
+    # webhook may not be in its right position yet. Not an error, and it never
+    # hides a row. Defaults False for the same reason as `incomplete`.
+    activity_stale: bool = False
 
 
 class ConversationDetail(BaseModel):
@@ -295,6 +310,9 @@ class ConversationDetail(BaseModel):
     subject: str | None = None
     is_read: bool | None = None
     status: str
+    # The same derivation as the Inbox row, from the same helper, so the two
+    # screens cannot disagree about one conversation.
+    operator_attention: bool = True
     messages: list[ConversationMessageSummary] = []
 
 

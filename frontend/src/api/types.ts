@@ -257,6 +257,15 @@ export interface ConversationSummary {
   source: string | null
   booking_status: string | null
   status: ConversationStatus
+  /**
+   * Whether a person still has something to do here -- AgentGuard's own
+   * projection, not the provider's. `status` says only who spoke last, so a
+   * guest's closing acknowledgement leaves a thread `needs_attention` forever.
+   * This is derived on the server from the current processing outcome and falls
+   * back to `status` when there is none. Both fields travel: the provider's
+   * answer is never overwritten.
+   */
+  operator_attention: boolean
   last_message_at: string | null
   last_message_sender: MessageSender | null
   last_message_excerpt: string | null
@@ -268,11 +277,18 @@ export interface InboxPage {
   conversations: ConversationSummary[]
   count: number
   /**
-   * True when a booking page did not answer while the backend was discovering
-   * conversations. The rows that arrived were still read live -- the list may
-   * be short, it is never wrong.
+   * True when the list may be short: a booking page did not answer while the
+   * backend was discovering conversations, or a conversation exists that the
+   * activity index has not read yet. The rows that arrived were still read
+   * live -- the list may be short, it is never wrong.
    */
   incomplete: boolean
+  /**
+   * True when the ordering behind this page came from index rows that have not
+   * been refreshed recently, so a conversation that moved without a webhook may
+   * not be in its right position yet. Not an error, and it hides nothing.
+   */
+  activity_stale: boolean
 }
 
 export interface ConversationDetail {
@@ -286,6 +302,8 @@ export interface ConversationDetail {
   subject: string | null
   is_read: boolean | null
   status: ConversationStatus
+  /** The same server-side derivation as the Inbox row. See ConversationSummary. */
+  operator_attention: boolean
   messages: ConversationMessage[]
 }
 

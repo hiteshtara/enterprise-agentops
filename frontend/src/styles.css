@@ -818,6 +818,19 @@ pre.json-body {
   padding: 14px 16px;
 }
 
+/* Same shape as the notices above, deliberately without their colour. Bounded
+   staleness is not a warning: it withdraws a claim about ordering, and dressing
+   it in amber would teach an operator to ignore the notices that do mean
+   something needs attention. */
+.state-note {
+  border-style: solid;
+  border-color: var(--border-strong);
+  background: var(--neutral-soft);
+  color: var(--text-muted);
+  text-align: left;
+  padding: 14px 16px;
+}
+
 a.card.conversation-row {
   display: block;
   text-decoration: none;

@@ -14,11 +14,12 @@ that could. `needs_attention` is derived from `status` rather than stored, so
 the two cannot disagree.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, nulls_last, select
 
 from app.connectors.lodgify.messaging_models import ConversationStatus
 from app.database import Database, get_database
@@ -66,6 +67,17 @@ class ConversationActivity:
             "last_message_sender": self.last_message_sender,
             "message_count": self.message_count,
         }
+
+
+# SQLite refuses a statement with more than a few hundred bound parameters,
+# and an `IN` clause over every current-and-upcoming conversation is already
+# in the hundreds. Chunking keeps these queries correct as the account grows.
+_IN_CHUNK = 400
+
+
+def _chunked(values: list[str]) -> Iterable[list[str]]:
+    for start in range(0, len(values), _IN_CHUNK):
+        yield values[start : start + _IN_CHUNK]
 
 
 def _read(record: ConversationActivityRecord) -> ConversationActivity:
@@ -143,11 +155,143 @@ class ConversationActivityStore:
             return _read(record)
 
     def all_activity(self) -> list[ConversationActivity]:
+        """Every row. Kept for callers that genuinely need the whole table.
+
+        Not on the Inbox read path: ordering a page loads
+        `ordered_activity(limit)` instead, which the database bounds rather
+        than Python.
+        """
         with self.database.session() as session:
             return [
                 _read(record)
                 for record in session.scalars(select(ConversationActivityRecord))
             ]
+
+    def ordered_activity(
+        self,
+        limit: int,
+        property_slug: str | None = None,
+    ) -> list[ConversationActivity]:
+        """The most recently active conversations, newest first.
+
+        This is what the Inbox orders by, and it costs zero provider calls --
+        which is the entire point of the index. `last_message_at` is indexed
+        (`ix_conversation_activity_last_message_at`), so this is a bounded
+        index scan rather than the whole table loaded into Python.
+
+        `NULLS LAST` is stated rather than assumed: SQLite happens to put nulls
+        last on a descending sort and PostgreSQL happens to put them first, and
+        a conversation whose last-message time is unknown belongs at the bottom
+        under both. Ties break on `conversation_ref` ascending, matching the
+        two-pass sort this replaced, so the order is deterministic.
+
+        `property_slug` narrows before the limit is applied. Filtering a
+        globally-ordered page afterwards would answer a different question --
+        the twenty newest conversations that happen to be at this property,
+        rather than this property's twenty newest.
+        """
+        statement = select(ConversationActivityRecord)
+
+        if property_slug is not None:
+            statement = statement.where(
+                ConversationActivityRecord.property_slug == property_slug
+            )
+
+        statement = statement.order_by(
+            nulls_last(ConversationActivityRecord.last_message_at.desc()),
+            ConversationActivityRecord.conversation_ref.asc(),
+        ).limit(limit)
+
+        with self.database.session() as session:
+            return [_read(record) for record in session.scalars(statement)]
+
+    def least_recently_refreshed(
+        self,
+        limit: int,
+        exclude: Iterable[str] = (),
+    ) -> list[ConversationActivity]:
+        """The rows whose metadata is oldest, for the rotating sweep.
+
+        The provider offers no way to learn which threads changed -- a booking
+        row carries no last-message field and its `updated_at` does not move
+        when a message arrives -- so a message that arrives with no webhook is
+        found by re-reading. Re-reading everything is the request burst this
+        design exists to remove, so the sweep takes the oldest slice and comes
+        back for the next one.
+
+        The consequence is worth stating where it can be read: every
+        conversation is re-read within one full cycle, and that cycle grows
+        linearly with the number of conversations in the account.
+        """
+        skipped = set(exclude)
+
+        statement = select(ConversationActivityRecord)
+
+        if skipped:
+            statement = statement.where(
+                ConversationActivityRecord.conversation_ref.notin_(skipped)
+            )
+
+        statement = statement.order_by(
+            ConversationActivityRecord.last_refreshed_at.asc(),
+            ConversationActivityRecord.conversation_ref.asc(),
+        ).limit(limit)
+
+        with self.database.session() as session:
+            return [_read(record) for record in session.scalars(statement)]
+
+    def known_refs(self, refs: Iterable[str]) -> set[str]:
+        """Which of these conversations the index has already seen.
+
+        The cheap half of cold start: the booking scan says which
+        conversations exist, this says which have never been read, and the
+        difference is what a seeding batch works through. Only the reference
+        column is selected -- nothing else is needed to answer the question.
+        """
+        wanted = list(dict.fromkeys(refs))
+
+        if not wanted:
+            return set()
+
+        found: set[str] = set()
+
+        with self.database.session() as session:
+            for chunk in _chunked(wanted):
+                found.update(
+                    session.scalars(
+                        select(ConversationActivityRecord.conversation_ref).where(
+                            ConversationActivityRecord.conversation_ref.in_(chunk)
+                        )
+                    )
+                )
+
+        return found
+
+    def oldest_refreshed_at(self, refs: Iterable[str]) -> str | None:
+        """The oldest `last_refreshed_at` among these rows, or None.
+
+        How the Inbox reports its own staleness. None means no row was found,
+        which is not staleness -- an empty page is not a behind one.
+        """
+        wanted = list(dict.fromkeys(refs))
+
+        if not wanted:
+            return None
+
+        oldest: str | None = None
+
+        with self.database.session() as session:
+            for chunk in _chunked(wanted):
+                value = session.scalar(
+                    select(
+                        func.min(ConversationActivityRecord.last_refreshed_at)
+                    ).where(ConversationActivityRecord.conversation_ref.in_(chunk))
+                )
+
+                if value is not None and (oldest is None or value < oldest):
+                    oldest = value
+
+        return oldest
 
     def for_conversation(self, conversation_ref: str) -> ConversationActivity | None:
         with self.database.session() as session:

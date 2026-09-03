@@ -510,6 +510,7 @@ export const editedDraft = draft({
 export const inboxPage: InboxPage = {
   count: 2,
   incomplete: false,
+  activity_stale: false,
   conversations: [
     {
       conversation_ref: CONVERSATION_REF,
@@ -518,6 +519,7 @@ export const inboxPage: InboxPage = {
       source: 'BookingCom',
       booking_status: 'Booked',
       status: 'needs_attention',
+      operator_attention: true,
       last_message_at: '2026-09-02T17:39:40',
       last_message_sender: 'Renter',
       last_message_excerpt: 'Is there parking at the house?',
@@ -533,6 +535,7 @@ export const inboxPage: InboxPage = {
       source: 'HomeAway',
       booking_status: 'Booked',
       status: 'responded',
+      operator_attention: false,
       last_message_at: '2026-09-01T11:00:00',
       last_message_sender: 'Owner',
       last_message_excerpt: 'Parking is shared and there is no extra charge.',
@@ -556,6 +559,7 @@ export const conversationDetail: ConversationDetail = {
   subject: 'Booking enquiry',
   is_read: true,
   status: 'needs_attention',
+  operator_attention: true,
   fingerprint: CONVERSATION_FINGERPRINT,
   draft: readyDraft,
   messages: [

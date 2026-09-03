@@ -385,6 +385,26 @@ describe('the prepared reply', () => {
     expect(api.requestGuestReply).not.toHaveBeenCalled()
   })
 
+  /*
+    The detail page and the Inbox row read different routes, so the only thing
+    stopping them disagreeing about one conversation is that both render the
+    server's single derivation. The guest spoke last here -- the provider still
+    says `needs_attention` -- and there is nothing to do.
+  */
+  it('does not claim attention while showing that no reply is needed', async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({
+      ...conversationDetail,
+      status: 'needs_attention',
+      operator_attention: false,
+      draft: noReplyDraft,
+    })
+
+    renderConversation()
+
+    expect(await screen.findByText('No reply needed')).toBeInTheDocument()
+    expect(screen.queryByText('Needs attention')).not.toBeInTheDocument()
+  })
+
   it('lets the owner overrule a silence by writing their own reply', async () => {
     withDraft(noReplyDraft)
     vi.mocked(api.requestGuestReply).mockResolvedValue(guestReplyWaiting)

@@ -13,6 +13,8 @@ import json
 import pytest
 
 from app.connectors.lodgify.refs import conversation_ref_for
+from app.drafts import DraftStatus
+from app.inbox_view import prepare_activity_index
 from app.migration_store import MigrationBatchStore
 from app.tool_setup import build_tool_registry
 from tests.lodgify_fakes import (
@@ -93,6 +95,12 @@ def inbox_api(api):
         lodgify_messaging=fake.tools(),
     )
     module.agent.tool_registry = module.tool_registry
+
+    # The Inbox orders from the activity index and deliberately never seeds it,
+    # so a conversation no preparation cycle has read is not on the page. One
+    # cycle here is what production's `POST /inbox/refresh` does, and it is
+    # what makes booking 1001 renderable at all.
+    prepare_activity_index(module.lodgify_inbox, module.activity_store)
 
     api.fake = fake
 
@@ -787,3 +795,309 @@ def test_a_webhook_known_conversation_reaches_the_api(inbox_api):
     rows = inbox_api.client("ADMIN").get("/inbox").json()["conversations"]
 
     assert rows[0]["conversation_ref"] == "PH-HISTORIC1"
+
+
+# -- operator attention -----------------------------------------------------
+#
+# One badge was answering two different questions. Lodgify's conversation
+# status says only who spoke last; it has no opinion about whether a person
+# still has work to do. Once AgentGuard has processed the conversation *as it
+# stands now* and concluded that no reply is needed, "Needs attention" asserts
+# that a guest is waiting -- which is no longer true, and the console was
+# showing it on the same row as "No reply needed".
+#
+# The fixtures below are invented. They are modelled on two live conversations
+# that showed the contradiction, both of the same shape: a guest's closing
+# acknowledgement arriving after an answer, so the guest spoke last and there
+# is nothing left to say.
+
+GUEST_CLOSING = message(
+    "m-guest-closing",
+    "Renter",
+    "Great, that answers it -- see you on the 25th.",
+    "2026-09-02T18:00:00",
+    message_status=None,
+    route=None,
+)
+
+
+def inbox_row(client) -> dict:
+    """The Inbox row for the fixture conversation, exactly as the console gets it."""
+    response = client.get("/inbox")
+
+    assert response.status_code == 200, response.text
+
+    rows = [
+        row
+        for row in response.json()["conversations"]
+        if row["conversation_ref"] == REF
+    ]
+
+    assert rows, response.text
+
+    return rows[0]
+
+
+def conversation_view(client) -> dict:
+    """The detail payload for the fixture conversation."""
+    response = client.get(f"/inbox/{REF}")
+
+    assert response.status_code == 200, response.text
+
+    return response.json()
+
+
+def record_outcome(
+    api,
+    status,
+    fingerprint,
+    subject=None,
+    body=None,
+) -> None:
+    """Persist one AgentGuard processing outcome for the fixture conversation.
+
+    Written through the module's own store so it lands in the per-test database
+    the routes read from, exactly as a refresh cycle would have left it.
+    """
+    api.module.draft_store.record_outcome(
+        conversation_ref=REF,
+        conversation_fingerprint=fingerprint,
+        status=status,
+        subject=subject,
+        message=body,
+    )
+
+
+def test_a_current_no_reply_needed_clears_operator_attention(inbox_api):
+    """The bug, minimally. The guest spoke last, so the provider says
+    `needs_attention`; AgentGuard has already read this exact state and decided
+    there is nothing to send. Nobody has to do anything."""
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.NO_REPLY_NEEDED,
+        current_fingerprint(client),
+    )
+
+    row = inbox_row(client)
+
+    assert row["status"] == "needs_attention"
+    assert row["operator_attention"] is False
+
+
+def test_a_current_draft_ready_asks_for_attention(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.DRAFT_READY,
+        current_fingerprint(client),
+        subject=SUBJECT,
+        body=BODY,
+    )
+
+    row = inbox_row(client)
+
+    assert row["draft"]["status"] == "DRAFT_READY"
+    assert row["operator_attention"] is True
+
+
+def test_a_current_needs_human_review_asks_for_attention(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.NEEDS_HUMAN_REVIEW,
+        current_fingerprint(client),
+        subject=SUBJECT,
+        body=BODY,
+    )
+
+    row = inbox_row(client)
+
+    assert row["draft"]["status"] == "NEEDS_HUMAN_REVIEW"
+    assert row["operator_attention"] is True
+
+
+def test_a_stale_draft_asks_for_attention(inbox_api):
+    """A reply written for a conversation that has since moved on is the one
+    case an operator most needs to see, so staleness must raise attention
+    rather than settle it."""
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.DRAFT_READY,
+        current_fingerprint(client),
+        subject=SUBJECT,
+        body=BODY,
+    )
+
+    guest_writes_again(inbox_api)
+
+    row = inbox_row(client)
+
+    assert row["draft"]["status"] == "STALE"
+    assert row["operator_attention"] is True
+
+
+def test_a_current_sent_outcome_clears_operator_attention(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.SENT,
+        current_fingerprint(client),
+        subject=SUBJECT,
+        body=BODY,
+    )
+
+    assert inbox_row(client)["operator_attention"] is False
+
+
+def test_a_superseded_no_reply_needed_restores_the_provider_status(inbox_api):
+    """The dangerous direction. "Nothing to say" was true of an older state; a
+    new guest message must bring the badge straight back, or a decision taken
+    yesterday silently swallows today's question."""
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.NO_REPLY_NEEDED,
+        current_fingerprint(client),
+    )
+
+    guest_writes_again(inbox_api)
+
+    row = inbox_row(client)
+
+    assert row["status"] == "needs_attention"
+    assert row["draft"]["is_current"] is False
+    assert row["operator_attention"] is True
+
+
+def test_without_an_outcome_the_provider_status_decides(inbox_api):
+    """Until AgentGuard has evaluated this state, `needs_attention` is the only
+    thing anybody knows, and it stays authoritative."""
+    row = inbox_row(inbox_api.client("ADMIN"))
+
+    assert row["draft"] is None
+    assert row["status"] == "needs_attention"
+    assert row["operator_attention"] is True
+
+
+def test_a_conversation_we_answered_last_is_not_attention(inbox_api):
+    """The provider fallback in its other direction."""
+    inbox_api.fake.threads[THREAD_A] = thread(THREAD_A, [GUEST, SENT])
+
+    row = inbox_row(inbox_api.client("ADMIN"))
+
+    assert row["status"] == "responded"
+    assert row["operator_attention"] is False
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        DraftStatus.NO_REPLY_NEEDED,
+        DraftStatus.DRAFT_READY,
+        DraftStatus.NEEDS_HUMAN_REVIEW,
+        DraftStatus.SENT,
+    ],
+)
+def test_the_detail_view_and_the_inbox_row_agree(inbox_api, outcome):
+    """Two screens, one rule. They read different routes, so nothing but a
+    shared derivation stops them disagreeing about the same conversation."""
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        outcome,
+        current_fingerprint(client),
+        subject=SUBJECT,
+        body=BODY,
+    )
+
+    assert (
+        conversation_view(client)["operator_attention"]
+        == inbox_row(client)["operator_attention"]
+    )
+
+
+def test_deriving_attention_writes_nothing_to_the_provider(inbox_api):
+    """This is our own projection. Lodgify's read/unread and replied state is
+    the provider's, and nothing here may touch it."""
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.NO_REPLY_NEEDED,
+        current_fingerprint(client),
+    )
+
+    inbox_row(client)
+    conversation_view(client)
+
+    assert inbox_api.fake.posts == []
+
+
+# -- the two live patterns, reproduced with invented wording ----------------
+
+
+def test_a_closing_acknowledgement_after_our_answer_is_not_attention(inbox_api):
+    """Pattern (a): guest asks, we answer, guest signs off. The guest spoke
+    last, so the provider says `needs_attention` -- but the exchange is
+    finished, and AgentGuard has already recorded that."""
+    client = inbox_api.client("ADMIN")
+
+    inbox_api.fake.threads[THREAD_A] = thread(
+        THREAD_A,
+        [GUEST, SENT, GUEST_CLOSING],
+    )
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.NO_REPLY_NEEDED,
+        current_fingerprint(client),
+    )
+
+    row = inbox_row(client)
+
+    assert row["status"] == "needs_attention"
+    assert row["last_message_sender"] == "Renter"
+    assert row["operator_attention"] is False
+    assert row["draft"]["status"] == "NO_REPLY_NEEDED"
+
+
+def test_a_closing_acknowledgement_after_our_reply_is_not_attention(inbox_api):
+    """Pattern (b): the thread opens with our reply and the guest acknowledges
+    it. Same shape, no opening question, same answer."""
+    client = inbox_api.client("ADMIN")
+
+    inbox_api.fake.threads[THREAD_A] = thread(THREAD_A, [SENT, GUEST_CLOSING])
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.NO_REPLY_NEEDED,
+        current_fingerprint(client),
+    )
+
+    row = inbox_row(client)
+
+    assert row["status"] == "needs_attention"
+    assert row["operator_attention"] is False
+
+
+def test_a_discarded_outcome_falls_back_to_the_provider_status(inbox_api):
+    """DISCARDED is not a conclusion about the conversation, it is the absence
+    of one -- so the provider status is all that is left to go on."""
+    client = inbox_api.client("ADMIN")
+
+    record_outcome(
+        inbox_api,
+        DraftStatus.DISCARDED,
+        current_fingerprint(client),
+    )
+
+    assert inbox_row(client)["operator_attention"] is True

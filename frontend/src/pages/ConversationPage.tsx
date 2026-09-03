@@ -196,7 +196,10 @@ export function ConversationPage() {
           <div className="card">
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <div className="row">
-                <StatusBadge status={detail.status} />
+                <StatusBadge
+                  status={detail.status}
+                  operatorAttention={detail.operator_attention}
+                />
                 {draft ? <DraftBadge status={draft.status} /> : null}
                 {detail.source ? <span className="faint">{detail.source}</span> : null}
               </div>

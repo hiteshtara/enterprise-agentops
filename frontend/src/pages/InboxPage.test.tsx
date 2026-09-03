@@ -4,7 +4,13 @@ import userEvent from '@testing-library/user-event'
 import { InboxPage } from './InboxPage'
 import { renderWithRouter } from '../test/render'
 import * as api from '../api/agentguard'
-import { inboxPage, reviewDraft, sentDraft, staleDraft } from '../test/factories'
+import {
+  inboxPage,
+  noReplyDraft,
+  reviewDraft,
+  sentDraft,
+  staleDraft,
+} from '../test/factories'
 
 vi.mock('../api/agentguard')
 
@@ -100,6 +106,7 @@ describe('InboxPage', () => {
       conversations: [],
       count: 0,
       incomplete: false,
+      activity_stale: false,
     })
 
     renderWithRouter(<InboxPage />)
@@ -109,7 +116,7 @@ describe('InboxPage', () => {
     ).toBeInTheDocument()
   })
 
-  it('warns when the provider answered for only part of the scan', async () => {
+  it('warns when the list may be short', async () => {
     vi.mocked(api.getInbox).mockResolvedValue({ ...inboxPage, incomplete: true })
 
     renderWithRouter(<InboxPage />)
@@ -118,10 +125,33 @@ describe('InboxPage', () => {
       await screen.findByText(/some conversations may be missing/i),
     ).toBeInTheDocument()
 
-    // The rows that did arrive are still shown. A partial scan is not an error,
-    // so it must not render as one.
+    // The rows that did arrive are still shown. A partial scan, and an index
+    // that is still warming up, are not errors -- so they must not render as
+    // one.
     expect(screen.getByText('Needs attention')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('says so when the ordering may be behind', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue({ ...inboxPage, activity_stale: true })
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText(/this ordering may be behind/i)).toBeInTheDocument()
+
+    // Neutral, and it hides nothing: every row is still on the page.
+    expect(screen.getByText('Needs attention')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows no staleness notice when the index is current', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue(inboxPage)
+
+    renderWithRouter(<InboxPage />)
+
+    await screen.findByText('Needs attention')
+
+    expect(screen.queryByText(/this ordering may be behind/i)).not.toBeInTheDocument()
   })
 
   it('shows no warning when the scan was complete', async () => {
@@ -150,6 +180,7 @@ describe('InboxPage', () => {
     vi.mocked(api.getInbox).mockResolvedValue({
       count: 1,
       incomplete: false,
+      activity_stale: false,
       conversations: [
         {
           ...inboxPage.conversations[0],
@@ -170,6 +201,7 @@ describe('InboxPage', () => {
     vi.mocked(api.getInbox).mockResolvedValue({
       count: 1,
       incomplete: false,
+      activity_stale: false,
       conversations: [
         {
           ...inboxPage.conversations[0],
@@ -198,6 +230,7 @@ describe('prepared replies in the Inbox', () => {
     vi.mocked(api.getInbox).mockResolvedValue({
       count: 1,
       incomplete: false,
+      activity_stale: false,
       conversations: [{ ...inboxPage.conversations[0], draft }],
     })
   }
@@ -257,6 +290,54 @@ describe('prepared replies in the Inbox', () => {
 
     expect(screen.queryByText('Draft ready')).not.toBeInTheDocument()
     expect(screen.queryByText(/Prepared reply/)).not.toBeInTheDocument()
+  })
+
+  /*
+    The two badges were contradicting each other. Lodgify's status says only who
+    spoke last, so a guest's closing acknowledgement leaves a thread
+    `needs_attention` for good -- and the row said "Needs attention" beside "No
+    reply needed". The server now decides which of those is true; the row simply
+    stops claiming a guest is waiting when it has been told nobody is.
+  */
+  it('drops the attention badge once no reply is needed for this state', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue({
+      count: 1,
+      incomplete: false,
+      activity_stale: false,
+      conversations: [
+        {
+          ...inboxPage.conversations[0],
+          status: 'needs_attention',
+          operator_attention: false,
+          draft: noReplyDraft,
+        },
+      ],
+    })
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('No reply needed')).toBeInTheDocument()
+    expect(screen.queryByText('Needs attention')).not.toBeInTheDocument()
+  })
+
+  it('still flags a conversation the server says needs a person', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue({
+      count: 1,
+      incomplete: false,
+      activity_stale: false,
+      conversations: [
+        {
+          ...inboxPage.conversations[0],
+          status: 'needs_attention',
+          operator_attention: true,
+          draft: noReplyDraft,
+        },
+      ],
+    })
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Needs attention')).toBeInTheDocument()
   })
 
   it('asks the backend to bring prepared replies up to date', async () => {

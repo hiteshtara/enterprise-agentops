@@ -12,15 +12,19 @@ import { Empty, ErrorState, Loading } from '../components/States'
  * clears the timer on unmount, so nothing calls Lodgify when nobody is looking
  * at the Inbox. No webhook, no background worker, no process to supervise.
  *
- * Three minutes rather than thirty seconds because one load is expensive: the
- * booking list carries no last-message time, so ordering the Inbox means
- * reading every thread -- about 155 provider requests per load against this
- * account. At a thirty-second cadence that is sustained load on someone else's
- * API, and it was caught live returning 429 on the first booking page, which
- * fails the whole request. This is an operational ceiling, not the fix: the
- * real one is to order from the persisted activity index and re-read only the
- * threads on the page. Manual Refresh and the webhook fast path are unchanged,
- * so noticing a message quickly does not depend on this number.
+ * Three minutes rather than thirty seconds because one load used to be
+ * expensive: the booking list carries no last-message time, so ordering the
+ * Inbox meant reading every thread -- about 155 provider requests per load
+ * against this account, which was caught live returning 429 on the first
+ * booking page and failed the whole request.
+ *
+ * Ordering now comes from the persisted activity index and only the threads on
+ * the page are read, so a load is roughly the booking scan plus the page size.
+ * This interval is left where it is deliberately: it is no longer holding back
+ * a load problem, and lowering it is a separate decision to make against a live
+ * measurement rather than a side effect of this change. Manual Refresh and the
+ * webhook fast path are unchanged, so noticing a message quickly does not
+ * depend on this number.
  */
 const POLL_MS = 180_000
 
@@ -78,7 +82,33 @@ const STATUS_TONE: Record<ConversationStatus, string> = {
   unknown: 'tone-neutral',
 }
 
-export function StatusBadge({ status }: { status: ConversationStatus }) {
+/**
+ * The provider's conversation status, shown only while it still means
+ * something to an operator.
+ *
+ * `needs_attention` says one thing -- the guest spoke last -- which is not the
+ * same as "somebody has to do something". A guest's closing acknowledgement
+ * leaves a thread `needs_attention` for good, and once AgentGuard has read that
+ * exact state and recorded that no reply is needed, this badge was appearing
+ * next to "No reply needed" on the same row and contradicting it.
+ *
+ * The server decides that (`operator_attention`, one derivation shared by the
+ * Inbox and the conversation page). All this does is stop asserting a guest is
+ * waiting when it has been told nobody is -- and only for that one label, since
+ * "Responded" and "Unknown" contradict nothing. `operatorAttention` defaults to
+ * true so a payload without the field renders exactly as it did before.
+ */
+export function StatusBadge({
+  status,
+  operatorAttention = true,
+}: {
+  status: ConversationStatus
+  operatorAttention?: boolean
+}) {
+  if (status === 'needs_attention' && !operatorAttention) {
+    return null
+  }
+
   return (
     <span className={`badge ${STATUS_TONE[status] ?? 'tone-neutral'}`}>
       <span className="badge-dot" aria-hidden="true" />
@@ -127,17 +157,35 @@ export function InboxPage() {
       {inbox.error && !inbox.data ? <ErrorState error={inbox.error} /> : null}
 
       {/*
-        A partial scan, stated plainly and without alarm. The provider stopped
-        answering part way through discovery, so the rows below were all read
-        live but the list may be short. Saying nothing would be worse than a
-        neutral notice: an operator would read a missing conversation as one
-        that does not exist.
+        A short list, stated plainly and without alarm. Either the provider
+        stopped answering part way through discovery, or a conversation exists
+        that the activity index has not read yet -- both mean the same thing to
+        an operator, so they get one line rather than two vocabularies. The rows
+        below were all read live. Saying nothing would be worse than a neutral
+        notice: an operator would read a missing conversation as one that does
+        not exist.
       */}
       {inbox.data?.incomplete ? (
         <div className="state state-warn" role="status" style={{ marginBottom: 16 }}>
-          The booking provider did not answer for part of this scan, so some
-          conversations may be missing. Everything shown was read live. The next poll
-          tries again.
+          Some conversations may be missing while activity is still being indexed, or
+          because the booking provider did not answer for part of this scan. Everything
+          shown was read live. The next poll picks up more.
+        </div>
+      ) : null}
+
+      {/*
+        Ordering is as fresh as the activity index, and the index is brought up
+        to date in bounded batches rather than by re-reading every conversation
+        on every poll. When the rows behind this page have not been re-checked
+        recently, say so. Deliberately neutral rather than a warning: nothing is
+        wrong, no row is hidden, and the only claim being withdrawn is that this
+        order is exactly current.
+      */}
+      {inbox.data?.activity_stale ? (
+        <div className="state state-note" role="status" style={{ marginBottom: 16 }}>
+          This ordering may be behind. Conversation activity is re-checked in batches,
+          so a conversation that moved very recently can take a few minutes to reach its
+          place. Nothing is hidden.
         </div>
       ) : null}
 
@@ -157,7 +205,10 @@ export function InboxPage() {
             >
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <div className="row">
-                  <StatusBadge status={row.status} />
+                  <StatusBadge
+                    status={row.status}
+                    operatorAttention={row.operator_attention}
+                  />
                   {row.draft ? <DraftBadge status={row.draft.status} /> : null}
                   <strong>{row.property_name ?? 'Unmapped property'}</strong>
                   {row.source ? <span className="faint">{row.source}</span> : null}
