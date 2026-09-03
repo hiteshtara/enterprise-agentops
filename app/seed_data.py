@@ -88,3 +88,14 @@ def seed_migration_batches(
         session.commit()
 
     return inserted
+
+
+if __name__ == "__main__":
+    # Seeding is a separate, explicit step from migration. Run
+    # `uv run alembic upgrade head` first.
+    from app.seed_users import seed_demo_users
+
+    batches = seed_migration_batches()
+    users = seed_demo_users()
+
+    print(f"Seeded {batches} migration batch record(s) and {users} demo user(s).")

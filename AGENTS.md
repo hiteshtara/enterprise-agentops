@@ -276,6 +276,27 @@ The pattern to follow instead (see `app/migration_store.py` + `app/tool_setup.py
 generically: it rejects any free-text string argument on the tool. New database tools
 should be covered by a similar assertion.
 
+### Schema migration invariants
+
+- **Alembic is authoritative for persistent schema evolution.** Never evolve a
+  database that holds data you keep with `create_all()` — it adds tables but not
+  columns.
+- **`create_all()` is for ephemeral test databases only.** The pytest fixtures build
+  a throwaway SQLite file per test directly from the models; that is deliberate and
+  fine. `app/init_db.py` is a deprecated compatibility wrapper.
+- **Migrations never seed business or demo data.** Structure only. Seeding is a
+  separate explicit step (`python -m app.seed_data`).
+- **Every generated migration must be read before it is run or committed.**
+  `--autogenerate` is a first draft: it misses data migrations and renders some
+  changes destructively.
+- **Stores contain no migration logic**, and `alembic/env.py` is the only place
+  Alembic is configured. It resolves the URL through
+  `app.database.resolve_database_url()` so migrations and the app cannot disagree —
+  but a caller-supplied `sqlalchemy.url` wins, which is what keeps tests off the
+  development database.
+- **New model modules must be imported in `alembic/env.py`**, or autogenerate will
+  propose dropping their tables.
+
 ### Identity and authorization invariants
 
 - **`app/identity.py` is the only place role→permission is decided.** Never write
