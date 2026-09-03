@@ -720,6 +720,41 @@ def current_fingerprint_for(conversation_ref: str) -> str | None:
     return conversation_fingerprint(conversation.get("messages"))
 
 
+def live_fingerprint_for_reply(conversation_ref: str) -> str | None:
+    """The live fingerprint for a reply submission -- or a 404.
+
+    A sibling of `current_fingerprint_for`, kept separate because the two
+    callers must disagree about the same `ValueError`. The three draft-summary
+    routes fold "no such booking" into the same `None` as "unreadable", which
+    is right for them: an unknown ref should render as if the draft were
+    current, not error. The reply route cannot make that same call, because
+    its `None` means "allow the submission and still gate it on approval" --
+    and a ref that matches no booking can never reach `send_guest_reply`
+    successfully, so allowing it would park a DANGEROUS approval that no human
+    could ever release into a real send. That is worse than telling the
+    caller now: it spends an approver's authority on nothing.
+
+    `LodgifyUnavailable` is untouched -- still folded into `None`, still the
+    documented fail-open bounded by the approval gate.
+    """
+    if lodgify_inbox is None:
+        return None
+
+    try:
+        conversation = lodgify_inbox.get_conversation(conversation_ref)
+
+    except LodgifyUnavailable:
+        return None
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown conversation.",
+        ) from exc
+
+    return conversation_fingerprint(conversation.get("messages"))
+
+
 STALE_DRAFT_CONFLICT = (
     "New activity arrived in this conversation after this draft was prepared. "
     "Regenerate the draft before sending."
@@ -758,7 +793,7 @@ def request_guest_reply(
             detail=INBOX_UNAVAILABLE,
         )
 
-    live_fingerprint = current_fingerprint_for(conversation_ref)
+    live_fingerprint = live_fingerprint_for_reply(conversation_ref)
 
     # Currency is decided on the fingerprint and never on the text. A reply
     # prepared before the guest's latest message answers a question that has

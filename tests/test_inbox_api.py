@@ -26,6 +26,10 @@ from tests.lodgify_fakes import (
 
 REF = conversation_ref_for(1001)
 
+# Well-formed (passes `is_well_formed`) but matches no booking in the fixture
+# archive -- what `LodgifyInbox.resolve` refuses with a `ValueError`.
+UNKNOWN_REF = "PH-ZZZZZZZZ"
+
 SUBJECT = "Thank you"
 
 BODY = "Thank you for your question. I'll check and get back to you shortly."
@@ -641,6 +645,73 @@ def test_an_unreadable_conversation_allows_the_submission_and_still_gates_it(
 
     # Nothing was sent by allowing it.
     assert inbox_api.fake.posts == []
+
+
+def test_an_unknown_conversation_ref_is_refused_with_404(inbox_api):
+    """A ref that matches no booking can never reach `send_guest_reply`.
+
+    `current_fingerprint_for` folds "does not exist" into the same `None` as
+    "could not be read" -- correct for the draft-summary routes, which should
+    render an unknown ref as if the draft were current rather than error. The
+    reply route needs the opposite: parking a DANGEROUS approval for a ref
+    that can never execute wastes an approver's authority on nothing.
+    """
+    response = inbox_api.client("ADMIN").post(
+        f"/inbox/{UNKNOWN_REF}/reply",
+        json=reply_payload("does-not-matter"),
+    )
+
+    assert response.status_code == 404, response.text
+    assert "Unknown conversation" in response.json()["detail"]
+
+
+def test_an_unknown_conversation_ref_creates_no_approval(inbox_api):
+    inbox_api.client("ADMIN").post(
+        f"/inbox/{UNKNOWN_REF}/reply",
+        json=reply_payload("does-not-matter"),
+    )
+
+    assert inbox_api.module.approval_store.list_approvals() == []
+
+
+def test_an_unknown_conversation_ref_sends_nothing_and_executes_no_tool(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    client.post(
+        f"/inbox/{UNKNOWN_REF}/reply",
+        json=reply_payload("does-not-matter"),
+    )
+
+    assert inbox_api.fake.posts == []
+
+    events = client.get("/audit/events?limit=100").json()
+
+    assert [e for e in events if e["event_type"] == "TOOL_EXECUTED"] == []
+    assert [e for e in events if e["event_type"] == "TOOL_REQUESTED"] == []
+
+
+def test_a_provider_outage_on_reply_is_not_treated_as_unknown(inbox_api):
+    """Temporarily unreadable is not the same as nonexistent.
+
+    `LodgifyUnavailable` must stay on the documented fail-open path -- see
+    `test_an_unreadable_conversation_allows_the_submission_and_still_gates_it`
+    for the full behaviour that must be preserved. This asserts the one
+    property that separates it from
+    `test_an_unknown_conversation_ref_is_refused_with_404`: an outage is never
+    confused with "does not exist".
+    """
+    client = inbox_api.client("ADMIN")
+
+    fingerprint = current_fingerprint(client)
+
+    inbox_api.fake.thread_failures[THREAD_A] = 503
+
+    response = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(fingerprint),
+    )
+
+    assert response.status_code != 404, response.text
 
 
 def test_submission_never_executes_the_send_tool(inbox_api):
