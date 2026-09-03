@@ -326,6 +326,41 @@ Retrieval puts past data in front of a model. These hold wherever that happens.
 - **Retrieved content is not an audit event.** Audit records what was done, not
   everything that was read.
 
+### Hospitality question-routing invariants
+
+Most guest messages are ordinary questions, and escalating all of them trains the
+owner to ignore the queue. Routing decides *who answers*; `never_invent` decides
+*what may be stated as fact*. They are separate guards against separate failures.
+
+- **Default to model-answerable.** An ordinary general or local question --
+  restaurants, groceries, attractions, neighbourhoods, directions, transit,
+  general Boston knowledge -- is answered by the model. It does not reach a
+  person merely because no approved-knowledge item matches it.
+- **Business-sensitive intents stay governed**, by policy, a tool, or human
+  review: availability, reservation changes and extensions, early check-in, late
+  checkout, parking, whether a specific amenity is in a unit, refunds,
+  cancellations, discounts, prices, payments, access credentials, extra guests,
+  pets, cleaning, noise, lost and found, smoking, parties, luggage storage,
+  deliveries, accessibility, compensation, internet, utilities, keys and
+  lockouts, and anything that commits Priyanka Homes.
+- **Safety and security questions stay business-sensitive.** "Is the area safe to
+  walk at night?" is not "what restaurants are nearby?" -- a confident answer is a
+  false assurance the owner never gave, and the liability is theirs. This one
+  errs conservative on purpose; do not trim it to raise the automation rate.
+- **`never_invent` is independent of routing.** It binds even when a question is
+  routed as general, because it is the backstop for a marker that failed to
+  match. Without an authoritative live source, never state an exact opening hour,
+  rating, travel time, walking distance, price, or transit schedule. "There are
+  several cafes in the neighbourhood" is fine; "an Italian place two minutes from
+  your door" is not.
+- **A mixed message is split, never rounded off.** Answer the harmless general
+  part and route the business-sensitive part through its policy. A message is
+  never treated as general because part of it is.
+- **The gate is deterministic Python**, computed from the still-open guest
+  messages only -- the same list every other topic uses, so an answered question
+  stops firing. Markers err broad; trimming one is the fix when it over-escalates
+  in practice, and a missed marker is caught by `never_invent`.
+
 ### Irreversible-action invariants
 
 Outbound actions that a third party can see cannot be un-sent. These hold for any

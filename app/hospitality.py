@@ -58,18 +58,31 @@ class ReplyRule:
         }
 
 
-# The safe default. Any question this file does not cover gets acknowledged and
-# handed to a person -- see UNDOCUMENTED_TOPICS below.
+# The safe default for a *business-sensitive* question this file does not cover:
+# acknowledge it and hand it to a person -- see UNDOCUMENTED_TOPICS below. It is
+# no longer the default for every unruled question; see the business-sensitivity
+# section further down for what decides which is which.
 ACKNOWLEDGEMENT = "Thank you for your question. I'll check and get back to you shortly."
 
 
 REPLY_RULES: tuple[ReplyRule, ...] = (
     ReplyRule(
         topic="general_acknowledgement",
+        # The fallback used to be "a person will follow up" for every question
+        # no rule covered, which made the owner the answering service for "any
+        # good restaurants nearby?". The default is now split by what the
+        # question could affect, not by whether a rule happens to mention it.
         guidance=(
-            "When the guest's question cannot be answered from the rules below, "
-            "acknowledge it warmly and say a person will follow up. Never "
-            "improvise an answer to fill the gap."
+            "An ordinary question is yours to answer. Restaurants, directions, "
+            "transit, neighbourhoods, attractions, Boston, general knowledge -- "
+            "anything that does not touch this property, the reservation, "
+            "money, or a promise made to this guest -- gets a helpful answer "
+            "from general knowledge, in the host's voice. Do not hand it to a "
+            "person. "
+            "Keep the acknowledgement for a business-sensitive question that "
+            "neither this guidance nor approved knowledge can answer: there, "
+            "acknowledge warmly and say a person will follow up. Never "
+            "improvise an answer to fill that gap."
         ),
         example=ACKNOWLEDGEMENT,
     ),
@@ -129,7 +142,15 @@ UNDOCUMENTED_TOPICS: tuple[str, ...] = (
     "early check-in or late checkout that has already been agreed",
     "cleaning fees, deposits, taxes, or any price",
     "wifi passwords, lockbox codes, or any access credential",
-    "local recommendations presented as endorsements",
+    # Narrowed deliberately. This bans vouching for a business and inventing
+    # specifics about one -- not local questions as a category. A cautious model
+    # read the old wording as "never discuss the neighbourhood", which is how an
+    # ordinary restaurant question ended up on the owner's desk.
+    (
+        "a named local business presented as an endorsement, or invented "
+        "specifics about one -- its address, opening hours, prices, ratings, or "
+        "how far away it is"
+    ),
     # Amenities and equipment: whether a specific item is in a specific unit is
     # not recorded anywhere. A draft once said "we should have a wine bottle
     # opener available" -- turning a guess into a promise about a real stay.
@@ -444,6 +465,709 @@ def closing_signals(text: str) -> tuple[str, ...]:
     return tuple(signals)
 
 
+# -- business sensitivity -------------------------------------------------
+#
+# The routing question, and the reason this section exists: *may the model
+# answer this itself?*
+#
+# The old answer was "only if a rule below covers it", which made the owner the
+# answering service for "any good restaurants nearby?". The new answer is the
+# other way round -- an ordinary question gets answered, and the owner is asked
+# only when the answer could affect the property, the reservation, money, or a
+# promise to the guest.
+#
+# Deciding that is not left to the model. A model asked to judge its own
+# authority will drift, and the direction it drifts in is the expensive one. So
+# the verdict is computed here, in Python, from the same whole-word marker
+# matching every other signal in this file uses, and handed to the model as a
+# fact. The model is told *what* was detected, not merely that something was --
+# a bare verdict is unarguable and therefore unusable.
+#
+# The marker sets are deliberately generous. A false positive costs a guest one
+# "I'll check" on a question we could have answered; a false negative lets a
+# draft speak for the business about a refund. Grouped by what a match means,
+# because a category name is what the drafting model actually reads.
+
+BUSINESS_MARKER_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "availability",
+        (
+            "available",
+            "availability",
+            "vacancy",
+            "vacancies",
+            "fully booked",
+            "still free",
+            "free that week",
+            "any nights",
+        ),
+    ),
+    (
+        # Anything that changes the shape of the reservation itself.
+        "reservation_change",
+        (
+            "reservation",
+            "booking",
+            "rebook",
+            "reschedule",
+            "change our dates",
+            "change the dates",
+            "change my dates",
+            "move our dates",
+            "move the dates",
+            "extend our stay",
+            "extend the stay",
+            "extend my stay",
+            "another night",
+            "extra night",
+            "extra nights",
+            "more nights",
+            "additional night",
+            "additional nights",
+            "one more night",
+            "shorten our stay",
+            "amend the booking",
+            "modify the booking",
+            "add a night",
+        ),
+    ),
+    (
+        "early_check_in",
+        (
+            "early check in",
+            "early check-in",
+            "early checkin",
+            "check in early",
+            "check-in early",
+            "checkin early",
+            "check in earlier",
+            "earlier check in",
+            "earlier check-in",
+            "early arrival",
+            "arrive early",
+            "arrive earlier",
+            "arriving early",
+            "get in early",
+            "get in earlier",
+            "come early",
+            # Deliberately narrow: "check in" on its own also appears in
+            # "I'll check in with you later", which is not a policy question.
+            "check-in",
+            "checkin",
+            "checking in",
+            "check in at",
+            "check in time",
+        ),
+    ),
+    (
+        "late_checkout",
+        (
+            "checkout",
+            "check-out",
+            "checking out",
+            "check out at",
+            "check out by",
+            "check out time",
+            "check out later",
+            "check out early",
+            "late check out",
+            "later check out",
+            "leave later",
+            "stay later",
+            "stay longer",
+            "later departure",
+            "vacate",
+        ),
+    ),
+    (
+        "parking",
+        (
+            # Never the bare word "park" -- Boston has several, and asking about
+            # one is exactly the general question this change permits.
+            "parking",
+            "park the car",
+            "park our car",
+            "park my car",
+            "where to park",
+            "can i park",
+            "can we park",
+            "garage",
+            "driveway",
+        ),
+    ),
+    (
+        # Whether a specific item is in a specific unit is recorded nowhere, and
+        # a guess here becomes a promise about a real stay -- the wine-opener
+        # regression in one line.
+        "amenity_present",
+        (
+            "amenity",
+            "amenities",
+            "appliance",
+            "appliances",
+            "does the apartment have",
+            "does the place have",
+            "does the unit have",
+            "does the flat have",
+            "does the property have",
+            "in the apartment",
+            "in the unit",
+            "blender",
+            "coffee maker",
+            "coffee machine",
+            "kettle",
+            "toaster",
+            "microwave",
+            "oven",
+            "stove",
+            "hob",
+            "dishwasher",
+            "washing machine",
+            "washer",
+            "dryer",
+            "hair dryer",
+            "hairdryer",
+            "iron",
+            "ironing board",
+            "crib",
+            "cot",
+            "high chair",
+            "tv",
+            "television",
+            "towels",
+            "linen",
+            "linens",
+            "sheets",
+            "pillows",
+            "duvet",
+            "bottle opener",
+            "wine opener",
+            "corkscrew",
+            "cutlery",
+            "utensils",
+            "pots",
+            "pans",
+            "balcony",
+            "bathtub",
+            "shower",
+            "fridge",
+            "freezer",
+        ),
+    ),
+    (
+        "refunds",
+        (
+            "refund",
+            "refunds",
+            "refunded",
+            "money back",
+            "reimburse",
+            "reimbursed",
+            "reimbursement",
+        ),
+    ),
+    (
+        "cancellations",
+        (
+            "cancel",
+            "cancels",
+            "cancelling",
+            "canceling",
+            "cancelled",
+            "canceled",
+            "cancellation",
+            "cancelation",
+        ),
+    ),
+    (
+        "discounts",
+        (
+            "discount",
+            "discounts",
+            "cheaper",
+            "reduce the price",
+            "better rate",
+            "special rate",
+            "promo",
+            "promo code",
+            "coupon",
+            "voucher",
+        ),
+    ),
+    (
+        "pricing",
+        (
+            "price",
+            "prices",
+            "pricing",
+            "cost",
+            "costs",
+            # Bare "how much" also matches measurement questions -- "how much
+            # time does it take to get downtown", "how much walking is it to
+            # the river" -- that ask about distance or duration, not money.
+            # An over-broad marker escalates ordinary travel questions to the
+            # owner, which is exactly what this routing exists to prevent, so
+            # only money-shaped phrasings of "how much" are kept.
+            "how much is",
+            "how much does it cost",
+            "how much do you charge",
+            "how much for",
+            "how much will",
+            "how much would",
+            "rate",
+            "rates",
+            "fee",
+            "fees",
+            "charge",
+            "charges",
+            "deposit",
+            "deposits",
+            "tax",
+            "taxes",
+            "quote",
+            "surcharge",
+        ),
+    ),
+    (
+        "payments",
+        (
+            "pay",
+            "paid",
+            "payment",
+            "payments",
+            "invoice",
+            "receipt",
+            "credit card",
+            "card details",
+            "bank transfer",
+            "billing",
+            "billed",
+        ),
+    ),
+    (
+        # Handing out an access credential is not a message, it is a key.
+        "access_credentials",
+        (
+            "access code",
+            "access instructions",
+            "check-in code",
+            "check in code",
+            "check-in instructions",
+            "check in instructions",
+            "door code",
+            "entry code",
+            "gate code",
+            "building code",
+            "key code",
+            "keypad",
+            "lockbox",
+            "lock box",
+            "key box",
+            "password",
+            "wifi password",
+            "wi-fi password",
+        ),
+    ),
+    (
+        "additional_guests",
+        (
+            "another guest",
+            "extra guest",
+            "extra guests",
+            "additional guest",
+            "additional guests",
+            "one more person",
+            "extra person",
+            "extra people",
+            "more people",
+            "bring a friend",
+            "bring friends",
+            "bring my friend",
+            "visitor",
+            "visitors",
+            "sleeps",
+        ),
+    ),
+    (
+        "pets",
+        (
+            "pet",
+            "pets",
+            "dog",
+            "dogs",
+            "cat",
+            "cats",
+            "puppy",
+            "kitten",
+            "animal",
+            "animals",
+            "service animal",
+            "emotional support",
+        ),
+    ),
+    (
+        "damage_maintenance_safety",
+        (
+            "broken",
+            "damage",
+            "damaged",
+            "leak",
+            "leaks",
+            "leaking",
+            "not working",
+            "isn't working",
+            "is not working",
+            "doesn't work",
+            "does not work",
+            "won't work",
+            "won't open",
+            "won't close",
+            "blocked",
+            "clogged",
+            "repair",
+            "fix",
+            "maintenance",
+            "plumber",
+            "electrician",
+            "flood",
+            "flooding",
+            "mould",
+            "mold",
+            "pest",
+            "bugs",
+            "cockroach",
+            "unsafe",
+            "hazard",
+            "fire alarm",
+            "smoke alarm",
+            "carbon monoxide",
+        ),
+    ),
+    # -- the categories the owner added -----------------------------------
+    (
+        "cleaning",
+        (
+            "clean",
+            "cleaned",
+            "cleaner",
+            "cleaning",
+            "housekeeping",
+            "house keeping",
+            "maid",
+            "dirty",
+            "unclean",
+            "hoover",
+            "vacuum",
+            "rubbish",
+            "trash",
+            "bin",
+            "bins",
+            "garbage",
+            "fresh towels",
+        ),
+    ),
+    (
+        "noise",
+        (
+            "noise",
+            "noisy",
+            "loud",
+            "loudly",
+            # The trailing word boundary is what keeps "neighbourhood" -- a
+            # perfectly ordinary local question -- out of this category.
+            "neighbour",
+            "neighbours",
+            "neighbor",
+            "neighbors",
+            "banging",
+            "shouting",
+            "upstairs",
+            "downstairs",
+            "next door",
+        ),
+    ),
+    (
+        "lost_and_found",
+        (
+            "lost",
+            "lost property",
+            "lost and found",
+            "left behind",
+            "left my",
+            "left our",
+            "left it",
+            "left them",
+            "forgot my",
+            "forgot our",
+            "forgotten",
+            "misplaced",
+            "missing",
+        ),
+    ),
+    (
+        "smoking",
+        (
+            "smoke",
+            "smoking",
+            "smoker",
+            "cigarette",
+            "cigarettes",
+            "cigar",
+            "vape",
+            "vaping",
+            "shisha",
+        ),
+    ),
+    (
+        "parties_events",
+        (
+            # Not the bare word "event": "any events this weekend?" is a
+            # perfectly ordinary question about the city.
+            "party",
+            "parties",
+            "gathering",
+            "celebration",
+            "birthday party",
+            "have people over",
+            "have friends over",
+            "bachelor party",
+            "bachelorette",
+        ),
+    ),
+    (
+        "luggage_storage",
+        (
+            "luggage",
+            "luggage storage",
+            "left luggage",
+            "bag storage",
+            "store our bags",
+            "store my bags",
+            "leave our bags",
+            "leave my bags",
+            "leave our luggage",
+            "drop our bags",
+            "drop off our bags",
+            "drop bags",
+            "suitcase",
+            "suitcases",
+        ),
+    ),
+    (
+        "deliveries",
+        (
+            "delivery",
+            "deliveries",
+            "deliver",
+            "delivered",
+            "package",
+            "packages",
+            "parcel",
+            "parcels",
+            "courier",
+            "fedex",
+            "mail",
+        ),
+    ),
+    (
+        "accessibility",
+        (
+            "accessible",
+            "accessibility",
+            "wheelchair",
+            "step-free",
+            "step free",
+            "stairs",
+            "elevator",
+            "lift",
+            "mobility",
+            "disabled",
+            "disability",
+            "handrail",
+            "ramp",
+            "ground floor",
+        ),
+    ),
+    (
+        "compensation",
+        (
+            "compensation",
+            "compensate",
+            "compensated",
+            "credit",
+            "credits",
+            "goodwill",
+            "partial refund",
+            "make it right",
+        ),
+    ),
+    (
+        "internet",
+        (
+            "wifi",
+            "wi-fi",
+            "internet",
+            "broadband",
+            "router",
+            "modem",
+            "hotspot",
+            "network",
+            "get online",
+        ),
+    ),
+    (
+        "utilities",
+        (
+            "heat",
+            "heating",
+            "radiator",
+            "boiler",
+            "thermostat",
+            "hot water",
+            "cold water",
+            "no water",
+            "water pressure",
+            "air conditioning",
+            "air con",
+            "aircon",
+            "a/c",
+            "electricity",
+            "power",
+            "fuse",
+            "breaker",
+        ),
+    ),
+    (
+        "security",
+        (
+            "security",
+            "safety",
+            "safe",
+            "unlocked",
+            "break-in",
+            "broke in",
+            "intruder",
+            "stolen",
+            "theft",
+            "burglary",
+            "cctv",
+            "camera",
+            "cameras",
+            "surveillance",
+            "suspicious",
+        ),
+    ),
+    (
+        "keys_lockouts",
+        (
+            "key",
+            "keys",
+            "keycard",
+            "key card",
+            "key fob",
+            "spare key",
+            "locked out",
+            "lock out",
+            "lockout",
+            "locked myself out",
+            "can't get in",
+            "cannot get in",
+            "front door",
+            "door lock",
+            "lock",
+        ),
+    ),
+)
+
+# The flat set `contains_marker` consumes. Built from the groups rather than
+# maintained beside them, so the two cannot disagree about what is covered.
+BUSINESS_MARKERS: tuple[str, ...] = tuple(
+    marker for _category, markers in BUSINESS_MARKER_GROUPS for marker in markers
+)
+
+
+def business_categories(text: Any) -> tuple[str, ...]:
+    """Which business-sensitive categories a message touches, named.
+
+    Named rather than counted for the same reason `actionable_signals` names
+    its signals: a draft that can see *what* was detected can answer the rest of
+    the message, while a bare verdict can only be obeyed or ignored.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ()
+
+    normalised = normalise_text(text)
+
+    return tuple(
+        category
+        for category, markers in BUSINESS_MARKER_GROUPS
+        if contains_marker(normalised, markers)
+    )
+
+
+def is_business_sensitive(text: Any) -> bool:
+    """Whether one message touches the property, the booking, money or a promise.
+
+    Any single marker is enough. A message is not general because most of it is
+    -- "any good restaurants nearby, and can we check out at noon?" is a
+    checkout question that happens to also ask about dinner.
+    """
+    return bool(business_categories(text))
+
+
+# What the model is told when the open message is ordinary. Attached
+# conditionally, like every other topic guidance in this file: a rule says how
+# to answer a topic *if it is raised*, and nothing here may cause a draft to
+# volunteer local information the guest did not ask for.
+GENERAL_QUESTION_GUIDANCE = (
+    "Ordinary questions are yours to answer. When the guest's open message does "
+    "not touch this property, the reservation, money, or a promise made to "
+    "them, answer it yourself from general knowledge -- restaurants and cafes, "
+    "directions, transit, neighbourhoods, attractions, Boston, or anything "
+    "else a well-informed local host would know. Do not hand it to a person and "
+    "do not say someone will follow up: that is for questions this guidance "
+    "genuinely cannot answer. Answer only what was asked -- a question the "
+    "guest did not ask is not an opening to recommend things."
+)
+
+GENERAL_KNOWLEDGE_PERMISSION = (
+    "Nothing in the guest's open message is business-sensitive. Answer it "
+    "yourself, in the host's voice, from general knowledge. never_invent still "
+    "binds in full: general knowledge is not permission to state an exact "
+    "opening hour, rating, travel time, walking distance, price or transit "
+    "departure."
+)
+
+BUSINESS_SENSITIVE_ROUTING = (
+    "The guest's open message touches business-sensitive ground -- "
+    "business_sensitivity.categories names which. Handle that part through the "
+    "policy, approved knowledge and escalation rules in this guidance, and "
+    "do not answer it from general knowledge. If the same message also asks "
+    "something ordinary -- a restaurant, a direction, a neighbourhood -- answer "
+    "that part helpfully in the same reply. A message is not general because "
+    "part of it is, and the ordinary half is not off-limits because the other "
+    "half is. never_invent binds throughout."
+)
+
+# The fabrication guard, appended to never_invent rather than replacing it.
+#
+# It is deliberately independent of the routing verdict above. Routing decides
+# *who answers*; this decides *what may be asserted*, and it binds even when
+# routing says the question is general. That independence is the whole point:
+# the marker sets will miss something eventually, and when they do, this is
+# what stops a missed marker from becoming an invented four-minute walk.
+EXACT_FACT_GUARD = (
+    "The same rule covers exact facts about the world, not only about the "
+    "property. An exact opening hour, a rating, a travel time, a walking "
+    "distance, a price, or a real-time transit schedule needs a live "
+    "authoritative source -- never your own recollection, however confident. "
+    "Without one, stay general: 'there are several restaurants and cafes in "
+    "the neighbourhood' and 'you can take public transit toward downtown' are "
+    "fine. 'An Italian restaurant two minutes from your front door' and 'the "
+    "nearest station is a 4-minute walk' are not."
+)
+
+
 CONVERSATION_STATE_RULES: tuple[str, ...] = (
     "Read the whole conversation in order before writing anything.",
     "Find the guest's most recent message. That is what you are replying to.",
@@ -574,6 +1298,18 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         is_early_check_in_request(row["message"]) for row in unanswered
     )
 
+    # Whether anything still open could affect the property, the reservation,
+    # money, or a promise to the guest. Computed from the same unanswered list
+    # as every other topic verdict, so a business question the owner already
+    # answered does not keep routing the thread away from the model.
+    open_business_categories = sorted(
+        {
+            category
+            for row in unanswered
+            for category in business_categories(row["message"])
+        }
+    )
+
     # Asking for more nights than were booked. Same list, same reason: a
     # request the owner has already answered must not keep re-firing, and the
     # unanswered messages are the only ones that can still be open.
@@ -598,6 +1334,8 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         "latest_guest_message": latest_guest["message"] if latest_guest else None,
         "latest_guest_message_is_closing": latest_is_closing,
         "open_signals": open_signals,
+        "business_sensitive": bool(open_business_categories),
+        "business_categories": open_business_categories,
         "answered_earlier_by_us": [
             row["message"]
             for index, row in enumerate(rows)
@@ -619,7 +1357,10 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
             "already responded to. Do not answer those again. open_signals "
             "names why anything still open needs a reply -- an empty list with "
             "unanswered messages present means the guest was closing the "
-            "conversation, not asking for anything. suggested_outcome is advice "
+            "conversation, not asking for anything. business_sensitive says "
+            "whether anything still open could affect the property, the "
+            "reservation, money or a promise to this guest, and "
+            "business_categories names which ones. suggested_outcome is advice "
             "from a simple rule -- read the conversation and override it if the "
             "wording tells you otherwise."
         ),
@@ -857,7 +1598,8 @@ def reply_guidance(
             "by something already said in this conversation, or by an "
             "authoritative tool result. If you do not know whether a unit has "
             "something, say you will check -- never soften a guess into a "
-            "promise with words like 'should have' or 'I believe'."
+            "promise with words like 'should have' or 'I believe'. "
+            f"{EXACT_FACT_GUARD}"
         ),
         "escalation": (
             "If the question touches anything in do_not_answer_from_memory and "
@@ -867,6 +1609,22 @@ def reply_guidance(
             "is always acceptable; a confident guess is not."
         ),
     }
+
+    if state.get("open_signals") or state.get("business_sensitive"):
+        # Attached only while something is actually open, exactly like every
+        # other topic guidance here. A thread with nothing outstanding must not
+        # carry an invitation to talk about restaurants.
+        guidance["general_question_policy"] = GENERAL_QUESTION_GUIDANCE
+
+        guidance["business_sensitivity"] = {
+            "business_sensitive": state.get("business_sensitive", False),
+            "categories": state.get("business_categories", []),
+            "how_to_answer": (
+                BUSINESS_SENSITIVE_ROUTING
+                if state.get("business_sensitive")
+                else GENERAL_KNOWLEDGE_PERMISSION
+            ),
+        }
 
     if state.get("early_check_in_requested"):
         guidance["early_check_in_policy"] = EARLY_CHECK_IN_GUIDANCE
