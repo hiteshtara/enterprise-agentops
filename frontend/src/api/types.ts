@@ -267,6 +267,12 @@ export interface ConversationSummary {
 export interface InboxPage {
   conversations: ConversationSummary[]
   count: number
+  /**
+   * True when a booking page did not answer while the backend was discovering
+   * conversations. The rows that arrived were still read live -- the list may
+   * be short, it is never wrong.
+   */
+  incomplete: boolean
 }
 
 export interface ConversationDetail {

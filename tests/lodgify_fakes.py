@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from app.connectors.lodgify.client import LodgifyClient
 from app.connectors.lodgify.inbox import LodgifyInbox
 from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
@@ -99,6 +100,33 @@ def message(
     }
 
 
+def availability(
+    periods: list[tuple[str, str, bool]],
+    property_id: int = ROSLINDALE_ID,
+) -> list[dict[str, Any]]:
+    """An availability payload shaped like the real one.
+
+    `end` is inclusive, matching the provider's calendar convention, and
+    `available` is the integer upstream sends rather than a bool. Booking rows
+    and channel calendars are included because the connector must drop them.
+    """
+    return [
+        {
+            "property_id": property_id,
+            "periods": [
+                {
+                    "start": start,
+                    "end": end,
+                    "available": 1 if free else 0,
+                    "bookings": [{"id": 999999, "guest_name": "Fixture Guest"}],
+                    "channel_calendars": [{"channel": "Airbnb", "source": "ical"}],
+                }
+                for start, end, free in periods
+            ],
+        }
+    ]
+
+
 def thread(
     thread_uid: str,
     messages: list[dict[str, Any]],
@@ -137,6 +165,9 @@ class FakeLodgify:
         bookings_status: int = 200,
         thread_status: int = 200,
         thread_failures: dict[str, int | Exception] | None = None,
+        availability: list[dict[str, Any]] | None = None,
+        availability_status: int = 200,
+        booking_page_failures: dict[int, int | Exception] | None = None,
     ) -> None:
         self.bookings = bookings if bookings is not None else []
         self.threads = threads or {}
@@ -149,6 +180,16 @@ class FakeLodgify:
         # every read. An int is answered as that status; an exception is raised
         # from the transport, which is how a timeout is reproduced.
         self.thread_failures = thread_failures or {}
+        # Availability is a separate provider surface from the booking archive,
+        # so it fails separately -- which is exactly what the stay-extension
+        # tests need in order to break one signal and leave the other intact.
+        self.availability = availability if availability is not None else []
+        self.availability_status = availability_status
+        # Per-*page* booking failure, keyed by the 1-based page number. The
+        # archive walk has to survive losing page 7 of 11 without losing pages
+        # 1-6, and `bookings_status` cannot express that: it breaks every page
+        # at once, which is only the "nothing was gathered" case.
+        self.booking_page_failures = booking_page_failures or {}
 
         self.requests: list[httpx.Request] = []
 
@@ -163,6 +204,14 @@ class FakeLodgify:
             for request in self.requests
             if request.method == "GET"
             and request.url.path == "/v2/reservations/bookings"
+        ]
+
+    @property
+    def availability_reads(self) -> list[httpx.Request]:
+        return [
+            request
+            for request in self.requests
+            if request.method == "GET" and "/v2/availability/" in request.url.path
         ]
 
     @property
@@ -198,10 +247,24 @@ class FakeLodgify:
             size = int(request.url.params.get("size", "50"))
             start = (page - 1) * size
 
+            failure = self.booking_page_failures.get(page)
+
+            if failure is not None:
+                if isinstance(failure, Exception):
+                    raise failure
+
+                return httpx.Response(failure, json={})
+
             return httpx.Response(
                 200,
                 json={"items": self.bookings[start : start + size]},
             )
+
+        if path.startswith("/v2/availability/"):
+            if self.availability_status != 200:
+                return httpx.Response(self.availability_status, json={})
+
+            return httpx.Response(200, json=self.availability)
 
         if path.startswith("/v2/messaging/"):
             uid = path.rsplit("/", 1)[-1]
@@ -229,12 +292,22 @@ class FakeLodgify:
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)
 
-    def inbox(self, key_provider=None) -> LodgifyInbox:
+    def inbox(self, key_provider=None, resolutions=None) -> LodgifyInbox:
+        # `resolutions` lets a test hand in a cache with an injected clock, so
+        # expiry is exercised by advancing a counter rather than by sleeping.
         return LodgifyInbox(
             LodgifyMessagingClient(
                 api_key_provider=key_provider or (lambda: FAKE_KEY),
                 transport=self.transport(),
-            )
+            ),
+            resolutions=resolutions,
+        )
+
+    def availability_client(self, key_provider=None) -> LodgifyClient:
+        """The read-only availability client, on the same scripted transport."""
+        return LodgifyClient(
+            api_key_provider=key_provider or (lambda: FAKE_KEY),
+            transport=self.transport(),
         )
 
     def tools(self, key_provider=None) -> LodgifyMessagingTools:

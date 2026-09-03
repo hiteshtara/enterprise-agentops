@@ -277,6 +277,11 @@ class ConversationSummary(BaseModel):
 class InboxPage(BaseModel):
     conversations: list[ConversationSummary] = []
     count: int
+    # True when a booking page did not answer during discovery, so the archive
+    # may hold conversations this page could not know about. The rows that are
+    # here were still read live; the flag says the list may be short, never that
+    # it is wrong. Defaults False so an older client sees the pre-existing shape.
+    incomplete: bool = False
 
 
 class ConversationDetail(BaseModel):

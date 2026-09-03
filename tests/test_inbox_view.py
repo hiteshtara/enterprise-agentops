@@ -91,7 +91,7 @@ def test_a_persisted_historic_conversation_appears_in_the_inbox(database):
 
     remember(store, "PH-HISTORIC1", "2026-09-03T12:06:33")
 
-    rows = build_inbox(fake.inbox(), store)
+    rows = build_inbox(fake.inbox(), store).conversations
 
     assert refs(rows)[0] == "PH-HISTORIC1"
 
@@ -102,7 +102,7 @@ def test_live_and_persisted_rows_merge(database):
 
     remember(store, "PH-HISTORIC1", "2026-09-01T09:00:00")
 
-    rows = build_inbox(fake.inbox(), store)
+    rows = build_inbox(fake.inbox(), store).conversations
 
     assert set(refs(rows)) == {conversation_ref_for(1001), "PH-HISTORIC1"}
 
@@ -113,7 +113,7 @@ def test_a_conversation_in_both_sources_appears_once(database):
 
     remember(store, conversation_ref_for(1001), "2026-01-01T00:00:00")
 
-    rows = build_inbox(fake.inbox(), store)
+    rows = build_inbox(fake.inbox(), store).conversations
 
     listed = refs(rows)
 
@@ -146,7 +146,7 @@ def test_the_live_row_wins_over_a_persisted_duplicate(database):
 
     remember(store, conversation_ref_for(1001), "2026-01-01T00:00:00")
 
-    rows = build_inbox(fake.inbox(), store)
+    rows = build_inbox(fake.inbox(), store).conversations
 
     assert refs(rows) == [conversation_ref_for(1001)]
 
@@ -180,7 +180,7 @@ def test_ordering_is_by_last_message_at_across_both_sources(database):
     remember(store, "PH-HISTORIC1", "2026-09-03T12:06:33")
     remember(store, "PH-HISTORIC2", "2026-08-25T09:00:00")
 
-    assert refs(build_inbox(fake.inbox(), store)) == [
+    assert refs(build_inbox(fake.inbox(), store).conversations) == [
         "PH-HISTORIC1",
         conversation_ref_for(1001),
         "PH-HISTORIC2",
@@ -194,7 +194,7 @@ def test_the_limit_is_applied_after_the_merge(database):
 
     remember(store, "PH-HISTORIC1", "2026-09-03T12:06:33")
 
-    rows = build_inbox(fake.inbox(), store, limit=1)
+    rows = build_inbox(fake.inbox(), store, limit=1).conversations
 
     assert refs(rows) == ["PH-HISTORIC1"]
 
@@ -215,7 +215,7 @@ def test_a_persisted_only_row_is_enriched_with_a_live_excerpt(database):
 
     remember(store, conversation_ref_for(9001), "2026-09-03T12:06:33")
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == conversation_ref_for(9001)
     assert row["last_message_excerpt"] == "Invented fixture text."
@@ -230,7 +230,7 @@ def test_a_failed_enrichment_keeps_the_row_and_invents_nothing(database):
     # No booking matches this ref, so enrichment cannot resolve it.
     remember(store, "PH-UNREACHBL", "2026-09-03T12:06:33")
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == "PH-UNREACHBL"
     assert row["last_message_at"] == "2026-09-03T12:06:33"
@@ -268,7 +268,7 @@ def test_enrichment_pages_the_archive_once_for_the_whole_page(database):
 
     before = len(fake.booking_reads)
 
-    rows = build_inbox(fake.inbox(), store)
+    rows = build_inbox(fake.inbox(), store).conversations
 
     enriched = [row for row in rows if row["conversation_ref"] in historic_refs]
 
@@ -332,7 +332,7 @@ def test_a_historic_row_survives_ordinary_polling(database):
     build_inbox(fake.inbox(), store)
 
     assert store.for_conversation("PH-HISTORIC1") is not None
-    assert "PH-HISTORIC1" in refs(build_inbox(fake.inbox(), store))
+    assert "PH-HISTORIC1" in refs(build_inbox(fake.inbox(), store).conversations)
 
 
 # -- enrichment failure must preserve, never overwrite ----------------------
@@ -368,7 +368,7 @@ def test_a_rate_limited_enrichment_keeps_the_persisted_timestamp(database):
 
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == HISTORIC_REF
     assert row["last_message_at"] == HISTORIC_AT
@@ -382,7 +382,7 @@ def test_a_timed_out_enrichment_keeps_the_persisted_timestamp(database):
 
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == HISTORIC_REF
     assert row["last_message_at"] == HISTORIC_AT
@@ -394,7 +394,7 @@ def test_a_failed_enrichment_preserves_every_persisted_field(database):
 
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["status"] == ConversationStatus.NEEDS_ATTENTION.value
     assert row["last_message_sender"] == "Renter"
@@ -411,7 +411,7 @@ def test_a_failed_enrichment_shows_no_preview_and_invents_no_excerpt(database):
 
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["preview_unavailable"] is True
     assert row["last_message_excerpt"] is None
@@ -466,8 +466,8 @@ def test_a_failed_enrichment_keeps_its_ordering_position(database):
         conversation_ref_for(1002),
     ]
 
-    assert refs(build_inbox(inbox, store)) == expected
-    assert refs(build_inbox(inbox, store)) == expected
+    assert refs(build_inbox(inbox, store).conversations) == expected
+    assert refs(build_inbox(inbox, store).conversations) == expected
 
 
 def test_a_later_successful_enrichment_repairs_the_row(database):
@@ -477,7 +477,7 @@ def test_a_later_successful_enrichment_repairs_the_row(database):
 
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
-    failed = build_inbox(fake.inbox(), store)[0]
+    failed = build_inbox(fake.inbox(), store).conversations[0]
 
     assert failed["last_message_at"] == HISTORIC_AT
     assert failed["preview_unavailable"] is True
@@ -485,7 +485,7 @@ def test_a_later_successful_enrichment_repairs_the_row(database):
     # The provider recovers.
     fake.thread_failures = {}
 
-    repaired = build_inbox(fake.inbox(), store)[0]
+    repaired = build_inbox(fake.inbox(), store).conversations[0]
 
     assert repaired["conversation_ref"] == HISTORIC_REF
     assert repaired["last_message_at"] == "2026-09-04T08:00:00"
@@ -509,7 +509,10 @@ def test_one_failed_enrichment_does_not_damage_the_other_rows(database):
     remember(store, HISTORIC_REF, HISTORIC_AT)
     remember(store, conversation_ref_for(9002), "2026-09-03T11:00:00")
 
-    rows = {row["conversation_ref"]: row for row in build_inbox(fake.inbox(), store)}
+    rows = {
+        row["conversation_ref"]: row
+        for row in build_inbox(fake.inbox(), store).conversations
+    }
 
     healthy = rows[conversation_ref_for(9002)]
 
@@ -530,7 +533,7 @@ def test_a_webhook_recorded_row_survives_repeated_provider_failures(database):
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
     for _ in range(3):
-        rows = build_inbox(fake.inbox(), store)
+        rows = build_inbox(fake.inbox(), store).conversations
 
         assert refs(rows)[0] == HISTORIC_REF
         assert rows[0]["last_message_at"] == HISTORIC_AT
@@ -556,7 +559,7 @@ def test_an_omitted_ref_leaves_the_index_untouched(database, monkeypatch):
 
     monkeypatch.setattr(inbox, "summarise_refs", lambda pending: {})
 
-    row = build_inbox(inbox, store)[0]
+    row = build_inbox(inbox, store).conversations[0]
 
     assert row["conversation_ref"] == HISTORIC_REF
     assert row["last_message_at"] == HISTORIC_AT
@@ -632,7 +635,10 @@ def test_a_persisted_row_with_no_known_good_activity_keeps_a_legitimate_empty_re
         booking_status="Booked",
     )
 
-    rows = {row["conversation_ref"]: row for row in build_inbox(fake.inbox(), store)}
+    rows = {
+        row["conversation_ref"]: row
+        for row in build_inbox(fake.inbox(), store).conversations
+    }
     row = rows[EMPTY_REF]
 
     assert row["last_message_at"] is None
@@ -661,7 +667,7 @@ def test_known_good_activity_survives_a_successful_empty_read(database):
 
     remember(store, EMPTY_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == EMPTY_REF
     assert row["last_message_at"] == HISTORIC_AT
@@ -698,7 +704,7 @@ def test_a_known_message_count_is_not_reset_to_zero_by_an_empty_enrichment(datab
 
     remember(store, EMPTY_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["message_count"] == 2
     assert store.for_conversation(EMPTY_REF).message_count == 2
@@ -714,7 +720,7 @@ def test_a_successful_non_empty_read_still_overrides_known_good_activity(databas
 
     remember(store, EMPTY_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == EMPTY_REF
     assert row["last_message_at"] == "2026-09-04T08:00:00"
@@ -735,7 +741,7 @@ def test_a_failed_read_still_preserves_known_good_activity_alongside_the_empty_r
 
     remember(store, HISTORIC_REF, HISTORIC_AT)
 
-    row = build_inbox(fake.inbox(), store)[0]
+    row = build_inbox(fake.inbox(), store).conversations[0]
 
     assert row["conversation_ref"] == HISTORIC_REF
     assert row["last_message_at"] == HISTORIC_AT
@@ -769,5 +775,5 @@ def test_a_row_preserved_by_the_empty_read_guard_keeps_its_ordering_position(dat
         conversation_ref_for(1002),
     ]
 
-    assert refs(build_inbox(fake.inbox(), store)) == expected
-    assert refs(build_inbox(fake.inbox(), store)) == expected
+    assert refs(build_inbox(fake.inbox(), store).conversations) == expected
+    assert refs(build_inbox(fake.inbox(), store).conversations) == expected

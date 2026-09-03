@@ -40,6 +40,7 @@ from app.drafts import (
 from app.early_check_in import outcome_for as early_check_in_outcome
 from app.hospitality import analyse_conversation
 from app.late_checkout import PROMISE_REASON, exceeds_ceiling
+from app.stay_extension import ESCALATION_REASON as STAY_EXTENSION_ESCALATION
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,16 @@ class ConversationRefreshService:
             if needs_owner:
                 escalate = True
                 reason = why
+
+        if analysis.get("stay_extension_requested"):
+            # Detected and handed straight to the owner. Deliberately no
+            # availability read, no booking-overlap scan and no second model
+            # call to pin down dates: whether nights can be sold, and whether
+            # the owner wants to sell them, is not something to compute. Gated
+            # on an *open* request, like every other topic, so a request the
+            # owner already answered cannot escalate twice.
+            escalate = True
+            reason = STAY_EXTENSION_ESCALATION
 
         # A cancellation the guest is asking about the mechanics of, or taking
         # up, is a person's decision -- AgentGuard has no tool that changes a

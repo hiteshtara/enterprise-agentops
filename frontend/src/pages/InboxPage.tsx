@@ -116,6 +116,21 @@ export function InboxPage() {
 
       {inbox.error && !inbox.data ? <ErrorState error={inbox.error} /> : null}
 
+      {/*
+        A partial scan, stated plainly and without alarm. The provider stopped
+        answering part way through discovery, so the rows below were all read
+        live but the list may be short. Saying nothing would be worse than a
+        neutral notice: an operator would read a missing conversation as one
+        that does not exist.
+      */}
+      {inbox.data?.incomplete ? (
+        <div className="state state-warn" role="status" style={{ marginBottom: 16 }}>
+          The booking provider did not answer for part of this scan, so some
+          conversations may be missing. Everything shown was read live. The next poll
+          tries again.
+        </div>
+      ) : null}
+
       {inbox.loading ? <Loading label="Loading conversations" /> : null}
 
       {!inbox.loading && conversations.length === 0 && !inbox.error ? (

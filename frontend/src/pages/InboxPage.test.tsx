@@ -96,13 +96,44 @@ describe('InboxPage', () => {
   })
 
   it('shows an empty state when there is nothing to answer', async () => {
-    vi.mocked(api.getInbox).mockResolvedValue({ conversations: [], count: 0 })
+    vi.mocked(api.getInbox).mockResolvedValue({
+      conversations: [],
+      count: 0,
+      incomplete: false,
+    })
 
     renderWithRouter(<InboxPage />)
 
     expect(
       await screen.findByText('No recent guest conversations.'),
     ).toBeInTheDocument()
+  })
+
+  it('warns when the provider answered for only part of the scan', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue({ ...inboxPage, incomplete: true })
+
+    renderWithRouter(<InboxPage />)
+
+    expect(
+      await screen.findByText(/some conversations may be missing/i),
+    ).toBeInTheDocument()
+
+    // The rows that did arrive are still shown. A partial scan is not an error,
+    // so it must not render as one.
+    expect(screen.getByText('Needs attention')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows no warning when the scan was complete', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue(inboxPage)
+
+    renderWithRouter(<InboxPage />)
+
+    await screen.findByText('Needs attention')
+
+    expect(
+      screen.queryByText(/some conversations may be missing/i),
+    ).not.toBeInTheDocument()
   })
 
   it('reports a load failure without leaking provider detail', async () => {
@@ -118,6 +149,7 @@ describe('InboxPage', () => {
   it('shows a neutral notice when a remembered conversation has no preview', async () => {
     vi.mocked(api.getInbox).mockResolvedValue({
       count: 1,
+      incomplete: false,
       conversations: [
         {
           ...inboxPage.conversations[0],
@@ -137,6 +169,7 @@ describe('InboxPage', () => {
   it('still distinguishes an unreadable live thread', async () => {
     vi.mocked(api.getInbox).mockResolvedValue({
       count: 1,
+      incomplete: false,
       conversations: [
         {
           ...inboxPage.conversations[0],
@@ -164,6 +197,7 @@ describe('prepared replies in the Inbox', () => {
   function withDraft(draft: (typeof inboxPage)['conversations'][number]['draft']) {
     vi.mocked(api.getInbox).mockResolvedValue({
       count: 1,
+      incomplete: false,
       conversations: [{ ...inboxPage.conversations[0], draft }],
     })
   }

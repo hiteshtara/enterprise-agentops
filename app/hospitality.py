@@ -33,6 +33,9 @@ from app.late_checkout import (
     requires_owner_approval,
 )
 from app.late_checkout import POLICY_GUIDANCE as LATE_CHECKOUT_GUIDANCE
+from app.stay_extension import ESCALATION_REASON as STAY_EXTENSION_ESCALATION
+from app.stay_extension import POLICY_GUIDANCE as STAY_EXTENSION_GUIDANCE
+from app.stay_extension import is_extension_request
 
 # Sender type of an outbound message, mirroring the connector's vocabulary.
 # Duplicated rather than imported so this module stays free of the connector.
@@ -571,6 +574,13 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         is_early_check_in_request(row["message"]) for row in unanswered
     )
 
+    # Asking for more nights than were booked. Same list, same reason: a
+    # request the owner has already answered must not keep re-firing, and the
+    # unanswered messages are the only ones that can still be open.
+    stay_extension_open = any(
+        is_extension_request(row["message"]) for row in unanswered
+    )
+
     if not unanswered:
         outcome = "already_replied"
 
@@ -596,6 +606,7 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         "suggested_outcome": outcome,
         "late_checkout_requested": late_checkout_open,
         "early_check_in_requested": early_check_in_open,
+        "stay_extension_requested": stay_extension_open,
         "late_checkout_beyond_policy": beyond_policy,
         "owner_approval_required": beyond_policy,
         "owner_approval_reason": ESCALATION_REASON if beyond_policy else None,
@@ -781,6 +792,19 @@ def rows_of(messages: Any) -> list[dict[str, Any]]:
     return [row for row in (messages or []) if isinstance(row, dict)]
 
 
+# -- stay extension --------------------------------------------------------
+#
+# Detected, never decided. AgentGuard works nothing out about the calendar for
+# an extension: no availability read, no booking-overlap scan, no dates
+# extracted, no verdict. An open request escalates to the owner, and the only
+# thing this layer contributes is the wording -- what the prepared reply may
+# never say while it waits for a person.
+#
+# Attached conditionally, for the same reason every other topic rule is: a rule
+# says how to answer a topic *if it is open*, and a thread that once discussed
+# extra nights must not keep answering about them.
+
+
 def reply_guidance(
     messages: Any = (),
     approved_knowledge: Any = (),
@@ -865,6 +889,15 @@ def reply_guidance(
         if needs_owner:
             state = {**state, "owner_approval_required": True}
             state["owner_approval_reason"] = reason
+
+    if state.get("stay_extension_requested"):
+        # Attached only while the request is open, like every other topic rule.
+        # There is no state block to go with it: nothing was looked up, and an
+        # extension is the owner's decision rather than a verdict to publish.
+        guidance["stay_extension_policy"] = STAY_EXTENSION_GUIDANCE
+
+        state = {**state, "owner_approval_required": True}
+        state["owner_approval_reason"] = STAY_EXTENSION_ESCALATION
 
     offer, cancellation_escalates, cancellation_reason = cancellation_outcome(
         booking_cancelled, rows_of(messages)

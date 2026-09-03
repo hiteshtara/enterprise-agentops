@@ -50,7 +50,7 @@ from app.drafts import (
 )
 from app.historical_replies import HistoricalReplyStore, index_one_conversation
 from app.identity import PermissionDenied, User
-from app.inbox_view import build_inbox
+from app.inbox_view import DiscoveryCache, build_inbox, discover_conversations
 from app.knowledge import KnowledgeStatus, KnowledgeStore
 from app.knowledge_conflicts import find_conflicts
 from app.knowledge_topics import GUEST_FACING, INTERNAL_OPERATION
@@ -234,6 +234,13 @@ conversation_refresh = (
     if lodgify_inbox is not None
     else None
 )
+
+# What the last Inbox discovery scan found, briefly, so one user action costs
+# one scan of the provider's archive rather than two. Holds `(conversation_ref,
+# fingerprint)` pairs only -- never a rendered row, because a rendered row
+# carries guest text. In-process and deliberately not durable: losing it on a
+# restart costs one extra scan and nothing else.
+inbox_discovery = DiscoveryCache()
 
 
 @app.post(
@@ -437,7 +444,7 @@ def get_inbox(
     inbox = require_inbox()
 
     try:
-        conversations = build_inbox(
+        result = build_inbox(
             inbox,
             activity_store,
             property_slug=property_slug,
@@ -460,6 +467,13 @@ def get_inbox(
             detail="Conversations could not be loaded from the provider.",
         ) from exc
 
+    if result.discovery is not None:
+        # The refresh route consumes this instead of repeating the scan. Only
+        # `(conversation_ref, fingerprint)` pairs travel; see `Discovery`.
+        inbox_discovery.put(result.discovery)
+
+    conversations = result.conversations
+
     prepared = draft_store.latest_by_conversation()
 
     for row in conversations:
@@ -472,7 +486,11 @@ def get_inbox(
             draft.to_dict(row.get("fingerprint")) if draft is not None else None
         )
 
-    return InboxPage(conversations=conversations, count=len(conversations))
+    return InboxPage(
+        conversations=conversations,
+        count=len(conversations),
+        incomplete=result.incomplete,
+    )
 
 
 @app.get(
@@ -547,25 +565,42 @@ def refresh_inbox(
     Bounded per call: a burst of new conversations should cost a predictable
     number of model calls, not all of them at once. The rest arrive on the next
     poll.
+
+    **Discovery is shared, not repeated.** This used to run its own
+    `list_conversations`, which against the live account meant a second
+    155-request scan of the provider seconds after the Inbox poll had done the
+    identical one -- 350-445 requests inside one poll cycle, and intermittent
+    502s from a rate-limited provider. It now works from what the poll already
+    found, and discovers for itself only when nothing recent is available.
+
+    The shared fingerprint is a pre-filter and never a decision: `process`
+    re-reads the conversation and recomputes it before spending anything, so a
+    fingerprint a few seconds old can cost one redundant read and never a wrong
+    outcome.
     """
     service = require_refresh()
     inbox = require_inbox()
 
-    try:
-        conversations = inbox.list_conversations(limit=limit)
+    discovery = inbox_discovery.recent(limit)
 
-    except LodgifyUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Conversations could not be loaded from the provider.",
-        ) from exc
+    if discovery is None:
+        try:
+            discovery = discover_conversations(inbox, limit=limit)
+
+        except LodgifyUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Conversations could not be loaded from the provider.",
+            ) from exc
+
+        # Publish it in turn, so two refreshes in quick succession -- or a poll
+        # arriving behind this one -- do not each pay for a scan.
+        inbox_discovery.put(discovery)
 
     processed = drafted = skipped = no_reply = failed = 0
 
-    for row in conversations:
-        ref = row["conversation_ref"]
-
-        existing = draft_store.for_state(ref, row.get("fingerprint") or "")
+    for ref, fingerprint in discovery.conversations[:limit]:
+        existing = draft_store.for_state(ref, fingerprint)
 
         if existing is not None and existing.is_settled():
             # Nothing has changed since this was worked out. No model call.

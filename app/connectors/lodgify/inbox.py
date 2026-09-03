@@ -51,6 +51,7 @@ from app.connectors.lodgify.messaging_models import (
     normalise_sender,
 )
 from app.connectors.lodgify.refs import conversation_ref_for, is_well_formed
+from app.timing import MonotonicNs, default_monotonic_ns
 
 MIN_LIMIT = 1
 
@@ -78,6 +79,29 @@ MAX_LOOKUP_PAGES = 60
 # this is someone else's API, and the goal is an Inbox that returns before the
 # next poll, not maximum throughput.
 THREAD_READ_WORKERS = 8
+
+# How long a resolved conversation may be reused before the archive is walked
+# again for it.
+#
+# Measured live: one `resolve` costs 7-11 `stayFilter=All` booking pages, and a
+# single refreshed conversation resolves more than once -- once for the
+# thread read, once for the turnover question.
+#
+# 45 seconds is chosen against the console's two cadences. It is longer than the
+# 30s Inbox poll, so a refresh landing right behind a poll -- and every resolve
+# inside one refresh -- reuses one archive walk instead of paying for its own.
+# It is well short of the 120s refresh cadence, so every refresh cycle
+# re-establishes booking state from live data and nothing can be more than 45
+# seconds stale. Nothing irreversible is decided from a cached resolution: the
+# identifiers on it (`booking_id`, `thread_uid`) do not change for a booking,
+# and the send path re-reads the thread before and after it acts regardless.
+RESOLUTION_CACHE_TTL_SECONDS = 45.0
+
+# When the resolution cache sweeps expired entries. Comfortably above the
+# number of conversations one poll cycle can touch, so the sweep is rare, and
+# far below the archive size, so a long-lived process cannot accumulate a
+# resolution for every booking the account has ever had.
+MAX_CACHED_RESOLUTIONS = 256
 
 MAX_SUBJECT_LENGTH = 200
 
@@ -237,6 +261,105 @@ class ResolvedConversation:
     arrival: str | None
     departure: str | None
     canceled_at: str | None
+
+
+@dataclass(frozen=True)
+class BookingScan:
+    """What one archive walk gathered, and whether it saw the whole archive.
+
+    `incomplete` is the honest half. A walk that lost a page part-way through
+    still holds real bookings, and throwing them away costs an Inbox; but the
+    caller must never read the remainder as *all there is*, because treating a
+    failed page as the end of the archive is silent truncation -- the failure
+    mode that hides a waiting guest rather than reporting an outage.
+    """
+
+    bookings: list[ResolvedConversation]
+    incomplete: bool = False
+
+
+@dataclass(frozen=True)
+class ConversationScan:
+    """One page of Inbox rows, and whether discovery saw the whole archive."""
+
+    conversations: list[dict[str, Any]]
+    incomplete: bool = False
+
+
+class ResolutionCache:
+    """`conversation_ref` -> `ResolvedConversation`, briefly, in this process.
+
+    An optimisation and nothing else. Three properties make that literally
+    true, and each is covered by a test:
+
+      * a miss falls through to a live archive walk;
+      * an expired entry is re-read rather than reused;
+      * losing the whole cache -- a restart, a `clear()` -- changes no answer.
+
+    What it may hold is server-side resolution metadata: the booking id, the
+    thread uid, the property, the stay dates and the booking status. All of it
+    stops at the connector boundary and none of it leaves this module, which is
+    exactly why it is safe to keep here and would not be safe to keep anywhere
+    above. It never holds guest text, a guest name, email or phone, a raw
+    provider payload, or the API key -- `read_booking` never reads those fields
+    in the first place, so they cannot arrive here.
+
+    Only successful resolutions are stored. A ref that matched nothing is
+    re-checked every time: refusing a fabricated ref must not depend on a
+    cache, and a booking created a moment ago must be findable immediately.
+
+    The clock is injectable so expiry is tested by advancing a counter rather
+    than by sleeping, and it is monotonic because a wall clock can jump.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = RESOLUTION_CACHE_TTL_SECONDS,
+        monotonic_ns: MonotonicNs | None = None,
+    ) -> None:
+        self._ttl_ns = int(ttl_seconds * 1_000_000_000)
+        self._monotonic_ns = monotonic_ns or default_monotonic_ns
+        self._entries: dict[str, tuple[int, ResolvedConversation]] = {}
+
+    def get(self, conversation_ref: str) -> ResolvedConversation | None:
+        entry = self._entries.get(conversation_ref)
+
+        if entry is None:
+            return None
+
+        stored_at, resolved = entry
+
+        if self._monotonic_ns() - stored_at >= self._ttl_ns:
+            # Expired. Dropped rather than left to be re-checked. `pop` rather
+            # than `del` because FastAPI runs sync routes on a threadpool, so
+            # two requests can expire the same ref at once.
+            self._entries.pop(conversation_ref, None)
+
+            return None
+
+        return resolved
+
+    def put(self, conversation_ref: str, resolved: ResolvedConversation) -> None:
+        now = self._monotonic_ns()
+
+        if len(self._entries) >= MAX_CACHED_RESOLUTIONS:
+            # Nothing is ever read again after it expires, so an entry that is
+            # resolved once and never asked for again would otherwise sit here
+            # for the life of the process. Swept on write, which is rare.
+            self._entries = {
+                ref: entry
+                for ref, entry in self._entries.items()
+                if now - entry[0] < self._ttl_ns
+            }
+
+        self._entries[conversation_ref] = (now, resolved)
+
+    def entries(self) -> tuple[ResolvedConversation, ...]:
+        """Everything currently held. Exists so a test can assert what is not."""
+        return tuple(resolved for _stored_at, resolved in self._entries.values())
+
+    def clear(self) -> None:
+        self._entries.clear()
 
 
 PROPERTIES_BY_ID = {prop.lodgify_property_id: prop for prop in LODGIFY_PROPERTIES}
@@ -410,8 +533,21 @@ def summarise_delivery(messages: tuple[SentMessage, ...]) -> str:
 class LodgifyInbox:
     """Guest conversations, sanitized, plus the one governed write."""
 
-    def __init__(self, client: LodgifyMessagingClient) -> None:
+    def __init__(
+        self,
+        client: LodgifyMessagingClient,
+        resolutions: ResolutionCache | None = None,
+    ) -> None:
         self._client = client
+        # Injectable purely so tests are deterministic; production takes the
+        # default. See `ResolutionCache` for why holding this is safe.
+        self._resolutions = (
+            resolutions if resolutions is not None else ResolutionCache()
+        )
+
+    @property
+    def resolutions(self) -> ResolutionCache:
+        return self._resolutions
 
     # -- archive access ----------------------------------------------------
     #
@@ -520,18 +656,62 @@ class LodgifyInbox:
         share one thread -- 12 do in this account, verified live -- and the
         Inbox lists conversations, so one thread must produce one row however
         many reservations point at it.
+
+        Loses the "did we see everything" answer -- callers that need it use
+        `scan_bookings`.
+        """
+        return self.scan_bookings(stay_filters=stay_filters).bookings
+
+    def scan_bookings(
+        self,
+        stay_filters: tuple[str, ...] = (STAY_FILTER_ALL,),
+    ) -> BookingScan:
+        """`all_bookings`, plus whether the walk completed.
+
+        **A failed page is not an empty page.** Paging stops on an empty result
+        because that means the archive ran out; a provider failure means the
+        opposite -- there is more, and we cannot see it. Conflating them is
+        silent truncation, so failure has its own exit:
+
+          * **nothing gathered yet** -- there is no partial answer to give, so
+            the failure propagates and the caller reports an outage. One failed
+            page out of one is just a failure.
+          * **something already gathered** -- stop walking, keep what was read
+            live, and say so. Measured live, an Inbox destroyed by a 502 threw
+            away 151 good thread reads because the 152nd booking page did not
+            answer; the rows were real then and they are real now.
+
+        The walk stops entirely rather than skipping to the next page or the
+        next stay filter. A provider that just failed is quite possibly
+        rate-limiting us, and the correct response to that is to stop asking.
+        Nothing is invented for the pages that were never read.
         """
         seen: set[str] = set()
         seen_threads: set[str] = set()
         found: list[ResolvedConversation] = []
+        incomplete = False
 
         for stay_filter in stay_filters:
+            if incomplete:
+                break
+
             for page in range(1, MAX_LOOKUP_PAGES + 1):
-                bookings = self.booking_page(
-                    page=page,
-                    size=BOOKING_SCAN_SIZE,
-                    stay_filter=stay_filter,
-                )
+                try:
+                    bookings = self.booking_page(
+                        page=page,
+                        size=BOOKING_SCAN_SIZE,
+                        stay_filter=stay_filter,
+                    )
+
+                except LodgifyUnavailable:
+                    if not found:
+                        # No partial answer exists. This is an outage, and it
+                        # is the caller's 502.
+                        raise
+
+                    incomplete = True
+
+                    break
 
                 if not bookings:
                     break
@@ -550,7 +730,7 @@ class LodgifyInbox:
                 if len(bookings) < BOOKING_SCAN_SIZE:
                     break
 
-        return found
+        return BookingScan(bookings=found, incomplete=incomplete)
 
     # -- turnover ----------------------------------------------------------
 
@@ -639,6 +819,12 @@ class LodgifyInbox:
         the agent loop treats as recoverable -- so a model that invents a ref is
         told so and can correct itself, and never reaches a reservation it was
         not shown.
+
+        Answered from `ResolutionCache` when a live read established the same
+        ref moments ago. That is an optimisation on top of an unchanged
+        algorithm: shape validation still happens first and on every call, an
+        unmatched ref is still refused and never cached, and a miss or an
+        expiry walks the archive exactly as it always did.
         """
         if not is_well_formed(conversation_ref):
             raise ValueError(
@@ -646,11 +832,20 @@ class LodgifyInbox:
                 f"conversation_ref returned by list_recent_guest_conversations."
             )
 
+        cached = self._resolutions.get(conversation_ref)
+
+        if cached is not None:
+            return cached
+
         found = self.find_booking(
             lambda booking: booking.conversation_ref == conversation_ref
         )
 
         if found is not None:
+            # Only a match is remembered. A ref that resolved to nothing is
+            # re-checked every time, so a refusal never depends on a cache.
+            self._resolutions.put(conversation_ref, found)
+
             return found
 
         raise ValueError(
@@ -690,6 +885,26 @@ class LodgifyInbox:
         endpoint and no last-message field on a booking, so recency cannot be
         known without reading the thread. Thread reads run concurrently to keep
         that affordable -- see `summarise_all`.
+
+        Loses the "did discovery see the whole archive" answer -- callers that
+        need it, and the Inbox does, use `scan_conversations`.
+        """
+        return self.scan_conversations(
+            property_slug=property_slug,
+            limit=limit,
+        ).conversations
+
+    def scan_conversations(
+        self,
+        property_slug: str | None = None,
+        limit: int | None = None,
+    ) -> ConversationScan:
+        """`list_conversations`, plus whether discovery completed.
+
+        The rows are identical either way. `incomplete` says only that a
+        booking page did not answer, so the archive may hold conversations this
+        page could not know about -- which is a thing to tell an operator
+        plainly rather than a reason to show them nothing.
         """
         count = validate_limit(limit)
 
@@ -699,9 +914,11 @@ class LodgifyInbox:
                 f"{', '.join(LODGIFY_SLUGS)}."
             )
 
+        scan = self.scan_bookings(stay_filters=INBOX_STAY_FILTERS)
+
         candidates = [
             booking
-            for booking in self.all_bookings(stay_filters=INBOX_STAY_FILTERS)
+            for booking in scan.bookings
             if property_slug is None or booking.property_slug == property_slug
         ]
 
@@ -717,7 +934,10 @@ class LodgifyInbox:
             reverse=True,
         )
 
-        return [summary.to_dict() for summary in summaries[:count]]
+        return ConversationScan(
+            conversations=[summary.to_dict() for summary in summaries[:count]],
+            incomplete=scan.incomplete,
+        )
 
     def summarise_refs(self, refs: set[str]) -> dict[str, dict[str, Any]]:
         """Summarise named conversations, wherever they sit in the archive.

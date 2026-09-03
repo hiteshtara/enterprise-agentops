@@ -508,6 +508,7 @@ export const editedDraft = draft({
 
 export const inboxPage: InboxPage = {
   count: 2,
+  incomplete: false,
   conversations: [
     {
       conversation_ref: CONVERSATION_REF,

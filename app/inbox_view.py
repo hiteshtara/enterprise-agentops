@@ -22,12 +22,14 @@ connector must not know the database exists. It lives outside `main.py`
 because that file is wiring and routes only.
 """
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.connectors.lodgify.config import LODGIFY_PROPERTIES
 from app.connectors.lodgify.errors import LodgifyUnavailable
 from app.connectors.lodgify.inbox import DEFAULT_LIMIT, LodgifyInbox
 from app.conversation_activity import ConversationActivityStore
+from app.timing import MonotonicNs, default_monotonic_ns
 
 # Display name is derived, never stored, so a rename in the property table
 # cannot leave stale text sitting in a persisted row. Unknown slugs map to
@@ -35,15 +37,136 @@ from app.conversation_activity import ConversationActivityStore
 # the Inbox.
 PROPERTY_NAME_BY_SLUG = {prop.slug: prop.display_name for prop in LODGIFY_PROPERTIES}
 
+# How long one discovery scan may stand in for the next.
+#
+# The console polls the Inbox every 30s and asks for a refresh every 120s, so
+# every fourth poll is followed within seconds by a refresh that used to repeat
+# the identical 155-request scan. 60 seconds covers that overlap with room for a
+# slow scan, and is short enough that a refresh cycle never works from a picture
+# older than half its own interval.
+#
+# Nothing correctness-bearing rides on it. A stale fingerprint can only cost one
+# redundant `process()` call, which re-reads the conversation and recomputes the
+# fingerprint authoritatively before spending anything.
+DISCOVERY_TTL_SECONDS = 60.0
+
+
+@dataclass(frozen=True)
+class Discovery:
+    """What one Inbox discovery scan found, reduced to the shareable minimum.
+
+    `(conversation_ref, fingerprint)` pairs and nothing else. Deliberately not
+    the rendered rows: those carry `last_message_excerpt`, which is guest text,
+    and guest text does not belong in a process-wide structure with a lifetime
+    nobody asked for. A ref is an opaque token and a fingerprint is a digest --
+    neither says anything about a guest.
+
+    `limit` is carried because a discovery is only an answer to the question it
+    was asked. Twenty rows cannot stand in for a request for fifty.
+    """
+
+    conversations: tuple[tuple[str, str], ...]
+    limit: int
+    incomplete: bool = False
+
+
+class DiscoveryCache:
+    """The most recent discovery, for as long as it is worth reusing.
+
+    Deliberately holds one entry. This exists so that one user action costs one
+    scan, not so that scans are avoided: `GET /inbox` never reads from it and
+    always discovers live, because the Inbox is the thing that has to be true.
+
+    The clock is monotonic and injectable, like every other duration in the
+    codebase, so expiry is tested by advancing a counter rather than sleeping.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = DISCOVERY_TTL_SECONDS,
+        monotonic_ns: MonotonicNs | None = None,
+    ) -> None:
+        self._ttl_ns = int(ttl_seconds * 1_000_000_000)
+        self._monotonic_ns = monotonic_ns or default_monotonic_ns
+        self._entry: tuple[int, Discovery] | None = None
+
+    def put(self, discovery: Discovery) -> None:
+        self._entry = (self._monotonic_ns(), discovery)
+
+    def recent(self, limit: int) -> Discovery | None:
+        """The last discovery, if it is fresh and wide enough to answer `limit`."""
+        if self._entry is None:
+            return None
+
+        stored_at, discovery = self._entry
+
+        if self._monotonic_ns() - stored_at >= self._ttl_ns:
+            self._entry = None
+
+            return None
+
+        if discovery.limit < limit:
+            # It was asked a narrower question than this caller is asking.
+            return None
+
+        return discovery
+
+    def clear(self) -> None:
+        self._entry = None
+
+
+@dataclass(frozen=True)
+class InboxResult:
+    """One page of the Inbox, plus what the scan behind it knows about itself.
+
+    `discovery` is what is safe to share with the refresh path, and it is None
+    for a property-filtered page -- see `build_inbox` for why. A caller that
+    finds one there may publish it without checking anything else.
+    """
+
+    conversations: list[dict[str, Any]] = field(default_factory=list)
+    incomplete: bool = False
+    discovery: Discovery | None = None
+
+
+def discovery_from(
+    rows: list[dict[str, Any]], limit: int, incomplete: bool
+) -> Discovery:
+    """Reduce live summaries to the pairs that are safe to keep."""
+    return Discovery(
+        conversations=tuple(
+            (row["conversation_ref"], row.get("fingerprint") or "") for row in rows
+        ),
+        limit=limit,
+        incomplete=incomplete,
+    )
+
+
+def discover_conversations(
+    inbox: LodgifyInbox,
+    limit: int = DEFAULT_LIMIT,
+) -> Discovery:
+    """One discovery scan, for a caller that has no shared one to work from.
+
+    The fallback behind `POST /inbox/refresh`: if no Inbox poll has run
+    recently there is nothing to reuse, and a refresh that discovered nothing
+    would do nothing. It scans once, and what it finds is publishable in turn.
+    """
+    scan = inbox.scan_conversations(limit=limit)
+
+    return discovery_from(scan.conversations, limit=limit, incomplete=scan.incomplete)
+
 
 def build_inbox(
     inbox: LodgifyInbox,
     activity_store: ConversationActivityStore,
     property_slug: str | None = None,
     limit: int = DEFAULT_LIMIT,
-) -> list[dict[str, Any]]:
+) -> InboxResult:
     """One page of the Inbox, newest conversation activity first."""
-    live = inbox.list_conversations(property_slug=property_slug, limit=limit)
+    scan = inbox.scan_conversations(property_slug=property_slug, limit=limit)
+
+    live = scan.conversations
 
     # The live read is authoritative, so it refreshes the index on the way past.
     for row in live:
@@ -79,7 +202,18 @@ def build_inbox(
 
     _enrich(inbox, activity_store, page)
 
-    return page
+    return InboxResult(
+        conversations=page,
+        incomplete=scan.incomplete,
+        # A filtered scan enumerated one property, so it is not an answer to
+        # the question a refresh asks -- which is about the whole account.
+        # Sharing it would quietly narrow what gets a prepared reply.
+        discovery=(
+            discovery_from(live, limit=limit, incomplete=scan.incomplete)
+            if property_slug is None
+            else None
+        ),
+    )
 
 
 def _remember(store: ConversationActivityStore, row: dict[str, Any]) -> None:
@@ -150,6 +284,11 @@ def _enrich(
     informative than what is already on it. A row with no known-good activity
     has nothing to lose, so its empty read is trusted as-is -- this is not a
     special case, it is what already happened before this guard existed.
+
+    A *partial* archive scan needs no new handling here: a ref whose booking
+    sat on a page that never answered is simply not in `found`, which already
+    means "not observed". The guards below hold whether the scan failed
+    entirely, failed half way through, or succeeded.
     """
     pending = {row["conversation_ref"] for row in page if row["preview_unavailable"]}
 
