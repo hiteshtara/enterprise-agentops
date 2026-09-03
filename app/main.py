@@ -1,4 +1,7 @@
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+import logging
+from typing import Any
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent import AgentService
@@ -31,6 +34,7 @@ from app.identity import PermissionDenied, User
 from app.knowledge import KnowledgeStatus, KnowledgeStore
 from app.knowledge_conflicts import find_conflicts
 from app.knowledge_topics import GUEST_FACING, INTERNAL_OPERATION
+from app.lodgify_webhooks import WebhookLog, handle_event, parse_webhook_body
 from app.migration_store import MigrationBatchStore
 from app.model_provider import OpenAIModelProvider
 from app.models import (
@@ -76,6 +80,14 @@ from app.run_store import RunStore
 from app.security import issue_token
 from app.tool_setup import build_tool_registry
 from app.user_store import UserStore, user_to_dict
+from app.webhook_security import (
+    SIGNATURE_HEADER,
+    WebhookNotConfigured,
+    resolve_webhook_secret,
+    signature_matches,
+)
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AgentGuard")
 
@@ -138,6 +150,11 @@ historical_replies = HistoricalReplyStore(database=database)
 # Owner-approved knowledge. Only APPROVED rows are ever read for drafting; a
 # PROPOSED candidate is a suggestion awaiting a human and never reaches a guest.
 knowledge_store = KnowledgeStore(database=database)
+
+# Verified webhook events, in memory only. Correctness never depends on this:
+# a webhook triggers a re-read of current state, which is idempotent, so a lost
+# or repeated event costs nothing.
+webhook_log = WebhookLog()
 
 tool_registry = build_tool_registry(
     migration_store=migration_store,
@@ -655,6 +672,78 @@ def edit_knowledge(
     )
 
     return KnowledgeItemSummary(**item.to_dict())
+
+
+@app.post("/webhooks/lodgify")
+async def receive_lodgify_webhook(request: Request) -> dict[str, Any]:
+    """Receive one Lodgify event.
+
+    Not model-facing and not bearer-authenticated: Lodgify calls this, and the
+    HMAC signature *is* the authentication. The raw body is read before anything
+    parses it, because the signature covers the exact bytes sent -- re-serialised
+    JSON would not match.
+
+    Returns 200 on anything verified, including events we do not act on:
+    Lodgify retries a non-200 up to ten times, and retrying is no help when the
+    problem is that we had nothing to do.
+    """
+    body = await request.body()
+
+    try:
+        secret = resolve_webhook_secret()
+
+    except WebhookNotConfigured as exc:
+        # Refusing beats accepting unverified events.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook verification is not configured.",
+        ) from exc
+
+    if not signature_matches(body, request.headers.get(SIGNATURE_HEADER), secret):
+        # No parsing, no provider follow-up, nothing recorded.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid signature.",
+        )
+
+    payload = parse_webhook_body(body, request.headers.get("content-type"))
+
+    receipt = handle_event(payload, lodgify_inbox)
+
+    if receipt.event_type == "unparsable":
+        # Schema only -- key names and types, never values. Enough to see what
+        # shape actually arrived without recording a word the guest wrote.
+        shape: object
+        if isinstance(payload, dict):
+            shape = sorted(payload)
+        elif isinstance(payload, list):
+            shape = [
+                sorted(item) if isinstance(item, dict) else type(item).__name__
+                for item in payload[:3]
+            ]
+        else:
+            shape = type(payload).__name__
+
+        logger.warning(
+            "lodgify webhook shape: content_type=%r bytes=%d parsed=%s keys=%s",
+            request.headers.get("content-type"),
+            len(body),
+            type(payload).__name__,
+            shape,
+        )
+
+    webhook_log.record(receipt)
+
+    # Only the safe projection is returned, and never the payload.
+    return {"received": True, **receipt.to_dict()}
+
+
+@app.get("/webhooks/lodgify/recent")
+def recent_lodgify_webhooks(
+    user: User = Depends(require_administer),
+) -> list[dict[str, Any]]:
+    """The recent verified events, for operating visibility. Ephemeral."""
+    return webhook_log.recent()
 
 
 @app.get(

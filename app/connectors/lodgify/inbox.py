@@ -56,6 +56,11 @@ DEFAULT_LIMIT = 20
 # larger than the default limit.
 BOOKING_SCAN_SIZE = 100
 
+# How far back a single-booking lookup will page. 20 pages of 100 covers an
+# archive far larger than this account's, and the search stops at the first
+# match, so a recent conversation still costs one request.
+MAX_LOOKUP_PAGES = 20
+
 MAX_SUBJECT_LENGTH = 200
 
 MAX_MESSAGE_LENGTH = 4000
@@ -393,6 +398,40 @@ class LodgifyInbox:
             if resolved is not None
         ]
 
+    def find_booking(
+        self,
+        matches,
+        max_pages: int = MAX_LOOKUP_PAGES,
+    ) -> ResolvedConversation | None:
+        """Search the whole archive for one booking, newest first.
+
+        Deliberately not limited to the first page. A conversation reference or
+        a webhook can name any booking the account has ever had -- an old or
+        declined one very much included -- and a lookup that only searched
+        recent bookings would silently fail on exactly those. Verified live: the
+        sandbox reservation used for webhook testing sits outside page one.
+
+        Stops at the first match, so a recent conversation still costs one page.
+        """
+        for page in range(1, max_pages + 1):
+            bookings = self.booking_page(page=page, size=BOOKING_SCAN_SIZE)
+
+            if not bookings:
+                return None
+
+            for booking in bookings:
+                if matches(booking):
+                    return booking
+
+            if len(bookings) < BOOKING_SCAN_SIZE:
+                return None
+
+        return None
+
+    def find_by_thread(self, thread_uid: str) -> ResolvedConversation | None:
+        """Locate the booking a thread belongs to, across the whole archive."""
+        return self.find_booking(lambda booking: booking.thread_uid == thread_uid)
+
     def thread_for_indexing(self, thread_uid: str) -> "ThreadForIndexing":
         """Messages plus the guest identity strings, for redaction only.
 
@@ -443,9 +482,12 @@ class LodgifyInbox:
                 f"conversation_ref returned by list_recent_guest_conversations."
             )
 
-        for booking in self.bookings():
-            if booking.conversation_ref == conversation_ref:
-                return booking
+        found = self.find_booking(
+            lambda booking: booking.conversation_ref == conversation_ref
+        )
+
+        if found is not None:
+            return found
 
         raise ValueError(
             f"Unknown conversation_ref: {conversation_ref!r}. It does not match "
