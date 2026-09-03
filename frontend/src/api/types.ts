@@ -8,6 +8,35 @@ export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED'
 
 export type ToolRisk = 'READ' | 'WRITE' | 'DANGEROUS'
 
+export type Role = 'VIEWER' | 'OPERATOR' | 'APPROVER' | 'ADMIN'
+
+export type Permission =
+  | 'VIEW_RUNS'
+  | 'VIEW_AUDIT'
+  | 'VIEW_TOOLS'
+  | 'VIEW_APPROVALS'
+  | 'RUN_AGENT'
+  | 'APPROVE_WRITE'
+  | 'APPROVE_DANGEROUS'
+  | 'RECONCILE_RUNS'
+  | 'ADMINISTER'
+
+export interface CurrentUser {
+  user_id: string
+  email: string
+  display_name: string
+  role: Role
+  active: boolean
+  created_at: string
+  permissions: Permission[]
+}
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  user: CurrentUser
+}
+
 export type StepType =
   | 'MODEL_RESPONSE'
   | 'TOOL_REQUESTED'
@@ -28,6 +57,7 @@ export type EventType =
   | 'AGENT_FAILED'
   | 'AGENT_MAX_ITERATIONS'
   | 'RUN_RECONCILED'
+  | 'AUTHORIZATION_DENIED'
 
 export type Json = unknown
 
@@ -40,6 +70,7 @@ export interface ToolTrace {
 export interface ApprovalRequest {
   approval_id: string
   run_id: string
+  requested_by_user_id?: string | null
   tool: string
   arguments: Record<string, Json>
   risk: ToolRisk
@@ -68,6 +99,8 @@ export interface ApprovalResponse {
 export interface ApprovalSummary {
   approval_id: string
   run_id: string
+  requested_by_user_id: string | null
+  resolved_by_user_id: string | null
   tool: string
   arguments: Record<string, Json>
   risk: ToolRisk
@@ -80,6 +113,7 @@ export interface ApprovalSummary {
 export interface AuditEvent {
   id: number
   run_id: string | null
+  actor_user_id: string | null
   event_type: EventType
   details: Record<string, Json>
   created_at: string
@@ -88,6 +122,7 @@ export interface AuditEvent {
 export interface RunSummary {
   run_id: string
   status: RunStatus
+  requested_by_user_id: string | null
   user_message: string
   final_answer: string | null
   created_at: string

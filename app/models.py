@@ -16,6 +16,7 @@ class ToolTrace(BaseModel):
 class ApprovalRequest(BaseModel):
     approval_id: str
     run_id: str
+    requested_by_user_id: str | None = None
     tool: str
     arguments: dict[str, Any]
     risk: str
@@ -51,6 +52,7 @@ class ApprovalResponse(BaseModel):
 class AuditEvent(BaseModel):
     id: int
     run_id: str | None = None
+    actor_user_id: str | None = None
     event_type: str
     details: dict[str, Any]
     created_at: str
@@ -69,6 +71,7 @@ class RunStep(BaseModel):
 class RunSummary(BaseModel):
     run_id: str
     status: str
+    requested_by_user_id: str | None = None
     user_message: str
     final_answer: str | None = None
     created_at: str
@@ -82,6 +85,8 @@ class RunDetail(RunSummary):
 class ApprovalSummary(BaseModel):
     approval_id: str
     run_id: str
+    requested_by_user_id: str | None = None
+    resolved_by_user_id: str | None = None
     tool: str
     arguments: dict[str, Any]
     risk: str
@@ -121,3 +126,26 @@ class Overview(BaseModel):
     events_by_type: dict[str, int]
     recent_runs: list[RunSummary] = []
     recent_events: list[AuditEvent] = []
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=1)
+
+
+class CurrentUser(BaseModel):
+    """The API-safe view of an identity. There is no password field here."""
+
+    user_id: str
+    email: str
+    display_name: str
+    role: str
+    active: bool
+    created_at: str
+    permissions: list[str] = []
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: CurrentUser

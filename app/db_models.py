@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime
 
-from sqlalchemy import String, Text
+from sqlalchemy import Boolean, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -20,6 +20,18 @@ class ApprovalRecord(Base):
     run_id: Mapped[str] = mapped_column(
         String(36),
         nullable=False,
+        index=True,
+    )
+
+    requested_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    resolved_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
         index=True,
     )
 
@@ -78,6 +90,12 @@ class AuditEventRecord(Base):
     )
 
     run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    actor_user_id: Mapped[str | None] = mapped_column(
         String(36),
         nullable=True,
         index=True,
@@ -148,6 +166,12 @@ class RunRecord(Base):
     status: Mapped[str] = mapped_column(
         String(30),
         nullable=False,
+        index=True,
+    )
+
+    requested_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
         index=True,
     )
 
@@ -227,6 +251,51 @@ class RunStepRecord(Base):
     error_json: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    created_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+    )
+
+
+class UserRecord(Base):
+    """A local identity. Only ever holds a bcrypt hash, never a password."""
+
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(320),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    display_name: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+
+    password_hash: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        index=True,
+    )
+
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
     )
 
     created_at: Mapped[str] = mapped_column(

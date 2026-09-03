@@ -1,12 +1,22 @@
 import { NavLink } from 'react-router-dom'
+import { useAuth } from '../auth/context'
+import type { Permission } from '../api/types'
 
-const NAV = [
-  { to: '/', label: 'Overview', end: true },
-  { to: '/agent', label: 'Agent', end: false },
-  { to: '/runs', label: 'Runs', end: false },
-  { to: '/approvals', label: 'Approvals', end: false },
-  { to: '/audit', label: 'Audit', end: false },
-  { to: '/tools', label: 'Tools', end: false },
+interface NavItem {
+  to: string
+  label: string
+  end: boolean
+  /** Hides the link when absent. UI hiding is convenience, not security. */
+  permission?: Permission
+}
+
+const NAV: NavItem[] = [
+  { to: '/', label: 'Overview', end: true, permission: 'VIEW_RUNS' },
+  { to: '/agent', label: 'Agent', end: false, permission: 'RUN_AGENT' },
+  { to: '/runs', label: 'Runs', end: false, permission: 'VIEW_RUNS' },
+  { to: '/approvals', label: 'Approvals', end: false, permission: 'VIEW_APPROVALS' },
+  { to: '/audit', label: 'Audit', end: false, permission: 'VIEW_AUDIT' },
+  { to: '/tools', label: 'Tools', end: false, permission: 'VIEW_TOOLS' },
 ]
 
 function Shield() {
@@ -36,6 +46,8 @@ export function Layout({
   children: React.ReactNode
   pendingApprovals?: number
 }) {
+  const { user, signOut, can } = useAuth()
+
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -51,20 +63,41 @@ export function Layout({
 
         <nav className="nav" aria-label="Primary">
           <div className="nav-label">Control plane</div>
-          {NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
-            >
-              {item.label}
-              {item.label === 'Approvals' && pendingApprovals ? (
-                <span className="nav-count">{pendingApprovals}</span>
-              ) : null}
-            </NavLink>
-          ))}
+          {NAV.filter((item) => !item.permission || can(item.permission)).map(
+            (item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+              >
+                {item.label}
+                {item.label === 'Approvals' && pendingApprovals ? (
+                  <span className="nav-count">{pendingApprovals}</span>
+                ) : null}
+              </NavLink>
+            ),
+          )}
         </nav>
+
+        {user ? (
+          <div className="identity">
+            <div className="identity-name">{user.display_name}</div>
+            <div className="identity-email faint">{user.email}</div>
+            <div
+              className="row"
+              style={{ justifyContent: 'space-between', marginTop: 8 }}
+            >
+              <span className="badge tone-info">
+                <span className="badge-dot" aria-hidden="true" />
+                {user.role}
+              </span>
+              <button type="button" onClick={signOut}>
+                Sign out
+              </button>
+            </div>
+          </div>
+        ) : null}
       </aside>
 
       <main className="main">{children}</main>

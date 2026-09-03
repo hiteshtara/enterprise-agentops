@@ -14,5 +14,6 @@ export const EVENT_TONE: Record<string, Tone> = {
   AGENT_FAILED: 'danger',
   AGENT_MAX_ITERATIONS: 'danger',
   RUN_RECONCILED: 'danger',
+  AUTHORIZATION_DENIED: 'danger',
   MODEL_RESPONSE: 'info',
 }

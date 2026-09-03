@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { listApprovals, resolveApproval } from '../api/agentguard'
-import type { ApprovalStatus } from '../api/types'
+import { useAuth } from '../auth/context'
+import type { ApprovalStatus, Permission, ToolRisk } from '../api/types'
 import { useAsync } from '../hooks/useAsync'
 import { ApprovalStatusBadge, RiskBadge } from '../components/Badges'
 import { ArgumentList } from '../components/Json'
@@ -23,7 +24,14 @@ function stamp(iso: string | null): string {
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString()
 }
 
+const RISK_PERMISSION: Record<ToolRisk, Permission> = {
+  READ: 'VIEW_APPROVALS',
+  WRITE: 'APPROVE_WRITE',
+  DANGEROUS: 'APPROVE_DANGEROUS',
+}
+
 export function ApprovalsPage() {
+  const { can } = useAuth()
   const [status, setStatus] = useState<ApprovalStatus | ''>('')
   const [acting, setActing] = useState<string | null>(null)
   const [actionError, setActionError] = useState<unknown>(null)
@@ -91,6 +99,8 @@ export function ApprovalsPage() {
                 <th>Risk</th>
                 <th>Arguments</th>
                 <th>Run</th>
+                <th>Requested by</th>
+                <th>Resolved by</th>
                 <th>Requested</th>
                 <th>Resolved</th>
                 <th />
@@ -118,10 +128,17 @@ export function ApprovalsPage() {
                       {approval.run_id}
                     </Link>
                   </td>
+                  <td className="mono faint truncate" style={{ maxWidth: 120 }}>
+                    {approval.requested_by_user_id ?? '—'}
+                  </td>
+                  <td className="mono faint truncate" style={{ maxWidth: 120 }}>
+                    {approval.resolved_by_user_id ?? '—'}
+                  </td>
                   <td className="muted">{stamp(approval.created_at)}</td>
                   <td className="muted">{stamp(approval.resolved_at)}</td>
                   <td>
-                    {approval.status === 'PENDING' ? (
+                    {approval.status === 'PENDING' &&
+                    can(RISK_PERMISSION[approval.risk] ?? 'APPROVE_DANGEROUS') ? (
                       <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
                         <button
                           type="button"
@@ -141,8 +158,8 @@ export function ApprovalsPage() {
                         </button>
                       </div>
                     ) : (
-                      // The status badge already states the decision; repeating
-                      // it here would be noise.
+                      // The status badge already states the decision, and a
+                      // role without permission is told nothing it can act on.
                       <span className="faint">—</span>
                     )}
                   </td>

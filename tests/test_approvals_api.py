@@ -1,10 +1,8 @@
 """Durable approval history: the store contract and the read-only endpoint."""
 
-import importlib
 from datetime import UTC, datetime
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.approval_store import (
     MAX_LIMIT,
@@ -58,6 +56,8 @@ def test_list_returns_the_documented_fields(approvals):
     assert set(item) == {
         "approval_id",
         "run_id",
+        "requested_by_user_id",
+        "resolved_by_user_id",
         "tool",
         "arguments",
         "risk",
@@ -159,27 +159,15 @@ def test_listing_does_not_touch_the_development_database(
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(
-        "AGENTOPS_DATABASE_URL",
-        f"sqlite:///{tmp_path / 'approvals_api.db'}",
-    )
-
-    import app.main
-
-    module = importlib.reload(app.main)
-
-    module.database.create_all()
-
-    store = module.approval_store
+def client(api):
+    store = api.module.approval_store
 
     make_approval(store, "run-pending")
 
     approved = make_approval(store, "run-approved")
     store.resolve(approved.approval_id, approved=True)
 
-    return TestClient(module.app)
+    return api.client("ADMIN")
 
 
 def test_endpoint_lists_approvals(client):

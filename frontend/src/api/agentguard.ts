@@ -4,6 +4,8 @@
 import { query, request } from './client'
 import type {
   AgentResponse,
+  CurrentUser,
+  LoginResponse,
   ApprovalResponse,
   ApprovalStatus,
   ApprovalSummary,
@@ -15,6 +17,17 @@ import type {
   RunSummary,
   ToolSummary,
 } from './types'
+
+export function login(email: string, password: string): Promise<LoginResponse> {
+  return request<LoginResponse>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
+}
+
+export function getCurrentUser(): Promise<CurrentUser> {
+  return request<CurrentUser>('/auth/me')
+}
 
 export function getOverview(): Promise<Overview> {
   return request<Overview>('/overview')

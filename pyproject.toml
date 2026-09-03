@@ -8,9 +8,11 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "bcrypt>=5.0.0",
     "fastapi>=0.141.1",
     "openai>=3.6.0",
     "pydantic>=2.13.5",
+    "pyjwt>=2.13.0",
     "sqlalchemy>=2.0.52",
     "uvicorn>=0.52.4",
 ]
@@ -19,6 +21,16 @@ dependencies = [
 # the dependencies without building the project itself.
 [tool.uv]
 package = false
+
+# FastAPI's dependency-injection idiom puts Depends()/Query() calls in argument
+# defaults, which bugbear's B008 flags by default. These calls are safe there.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Depends",
+    "fastapi.Path",
+    "fastapi.Query",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

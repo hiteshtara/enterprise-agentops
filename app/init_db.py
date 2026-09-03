@@ -1,5 +1,6 @@
 from app.database import Database, get_database
 from app.seed_data import seed_migration_batches
+from app.seed_users import seed_demo_users
 
 
 def init_database(
@@ -20,10 +21,10 @@ def init_database(
     if not seed:
         return 0
 
-    return seed_migration_batches(target)
+    return seed_migration_batches(target) + seed_demo_users(target)
 
 
 if __name__ == "__main__":
     inserted = init_database(seed=True)
 
-    print(f"Schema ready. Seeded {inserted} migration batch record(s).")
+    print(f"Schema ready. Seeded {inserted} development record(s).")

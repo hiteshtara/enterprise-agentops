@@ -1,10 +1,21 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent import AgentService
 from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
+from app.auth import (
+    current_user,
+    require_reconcile_runs,
+    require_run_agent,
+    require_view_approvals,
+    require_view_audit,
+    require_view_runs,
+    require_view_tools,
+)
+from app.authorization import ensure_can_resolve_approval
 from app.database import Database
+from app.identity import PermissionDenied, User
 from app.migration_store import MigrationBatchStore
 from app.model_provider import OpenAIModelProvider
 from app.models import (
@@ -14,6 +25,9 @@ from app.models import (
     ApprovalResponse,
     ApprovalSummary,
     AuditEvent,
+    CurrentUser,
+    LoginRequest,
+    LoginResponse,
     Overview,
     ReconcileResponse,
     RunDetail,
@@ -28,7 +42,9 @@ from app.reconciliation import (
     ReconciliationService,
 )
 from app.run_store import RunStore
+from app.security import issue_token
 from app.tool_setup import build_tool_registry
+from app.user_store import UserStore, user_to_dict
 
 app = FastAPI(title="AgentGuard")
 
@@ -56,8 +72,13 @@ approval_store = ApprovalStore(database=database)
 audit_store = AuditStore(database=database)
 run_store = RunStore(database=database)
 migration_store = MigrationBatchStore(database=database)
+user_store = UserStore(database=database)
 
 tool_registry = build_tool_registry(migration_store=migration_store)
+
+# Auth dependencies resolve the store from app state so tests can swap the
+# database without patching module globals.
+app.state.user_store = user_store
 
 reconciliation = ReconciliationService(
     run_store=run_store,
@@ -79,6 +100,35 @@ agent = AgentService(
 )
 
 
+@app.post(
+    "/auth/login",
+    response_model=LoginResponse,
+)
+def login(request: LoginRequest) -> LoginResponse:
+    user = user_store.authenticate(request.email, request.password)
+
+    if user is None:
+        # One message for unknown email, wrong password and deactivated
+        # account, so the response cannot be used to enumerate identities.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password.",
+        )
+
+    return LoginResponse(
+        access_token=issue_token(user.user_id),
+        user=CurrentUser(**user_to_dict(user)),
+    )
+
+
+@app.get(
+    "/auth/me",
+    response_model=CurrentUser,
+)
+def read_current_user(user: User = Depends(current_user)) -> CurrentUser:
+    return CurrentUser(**user_to_dict(user))
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -90,8 +140,10 @@ def health() -> dict[str, str]:
 )
 def run_agent(
     request: AgentRequest,
+    user: User = Depends(require_run_agent),
 ) -> AgentResponse:
-    result = agent.run(request.message)
+    # Identity comes from the token, never from the request body.
+    result = agent.run(request.message, actor_user_id=user.user_id)
 
     return AgentResponse(**result)
 
@@ -103,11 +155,45 @@ def run_agent(
 def resolve_approval(
     approval_id: str,
     decision: ApprovalDecision,
+    user: User = Depends(current_user),
 ) -> ApprovalResponse:
+    pending = approval_store.get(approval_id)
+
+    if pending is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown approval ID: {approval_id}",
+        )
+
+    try:
+        # Authorization is decided from the approval's own risk tier before
+        # anything is resolved or executed.
+        ensure_can_resolve_approval(user, pending.risk)
+
+    except PermissionDenied as exc:
+        audit_store.record(
+            "AUTHORIZATION_DENIED",
+            {
+                "approval_id": approval_id,
+                "tool": pending.tool,
+                "risk": pending.risk,
+                "required_permission": exc.permission.value,
+                "role": user.role.value,
+            },
+            run_id=pending.run_id,
+            actor_user_id=user.user_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
     try:
         result = agent.resolve_approval(
             approval_id=approval_id,
             approved=decision.approved,
+            actor_user_id=user.user_id,
         )
 
     except ValueError as exc:
@@ -123,7 +209,9 @@ def resolve_approval(
     "/overview",
     response_model=Overview,
 )
-def get_overview() -> Overview:
+def get_overview(
+    user: User = Depends(require_view_runs),
+) -> Overview:
     return Overview(**overview_service.build())
 
 
@@ -131,7 +219,9 @@ def get_overview() -> Overview:
     "/tools",
     response_model=list[ToolSummary],
 )
-def list_tools() -> list[ToolSummary]:
+def list_tools(
+    user: User = Depends(require_view_tools),
+) -> list[ToolSummary]:
     """Registered tools and their governance metadata. No callables."""
     return [ToolSummary(**tool) for tool in tool_registry.describe()]
 
@@ -141,6 +231,7 @@ def list_tools() -> list[ToolSummary]:
     response_model=list[ApprovalSummary],
 )
 def list_approvals(
+    user: User = Depends(require_view_approvals),
     status: str | None = Query(default=None),
     run_id: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
@@ -163,6 +254,7 @@ def list_approvals(
     response_model=ReconcileResponse,
 )
 def reconcile_runs(
+    user: User = Depends(require_reconcile_runs),
     stale_after_seconds: int = Query(
         default=DEFAULT_STALE_AFTER_SECONDS,
         ge=MIN_STALE_AFTER_SECONDS,
@@ -186,9 +278,17 @@ def reconcile_runs(
     response_model=list[RunSummary],
 )
 def list_runs(
+    user: User = Depends(require_view_runs),
+    status: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[RunSummary]:
-    return [RunSummary(**run) for run in run_store.list_runs(limit=limit)]
+    try:
+        runs = run_store.list_runs(status=status, limit=limit)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return [RunSummary(**run) for run in runs]
 
 
 @app.get(
@@ -197,6 +297,7 @@ def list_runs(
 )
 def get_run(
     run_id: str,
+    user: User = Depends(require_view_runs),
 ) -> RunDetail:
     record = run_store.get_run(run_id)
 
@@ -222,6 +323,7 @@ def get_run(
     response_model=list[AuditEvent],
 )
 def get_audit_events(
+    user: User = Depends(require_view_audit),
     run_id: str | None = Query(default=None),
     event_type: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),

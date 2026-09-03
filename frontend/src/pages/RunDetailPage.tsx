@@ -40,6 +40,11 @@ export function RunDetailPage() {
               <div className="prompt-echo">{data.user_message}</div>
             </div>
 
+            <div style={{ marginTop: 14 }}>
+              <div className="approval-term">Requested by</div>
+              <div className="mono faint">{data.requested_by_user_id ?? '—'}</div>
+            </div>
+
             {data.final_answer ? (
               <div style={{ marginTop: 14 }}>
                 <div className="approval-term">Final answer</div>

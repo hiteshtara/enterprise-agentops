@@ -82,3 +82,67 @@ def agent_factory(database: Database, registry: ToolRegistry):
         )
 
     return build
+
+
+@pytest.fixture
+def api(monkeypatch, tmp_path):
+    """A reloaded app bound to an isolated database, plus logged-in clients.
+
+    Returns an object exposing:
+      api.module            the reloaded app.main
+      api.client(role)      a TestClient carrying that demo role's bearer token
+      api.anonymous()       a TestClient with no credentials
+    """
+    import importlib
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from app.seed_users import DEMO_USERS, seed_demo_users
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "AGENTOPS_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'api.db'}",
+    )
+    # At least 32 bytes, or PyJWT warns about HMAC key length.
+    monkeypatch.setenv(
+        "AGENTGUARD_AUTH_SECRET",
+        "test-only-signing-secret-not-for-any-real-deployment",
+    )
+    # Keep bcrypt cheap in tests; production uses the default cost factor.
+    monkeypatch.setenv("AGENTGUARD_BCRYPT_ROUNDS", "4")
+
+    import app.main
+
+    module = importlib.reload(app.main)
+
+    module.database.create_all()
+    seed_demo_users(module.database)
+
+    credentials = {
+        role.value: (email, password) for email, _, password, role in DEMO_USERS
+    }
+
+    def client(role: str = "ADMIN") -> TestClient:
+        email, password = credentials[role]
+
+        http = TestClient(module.app)
+
+        response = http.post(
+            "/auth/login",
+            json={"email": email, "password": password},
+        )
+
+        assert response.status_code == 200, response.text
+
+        http.headers["Authorization"] = f"Bearer {response.json()['access_token']}"
+
+        return http
+
+    return SimpleNamespace(
+        module=module,
+        client=client,
+        anonymous=lambda: TestClient(module.app),
+        credentials=credentials,
+    )

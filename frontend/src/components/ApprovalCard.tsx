@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { Json, ToolRisk } from '../api/types'
+import { useAuth } from '../auth/context'
+import type { Json, Permission, ToolRisk } from '../api/types'
 import { ArgumentList } from './Json'
 import { RiskBadge } from './Badges'
 
@@ -13,6 +14,12 @@ export interface ApprovalCardProps {
   busy?: boolean
 }
 
+const RISK_PERMISSION: Record<ToolRisk, Permission> = {
+  READ: 'VIEW_APPROVALS',
+  WRITE: 'APPROVE_WRITE',
+  DANGEROUS: 'APPROVE_DANGEROUS',
+}
+
 export function ApprovalCard({
   tool,
   risk,
@@ -23,6 +30,11 @@ export function ApprovalCard({
   busy = false,
 }: ApprovalCardProps) {
   const [pending, setPending] = useState<'approve' | 'reject' | null>(null)
+  const { can } = useAuth()
+
+  // Mirrors the backend's risk-to-permission policy so the console does not
+  // offer an action that would be refused. The backend still decides.
+  const permitted = can(RISK_PERMISSION[risk] ?? 'APPROVE_DANGEROUS')
 
   const disabled = busy || pending !== null
 
@@ -85,22 +97,31 @@ export function ApprovalCard({
       ) : null}
 
       <div className="approval-actions">
-        <button
-          type="button"
-          className="approve"
-          disabled={disabled}
-          onClick={() => decide(true)}
-        >
-          {pending === 'approve' ? 'Approving…' : 'Approve'}
-        </button>
-        <button
-          type="button"
-          className="reject"
-          disabled={disabled}
-          onClick={() => decide(false)}
-        >
-          {pending === 'reject' ? 'Rejecting…' : 'Reject'}
-        </button>
+        {permitted ? (
+          <>
+            <button
+              type="button"
+              className="approve"
+              disabled={disabled}
+              onClick={() => decide(true)}
+            >
+              {pending === 'approve' ? 'Approving…' : 'Approve'}
+            </button>
+            <button
+              type="button"
+              className="reject"
+              disabled={disabled}
+              onClick={() => decide(false)}
+            >
+              {pending === 'reject' ? 'Rejecting…' : 'Reject'}
+            </button>
+          </>
+        ) : (
+          <p className="not-permitted">
+            Your role cannot decide a {risk} approval. It requires the{' '}
+            <span className="mono">{RISK_PERMISSION[risk]}</span> permission.
+          </p>
+        )}
       </div>
     </section>
   )

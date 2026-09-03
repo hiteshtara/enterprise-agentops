@@ -111,8 +111,18 @@ class AgentService:
     def run(
         self,
         message: str,
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
-        run_id = self.run_store.create_run(message)
+        """Start a run.
+
+        `actor_user_id` is an opaque identifier supplied by the application
+        layer. AgentService never parses a token or a header, and never makes
+        an authorization decision -- that happens before it is called.
+        """
+        run_id = self.run_store.create_run(
+            message,
+            requested_by_user_id=actor_user_id,
+        )
 
         conversation = [ModelMessage.user(message)]
 
@@ -121,12 +131,13 @@ class AgentService:
             serialise_conversation(conversation),
         )
 
-        return self.drive(run_id, conversation, [])
+        return self.drive(run_id, conversation, [], actor_user_id=actor_user_id)
 
     def resolve_approval(
         self,
         approval_id: str,
         approved: bool,
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         """Record the decision and, when approved, resume the original run."""
         pending = self.approval_store.get(approval_id)
@@ -143,9 +154,9 @@ class AgentService:
         arguments = pending.arguments
 
         if not approved:
-            return self.reject(approval_id, pending, run_id, arguments)
+            return self.reject(approval_id, pending, run_id, arguments, actor_user_id)
 
-        return self.approve(approval_id, pending, run_id, arguments)
+        return self.approve(approval_id, pending, run_id, arguments, actor_user_id)
 
     def reject(
         self,
@@ -153,8 +164,13 @@ class AgentService:
         pending: Any,
         run_id: str,
         arguments: dict[str, Any],
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
-        self.approval_store.resolve(approval_id, approved=False)
+        self.approval_store.resolve(
+            approval_id,
+            approved=False,
+            resolved_by_user_id=actor_user_id,
+        )
 
         self.audit_store.record(
             "APPROVAL_DENIED",
@@ -164,6 +180,7 @@ class AgentService:
                 "arguments": arguments,
             },
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         self.run_store.add_step(
@@ -193,6 +210,7 @@ class AgentService:
         pending: Any,
         run_id: str,
         arguments: dict[str, Any],
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         run = self.run_store.get_run(run_id)
 
@@ -201,7 +219,11 @@ class AgentService:
 
         conversation = [ModelMessage.from_dict(entry) for entry in run.conversation]
 
-        self.approval_store.resolve(approval_id, approved=True)
+        self.approval_store.resolve(
+            approval_id,
+            approved=True,
+            resolved_by_user_id=actor_user_id,
+        )
         self.run_store.resume(run_id)
 
         self.audit_store.record(
@@ -212,6 +234,7 @@ class AgentService:
                 "arguments": arguments,
             },
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         self.run_store.add_step(
@@ -243,7 +266,7 @@ class AgentService:
                 )
             )
 
-            outcome = self.drive(run_id, conversation, [])
+            outcome = self.drive(run_id, conversation, [], actor_user_id=actor_user_id)
 
             return self.approval_outcome(approval_id, pending.tool, None, outcome)
 
@@ -252,10 +275,10 @@ class AgentService:
                 approval_id,
                 pending.tool,
                 None,
-                self.abort(run_id, call, exc, []),
+                self.abort(run_id, call, exc, [], actor_user_id),
             )
 
-        self.record_execution(run_id, call, result)
+        self.record_execution(run_id, call, result, actor_user_id)
 
         conversation.append(
             ModelMessage.tool_result(
@@ -273,7 +296,7 @@ class AgentService:
             }
         ]
 
-        outcome = self.drive(run_id, conversation, trace)
+        outcome = self.drive(run_id, conversation, trace, actor_user_id=actor_user_id)
 
         return self.approval_outcome(approval_id, pending.tool, result, outcome)
 
@@ -303,6 +326,7 @@ class AgentService:
         run_id: str,
         conversation: list[ModelMessage],
         trace: list[dict[str, Any]],
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         for _ in range(self.max_iterations):
             response = self.model.generate_with_tools(
@@ -342,6 +366,7 @@ class AgentService:
                             call,
                             INVALID_ARGUMENTS_ERROR,
                             call.argument_error,
+                            actor_user_id,
                         ),
                     )
                 )
@@ -357,6 +382,7 @@ class AgentService:
                     "arguments": call.arguments,
                 },
                 run_id=run_id,
+                actor_user_id=actor_user_id,
             )
 
             self.run_store.add_step(
@@ -370,7 +396,9 @@ class AgentService:
                 result = self.tool_registry.execute(call.name, call.arguments)
 
             except ApprovalRequired as approval:
-                return self.park(run_id, conversation, call, approval, trace)
+                return self.park(
+                    run_id, conversation, call, approval, trace, actor_user_id
+                )
 
             except RECOVERABLE_TOOL_ERRORS as exc:
                 conversation.append(
@@ -382,6 +410,7 @@ class AgentService:
                             call,
                             type(exc).__name__,
                             str(exc),
+                            actor_user_id,
                         ),
                     )
                 )
@@ -391,9 +420,9 @@ class AgentService:
                 continue
 
             except Exception as exc:  # noqa: BLE001 -- deliberate safety net
-                return self.abort(run_id, call, exc, trace)
+                return self.abort(run_id, call, exc, trace, actor_user_id)
 
-            self.record_execution(run_id, call, result)
+            self.record_execution(run_id, call, result, actor_user_id)
 
             trace.append(
                 {
@@ -422,6 +451,7 @@ class AgentService:
                 "tool_calls": len(trace),
             },
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         self.run_store.fail(run_id, answer)
@@ -437,6 +467,7 @@ class AgentService:
         call: ToolCall,
         approval: ApprovalRequired,
         trace: list[dict[str, Any]],
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         """Stop the run and wait for a human, keeping resumable state."""
         self.run_store.await_approval(
@@ -450,6 +481,7 @@ class AgentService:
             risk=approval.risk.value,
             run_id=run_id,
             tool_call_id=call.id,
+            requested_by_user_id=actor_user_id,
         )
 
         details = {
@@ -459,7 +491,12 @@ class AgentService:
             "risk": pending.risk,
         }
 
-        self.audit_store.record("APPROVAL_REQUIRED", details, run_id=run_id)
+        self.audit_store.record(
+            "APPROVAL_REQUIRED",
+            details,
+            run_id=run_id,
+            actor_user_id=actor_user_id,
+        )
 
         self.run_store.add_step(
             run_id,
@@ -488,6 +525,7 @@ class AgentService:
         call: ToolCall,
         exc: Exception,
         trace: list[dict[str, Any]],
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         """An unexpected tool exception. Audited in full, reported generically."""
         self.audit_store.record(
@@ -499,6 +537,7 @@ class AgentService:
                 "error": str(exc),
             },
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         self.run_store.fail(run_id, AGENT_FAILED_ANSWER)
@@ -527,6 +566,7 @@ class AgentService:
         run_id: str,
         call: ToolCall,
         result: Any,
+        actor_user_id: str | None = None,
     ) -> None:
         self.audit_store.record(
             "TOOL_EXECUTED",
@@ -536,6 +576,7 @@ class AgentService:
                 "result": result,
             },
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         self.run_store.add_step(
@@ -552,6 +593,7 @@ class AgentService:
         call: ToolCall,
         error_type: str,
         message: str,
+        actor_user_id: str | None = None,
     ) -> str:
         """Audit a recoverable tool failure and build the model's feedback."""
         error = {
@@ -567,6 +609,7 @@ class AgentService:
                 **error,
             },
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         self.run_store.add_step(

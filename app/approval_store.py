@@ -67,6 +67,8 @@ def approval_to_dict(record: ApprovalRecord) -> dict[str, Any]:
     return {
         "approval_id": record.approval_id,
         "run_id": record.run_id,
+        "requested_by_user_id": record.requested_by_user_id,
+        "resolved_by_user_id": record.resolved_by_user_id,
         "tool": record.tool,
         "arguments": record.arguments,
         "risk": record.risk,
@@ -91,10 +93,13 @@ class ApprovalStore:
         risk: str,
         run_id: str,
         tool_call_id: str,
+        requested_by_user_id: str | None = None,
     ) -> ApprovalRecord:
         approval = ApprovalRecord(
             approval_id=str(uuid4()),
             run_id=run_id,
+            requested_by_user_id=requested_by_user_id,
+            resolved_by_user_id=None,
             tool_call_id=tool_call_id,
             tool=tool,
             arguments_json=json.dumps(arguments),
@@ -127,6 +132,7 @@ class ApprovalStore:
         self,
         approval_id: str,
         approved: bool,
+        resolved_by_user_id: str | None = None,
     ) -> ApprovalRecord:
         """Record the decision. The row is kept, not deleted."""
         status = ApprovalStatus.APPROVED if approved else ApprovalStatus.REJECTED
@@ -139,6 +145,7 @@ class ApprovalStore:
 
             approval.status = status.value
             approval.decision = status.value
+            approval.resolved_by_user_id = resolved_by_user_id
             approval.resolved_at = datetime.now(UTC).isoformat()
 
             session.commit()

@@ -1,10 +1,8 @@
 """Manual reconciliation of runs abandoned by a crashed process."""
 
-import importlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.audit_store import AuditStore
 from app.reconciliation import (
@@ -204,23 +202,6 @@ def test_reconciliation_does_not_touch_the_development_database(
 # -- endpoint --------------------------------------------------------------
 
 
-@pytest.fixture
-def client(monkeypatch, tmp_path):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(
-        "AGENTOPS_DATABASE_URL",
-        f"sqlite:///{tmp_path / 'reconcile_api.db'}",
-    )
-
-    import app.main
-
-    module = importlib.reload(app.main)
-
-    module.database.create_all()
-
-    return TestClient(module.app), module
-
-
 def backdate(module, run_id: str, seconds: int = 3600) -> None:
     """Age a run's updated_at so the endpoint's real clock sees it as stale."""
     from app.db_models import RunRecord
@@ -231,6 +212,11 @@ def backdate(module, run_id: str, seconds: int = 3600) -> None:
         record = session.get(RunRecord, run_id)
         record.updated_at = stale_moment
         session.commit()
+
+
+@pytest.fixture
+def client(api):
+    return api.client("ADMIN"), api.module
 
 
 def test_endpoint_reconciles_stale_runs(client):

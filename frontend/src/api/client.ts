@@ -1,9 +1,20 @@
+import { clearToken, getToken } from './session'
+
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
 const UNREACHABLE =
   'Cannot reach the AgentGuard API. Check that the backend is running.'
 
 const SERVER_ERROR = 'The AgentGuard API reported an internal error.'
+
+/** Listeners notified when the backend rejects our credential. */
+const unauthorizedHandlers = new Set<() => void>()
+
+export function onUnauthorized(handler: () => void): () => void {
+  unauthorizedHandlers.add(handler)
+
+  return () => unauthorizedHandlers.delete(handler)
+}
 
 /** An error safe to show a user: never carries a stack trace or server internals. */
 export class ApiError extends Error {
@@ -29,10 +40,16 @@ async function readDetail(response: Response): Promise<string | null> {
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
 
+  const token = getToken()
+
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: { 'Content-Type': 'application/json' },
       ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init?.headers,
+      },
     })
   } catch {
     // Network-level failure: the backend is down, or CORS rejected the call.
@@ -40,6 +57,13 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      // The credential is gone or expired: drop it and let the app show login.
+      clearToken()
+
+      for (const handler of unauthorizedHandlers) handler()
+    }
+
     // 5xx bodies may carry internals, so only 4xx detail is surfaced.
     if (response.status >= 500) {
       throw new ApiError(SERVER_ERROR, response.status)

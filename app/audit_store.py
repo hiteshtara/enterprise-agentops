@@ -19,11 +19,13 @@ class AuditStore:
         event_type: str,
         details: dict[str, Any],
         run_id: str | None = None,
+        actor_user_id: str | None = None,
     ) -> None:
         event = AuditEventRecord(
             event_type=event_type,
             details_json=json.dumps(details),
             run_id=run_id,
+            actor_user_id=actor_user_id,
         )
 
         with self._database.session() as session:
@@ -57,6 +59,7 @@ class AuditStore:
                 {
                     "id": event.id,
                     "run_id": event.run_id,
+                    "actor_user_id": event.actor_user_id,
                     "event_type": event.event_type,
                     "details": json.loads(event.details_json),
                     "created_at": event.created_at,

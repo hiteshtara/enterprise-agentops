@@ -1,9 +1,6 @@
 """Read-only endpoints the console depends on: /overview, /tools, audit filters."""
 
-import importlib
-
 import pytest
-from fastapi.testclient import TestClient
 
 from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
@@ -153,20 +150,8 @@ def test_recent_runs_are_capped(agent_factory, overview):
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(
-        "AGENTOPS_DATABASE_URL",
-        f"sqlite:///{tmp_path / 'console_api.db'}",
-    )
-
-    import app.main
-
-    module = importlib.reload(app.main)
-
-    module.database.create_all()
-
-    return TestClient(module.app), module
+def client(api):
+    return api.client("ADMIN"), api.module
 
 
 def test_tools_endpoint(client):
@@ -241,3 +226,51 @@ def test_cors_allows_the_local_console_only(client):
     blocked = http.get("/health", headers={"Origin": "https://evil.example.com"})
 
     assert "access-control-allow-origin" not in blocked.headers
+
+
+# -- run status filter -----------------------------------------------------
+
+
+def test_list_runs_filters_by_status(agent_factory, seeded_database):
+    agent_factory(
+        ScriptedModelProvider(
+            [tool_response(QUERY_TOOL, {"limit": 1}), final_response("Done.")]
+        )
+    ).run("Completed run.")
+
+    agent_factory(
+        ScriptedModelProvider([tool_response(RESTART_TOOL, {"batch_id": 43})])
+    ).run("Waiting run.")
+
+    store = RunStore(database=seeded_database)
+
+    assert len(store.list_runs()) == 2
+    assert len(store.list_runs(status="COMPLETED")) == 1
+    assert len(store.list_runs(status="WAITING_FOR_APPROVAL")) == 1
+    assert store.list_runs(status="CANCELLED") == []
+
+
+def test_list_runs_rejects_an_invalid_status(run_store):
+    with pytest.raises(ValueError, match="Unsupported run status"):
+        run_store.list_runs(status="ARCHIVED")
+
+
+def test_runs_endpoint_filters_by_status(client):
+    http, module = client
+
+    module.run_store.create_run("First.")
+    second = module.run_store.create_run("Second.")
+    module.run_store.complete(second, "Done.")
+
+    assert len(http.get("/runs").json()) == 2
+    assert len(http.get("/runs", params={"status": "COMPLETED"}).json()) == 1
+    assert len(http.get("/runs", params={"status": "RUNNING"}).json()) == 1
+
+
+def test_runs_endpoint_rejects_an_invalid_status(client):
+    http, _ = client
+
+    response = http.get("/runs", params={"status": "ARCHIVED"})
+
+    assert response.status_code == 400
+    assert "Unsupported run status" in response.json()["detail"]

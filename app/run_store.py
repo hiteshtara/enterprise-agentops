@@ -20,6 +20,29 @@ class RunStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+ALLOWED_STATUSES: tuple[str, ...] = tuple(status.value for status in RunStatus)
+
+DEFAULT_LIMIT = 20
+
+MIN_LIMIT = 1
+
+MAX_LIMIT = 100
+
+
+def validate_status(status: str | None) -> str | None:
+    """Return the status unchanged, or raise if it is not an allowed value."""
+    if status is None:
+        return None
+
+    if status not in ALLOWED_STATUSES:
+        raise ValueError(
+            f"Unsupported run status: {status!r}. "
+            f"Allowed values: {', '.join(ALLOWED_STATUSES)}."
+        )
+
+    return status
+
+
 TERMINAL_STATUSES = frozenset(
     {
         RunStatus.COMPLETED,
@@ -56,6 +79,7 @@ def run_to_dict(record: RunRecord) -> dict[str, Any]:
     return {
         "run_id": record.run_id,
         "status": record.status,
+        "requested_by_user_id": record.requested_by_user_id,
         "user_message": record.user_message,
         "final_answer": record.final_answer,
         "created_at": record.created_at,
@@ -85,6 +109,7 @@ class RunStore:
     def create_run(
         self,
         user_message: str,
+        requested_by_user_id: str | None = None,
     ) -> str:
         """Start a run in RUNNING and return its id."""
         timestamp = now()
@@ -92,6 +117,7 @@ class RunStore:
         record = RunRecord(
             run_id=str(uuid4()),
             status=RunStatus.RUNNING.value,
+            requested_by_user_id=requested_by_user_id,
             user_message=user_message,
             final_answer=None,
             conversation_json="[]",
@@ -114,13 +140,24 @@ class RunStore:
 
     def list_runs(
         self,
-        limit: int = 20,
+        status: str | None = None,
+        limit: int = DEFAULT_LIMIT,
     ) -> list[dict[str, Any]]:
-        with self._database.session() as session:
-            statement = (
-                select(RunRecord).order_by(RunRecord.created_at.desc()).limit(limit)
-            )
+        """Newest first, optionally scoped to one status.
 
+        Raises:
+            ValueError: If status is not an allowed value.
+        """
+        validated_status = validate_status(status)
+
+        statement = select(RunRecord)
+
+        if validated_status is not None:
+            statement = statement.where(RunRecord.status == validated_status)
+
+        statement = statement.order_by(RunRecord.created_at.desc()).limit(limit)
+
+        with self._database.session() as session:
             return [run_to_dict(record) for record in session.scalars(statement)]
 
     def status_counts(self) -> dict[str, int]:

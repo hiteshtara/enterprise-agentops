@@ -1,4 +1,3 @@
-import importlib
 import os
 import subprocess
 import sys
@@ -93,23 +92,12 @@ def test_health_route_without_openai_api_key(monkeypatch):
     assert response.json() == {"status": "ok"}
 
 
-def test_audit_route_reads_the_configured_database(monkeypatch, tmp_path):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(
-        "AGENTOPS_DATABASE_URL",
-        f"sqlite:///{tmp_path / 'route.db'}",
-    )
+def test_audit_route_reads_the_configured_database(api):
+    module = api.module
 
-    import app.main
-
-    module = importlib.reload(app.main)
-
-    module.database.create_all()
     module.audit_store.record("TOOL_REQUESTED", {"tool": "query_migration_batches"})
 
-    client = TestClient(module.app)
-
-    response = client.get("/audit/events")
+    response = api.client("ADMIN").get("/audit/events")
 
     assert response.status_code == 200
 
@@ -120,19 +108,9 @@ def test_audit_route_reads_the_configured_database(monkeypatch, tmp_path):
     assert events[0]["details"]["tool"] == "query_migration_batches"
 
 
-def test_agent_run_route_uses_the_registry(monkeypatch, tmp_path):
+def test_agent_run_route_uses_the_registry(api):
     """POST /agent/run reaches the database tool without any OpenAI call."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(
-        "AGENTOPS_DATABASE_URL",
-        f"sqlite:///{tmp_path / 'run.db'}",
-    )
-
-    import app.main
-
-    module = importlib.reload(app.main)
-
-    module.database.create_all()
+    module = api.module
 
     from app.seed_data import seed_migration_batches
     from tests.fakes import ScriptedModelProvider, final_response, tool_response
@@ -149,9 +127,10 @@ def test_agent_run_route_uses_the_registry(monkeypatch, tmp_path):
         ]
     )
 
-    client = TestClient(module.app)
-
-    response = client.post("/agent/run", json={"message": "Show failed batches."})
+    response = api.client("OPERATOR").post(
+        "/agent/run",
+        json={"message": "Show failed batches."},
+    )
 
     assert response.status_code == 200
 

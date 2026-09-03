@@ -450,6 +450,96 @@ import. `init_database()` creates tables; seeding is opt-in via `seed=True`, and
 `seed_migration_batches()` inserts only batch IDs that are missing, so re-running it
 never duplicates or overwrites rows.
 
+## Authentication and RBAC
+
+Every request carries an identity, and every governed action checks a permission.
+
+### Roles and permissions
+
+`app/identity.py` holds the single mapping from role to permission. No code
+anywhere compares a role name.
+
+| Permission | VIEWER | OPERATOR | APPROVER | ADMIN |
+|---|:--:|:--:|:--:|:--:|
+| `VIEW_RUNS` / `VIEW_AUDIT` / `VIEW_TOOLS` / `VIEW_APPROVALS` | ✅ | ✅ | ✅ | ✅ |
+| `RUN_AGENT` | — | ✅ | ✅ | ✅ |
+| `APPROVE_WRITE` | — | — | ✅ | ✅ |
+| `APPROVE_DANGEROUS` | — | — | — | ✅ |
+| `RECONCILE_RUNS` | — | — | — | ✅ |
+| `ADMINISTER` | — | — | — | ✅ |
+
+Two deliberate choices:
+
+- **Every role can read.** Nothing is hidden from a VIEWER. The difference between
+  roles is what they may *cause*, not what they may see — which is what makes the
+  audit trail meaningful.
+- **`APPROVE_DANGEROUS` is ADMIN-only.** An APPROVER can release a WRITE but not a
+  destructive action. If the tiers granted the same authority, the tier would be
+  decoration.
+
+An unrecognised risk tier falls back to `APPROVE_DANGEROUS`, so a new tier must be
+granted explicitly rather than inherited by accident.
+
+### API authorization
+
+| Endpoint | Requires |
+|---|---|
+| `GET /health`, `POST /auth/login` | public |
+| `GET /auth/me` | any authenticated user |
+| `POST /agent/run` | `RUN_AGENT` |
+| `POST /agent/approvals/{id}` | `APPROVE_WRITE` or `APPROVE_DANGEROUS`, by the approval's risk |
+| `GET /runs`, `GET /runs/{id}`, `GET /overview` | `VIEW_RUNS` |
+| `GET /approvals` | `VIEW_APPROVALS` |
+| `GET /audit/events` | `VIEW_AUDIT` |
+| `GET /tools` | `VIEW_TOOLS` |
+| `POST /runs/reconcile` | `RECONCILE_RUNS` |
+
+Identity always comes from the bearer token. **No endpoint reads a user id from a
+request body** — a test asserts that `requested_by_user_id` in a payload is ignored.
+
+### How it is built
+
+- Passwords: **bcrypt** (`app/security.py`). Only a hash is ever stored, and no API
+  response can emit one.
+- Tokens: **HS256 JWT** via PyJWT, signed with `AGENTGUARD_AUTH_SECRET`. Library
+  errors are never echoed — a caller learns only that a credential is unusable.
+- `app/identity.py` is provider-neutral: a future Cognito/OIDC integration supplies
+  the same `User` value object and nothing downstream changes.
+
+### Demo users
+
+> ⚠️ **DEMO ONLY.** These passwords are published in this repository. They exist so
+> the console can be explored locally. They are not secrets and must never be seeded
+> outside local development.
+
+| Role | Email | Password |
+|---|---|---|
+| VIEWER | `viewer@agentguard.local` | `viewer-demo-password` |
+| OPERATOR | `operator@agentguard.local` | `operator-demo-password` |
+| APPROVER | `approver@agentguard.local` | `approver-demo-password` |
+| ADMIN | `admin@agentguard.local` | `admin-demo-password` |
+
+Seeded explicitly and idempotently by `uv run python -m app.init_db`.
+
+### The separation-of-duties demo
+
+```
+Operator signs in
+  "Investigate migration batch 43 and restart it if needed."
+  -> READ tool runs, run parks at WAITING_FOR_APPROVAL
+  -> the approval card shows the blocked action, with no Approve button
+
+Operator tries to approve anyway (or calls the API directly)
+  -> 403, AUTHORIZATION_DENIED audited with the actor and required permission
+  -> restart_migration is NOT executed; the approval stays PENDING
+
+Approver signs in, opens the same approval, clicks Approve
+  -> the operator's run resumes, restart_migration executes, run COMPLETED
+
+Audit shows the whole chain: the operator's read, their approval request, the
+denied attempt, the approver's grant, and the write they authorised.
+```
+
 ## Web console
 
 `frontend/` is the AgentGuard console: React 19 + TypeScript on Vite, plain CSS, no
@@ -493,9 +583,15 @@ Two terminals.
 ```bash
 uv sync
 export OPENAI_API_KEY=sk-...            # only needed for real model calls
-uv run python -m app.init_db            # create tables + seed 24 demo batches
+export AGENTGUARD_AUTH_SECRET=$(openssl rand -hex 32)   # optional locally
+uv run python -m app.init_db            # tables + 24 demo batches + 4 demo users
 uv run uvicorn app.main:app --reload    # http://127.0.0.1:8000
 ```
+
+Without `AGENTGUARD_AUTH_SECRET` the app falls back to a published
+development-only signing key and emits a `RuntimeWarning`. Tokens signed with it
+are forgeable by anyone who can read this repository, so it is safe for local use
+and unusable as a production secret.
 
 **Terminal 2 — console**
 
@@ -521,7 +617,10 @@ curl -s localhost:8000/agent/approvals/<approval_id> \
   -H 'content-type: application/json' -d '{"approved": true}'
 ```
 
-> **Upgrading an existing `agentops.db`.** `create_all()` creates missing tables but
+> **Upgrading an existing `agentops.db`.** This applies again after the auth
+> milestone: `users` is a new table (created automatically), but the new identity
+> **columns** on `runs`, `approvals` and `audit_events` cannot be added by
+> `create_all()`. `create_all()` creates missing tables but
 > cannot add a column to an existing one, so a database created before durable runs
 > will not have `audit_events.run_id` and audit reads will fail with
 > `no such column`. Reset it explicitly — this is not done automatically:

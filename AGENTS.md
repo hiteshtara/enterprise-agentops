@@ -276,6 +276,31 @@ The pattern to follow instead (see `app/migration_store.py` + `app/tool_setup.py
 generically: it rejects any free-text string argument on the tool. New database tools
 should be covered by a similar assertion.
 
+### Identity and authorization invariants
+
+- **`app/identity.py` is the only place role→permission is decided.** Never write
+  `if user.role == "ADMIN"`; call `user.can(Permission.X)` or use a `requires(...)`
+  dependency. Adding a role means adding a row to `ROLE_PERMISSIONS`.
+- **Identity comes from the token, never from a request body.** No route may read a
+  `user_id`, `email`, or `role` field from a payload. `AgentService` receives an
+  opaque `actor_user_id` from the route and never parses a header or a token.
+- **Approval authority is derived from the approval's own risk tier** via
+  `authorization.permission_for_risk`. An unknown tier falls back to
+  `APPROVE_DANGEROUS` — fail closed. Rejecting requires the same permission as
+  approving: blocking an action is the same authority as releasing it.
+- **Authorization is checked before anything is resolved or executed.** A denied
+  attempt leaves the approval `PENDING`, executes no tool, and writes an
+  `AUTHORIZATION_DENIED` audit event naming the actor and the missing permission.
+- **Only hashes are persisted, and no response can emit one.** `user_to_dict` is the
+  single API projection of a user and has no branch that includes `password_hash`.
+- **`app/security.py` owns all cryptography.** bcrypt for passwords, PyJWT for
+  tokens; never hand-roll either, and never surface a library error to a caller —
+  every failure becomes `InvalidToken` / "Not authenticated."
+- **`AGENTGUARD_BCRYPT_ROUNDS` exists only to keep tests fast.** Production uses the
+  default cost factor; never lower it in a deployed environment.
+- **UI permission checks are convenience, not security.** The console hides what a
+  role cannot do; the backend re-checks every request and is the only authority.
+
 ### Console architecture
 
 `frontend/` is React 19 + TypeScript on Vite, plain CSS, react-router. No UI kit, no

@@ -19,6 +19,7 @@ const EVENT_TYPES: Array<EventType | ''> = [
   'AGENT_FAILED',
   'AGENT_MAX_ITERATIONS',
   'RUN_RECONCILED',
+  'AUTHORIZATION_DENIED',
 ]
 
 function stamp(iso: string): string {
@@ -108,6 +109,7 @@ export function AuditPage() {
                 <th>Time</th>
                 <th>Event</th>
                 <th>Run</th>
+                <th>Actor</th>
                 <th>Tool</th>
                 <th>Details</th>
               </tr>
@@ -133,6 +135,9 @@ export function AuditPage() {
                     ) : (
                       <span className="faint">—</span>
                     )}
+                  </td>
+                  <td className="mono faint truncate" style={{ maxWidth: 120 }}>
+                    {event.actor_user_id ?? '—'}
                   </td>
                   <td className="mono">
                     {typeof event.details.tool === 'string' ? event.details.tool : '—'}
