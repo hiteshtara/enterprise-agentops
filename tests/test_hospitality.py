@@ -16,8 +16,10 @@ import pytest
 
 from app.hospitality import (
     NO_REPLY_NEEDED,
+    actionable_signals,
     analyse_conversation,
-    is_acknowledgement,
+    closing_signals,
+    is_closing_message,
     reply_guidance,
 )
 
@@ -52,7 +54,7 @@ def test_acknowledgement_after_an_answer_needs_no_reply():
     state = analyse_conversation([EARLY_CHECK_IN, OWNER_ANSWERED, THANK_YOU])
 
     assert state["suggested_outcome"] == "no_reply_needed"
-    assert state["latest_guest_message_is_acknowledgement"] is True
+    assert state["latest_guest_message_is_closing"] is True
 
 
 def test_the_answered_question_is_marked_as_already_handled():
@@ -88,7 +90,7 @@ def test_a_thank_you_with_a_new_question_still_needs_a_reply():
     state = analyse_conversation([EARLY_CHECK_IN, OWNER_ANSWERED, follow_up])
 
     assert state["suggested_outcome"] == "reply_needed"
-    assert state["latest_guest_message_is_acknowledgement"] is False
+    assert state["latest_guest_message_is_closing"] is False
     assert state["unanswered_guest_messages"] == [follow_up["message"]]
 
 
@@ -174,8 +176,8 @@ def test_a_repeated_unresolved_question_needs_a_reply():
         "Much appreciated.",
     ],
 )
-def test_closings_are_recognised_as_acknowledgements(text):
-    assert is_acknowledgement(text) is True
+def test_closings_are_recognised(text):
+    assert is_closing_message(text) is True
 
 
 @pytest.mark.parametrize(
@@ -188,14 +190,14 @@ def test_closings_are_recognised_as_acknowledgements(text):
         "",
     ],
 )
-def test_a_message_carrying_a_request_is_not_an_acknowledgement(text):
-    assert is_acknowledgement(text) is False
+def test_a_message_carrying_a_request_is_not_a_closing(text):
+    assert is_closing_message(text) is False
 
 
-def test_a_question_mark_always_defeats_acknowledgement_detection():
+def test_a_question_mark_always_defeats_closing_detection():
     # Deliberately asymmetric: missing an acknowledgement costs one needless
     # reply, misreading a question as one costs an ignored guest.
-    assert is_acknowledgement("Thanks?") is False
+    assert is_closing_message("Thanks?") is False
 
 
 # -- edge cases ------------------------------------------------------------
@@ -307,3 +309,136 @@ def test_guidance_forbids_softening_a_guess_into_a_promise():
 def test_guidance_is_json_serialisable_for_the_model():
     # It travels to the model as a tool result, so it has to survive json.dumps.
     json.dumps(reply_guidance([EARLY_CHECK_IN, OWNER_ANSWERED, THANK_YOU]))
+
+
+# -- closing messages that are not merely "thanks" -------------------------
+#
+# The second live regression: the guest accepted an answer, withdrew their own
+# request and said what they would do instead. The old word-count rule could
+# only see short acknowledgements, so this drew a reply nobody needed.
+
+LIVE_CLOSING = (
+    "Hi, I don't worry, I was more curious and also want to plan for me and "
+    "my friends. I'll have a look outside anyway :-)"
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Thank you!",
+        "Sounds good.",
+        "Okay, thanks.",
+        "I'll have a look outside anyway :-)",
+        "No worries, I was just curious.",
+        "That's fine, we'll figure it out.",
+        "Perfect, see you then.",
+        "Got it.",
+        "We'll bring one.",
+        "That works for us.",
+        LIVE_CLOSING,
+    ],
+)
+def test_conversational_closings_need_no_reply(text):
+    assert is_closing_message(text) is True
+    assert actionable_signals(text) == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_signal"),
+    [
+        ("Sounds good. Can we check in at 2?", "question_mark"),
+        ("No worries. Where should we park?", "question_mark"),
+        ("Okay, but the door code isn't working.", "problem"),
+        ("Perfect. We are actually bringing another guest.", "plan_change"),
+        ("Thanks. Can you confirm the parking spot", "request"),
+        ("Great, what time is checkout", "question"),
+        ("Sounds good, we'll be arriving at 11pm", "plan_change"),
+        ("Perfect. Please send the door code.", "request"),
+        ("Got it. The heating is not working though.", "problem"),
+    ],
+)
+def test_a_closing_wrapper_does_not_hide_a_live_request(text, expected_signal):
+    assert expected_signal in actionable_signals(text)
+    assert is_closing_message(text) is False
+
+
+def test_the_live_regression_message_is_a_closing():
+    state = analyse_conversation(
+        [
+            guest("Could I come and view the apartment?", "2026-09-01T09:00:00"),
+            owner("We are fully booked on those dates.", "2026-09-01T10:00:00"),
+            guest(LIVE_CLOSING, "2026-09-01T11:00:00"),
+        ]
+    )
+
+    assert state["suggested_outcome"] == "no_reply_needed"
+    assert state["latest_guest_message_is_closing"] is True
+    assert state["open_signals"] == []
+
+
+def test_self_resolution_is_recognised_structurally_not_by_topic():
+    # "I'll ..." / "we'll ..." is the pattern, not any particular activity --
+    # so a sentence never seen before still reads as the guest handling it.
+    for text in (
+        "No problem, I'll sort it out myself.",
+        "That's fine, we'll bring our own towels.",
+        "Understood, I'll ask the neighbours.",
+        "Okay, we can manage without it.",
+    ):
+        assert is_closing_message(text) is True, text
+
+    assert "self_resolution" in closing_signals("Thanks, I'll take care of it")
+
+
+def test_closure_requires_positive_evidence():
+    # A message we simply do not understand is not silence by default. New
+    # information the host should see has no closing cue, so it draws a reply.
+    for text in (
+        "We are a group of six.",
+        "Our flight lands at 10pm.",
+        "The building entrance is on the side street.",
+    ):
+        assert is_closing_message(text) is False, text
+
+
+def test_a_problem_outranks_every_closing_cue_in_the_same_message():
+    text = "Thanks so much, perfect, no worries -- but the door code isn't working."
+
+    assert closing_signals(text)
+    assert "problem" in actionable_signals(text)
+    assert is_closing_message(text) is False
+
+
+def test_signals_are_named_so_a_draft_can_see_why():
+    signals = actionable_signals("Thanks! Can you confirm parking? We arrive late.")
+
+    assert "question_mark" in signals
+    assert "request" in signals
+    assert "plan_change" in signals
+
+
+def test_open_signals_are_reported_for_the_model():
+    state = analyse_conversation(
+        [
+            guest("Is early check-in possible?", "2026-09-01T09:00:00"),
+            owner("I'll confirm closer to the date.", "2026-09-01T10:00:00"),
+            guest("Okay, but the door code isn't working.", "2026-09-01T11:00:00"),
+        ]
+    )
+
+    assert state["suggested_outcome"] == "reply_needed"
+    assert "problem" in state["open_signals"]
+
+
+def test_a_look_inside_a_word_is_not_an_acknowledgement():
+    # "ok" must not match inside "look" -- the live closing contains both.
+    assert closing_signals("I will look") == ("self_resolution",)
+
+
+def test_guidance_explains_that_a_closing_is_more_than_thanks():
+    rules = " ".join(reply_guidance()["how_to_read_the_conversation"]).lower()
+
+    assert "not only 'thanks'" in rules
+    assert "withdraws their own request" in rules
+    assert "stopped asking" in rules

@@ -15,6 +15,7 @@ This is meant to be read and edited by a person. Add a rule when the owner
 states one -- not when a guest asks a question we happen not to cover.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -151,40 +152,277 @@ AVOID_PHRASES: tuple[str, ...] = (
 # Matched literally by the console, so it must not change casually.
 NO_REPLY_NEEDED = "NO_REPLY_NEEDED"
 
-# Short closings that carry no new request. A guest saying one of these is
-# ending the exchange, not reopening it.
-ACKNOWLEDGEMENT_PHRASES: frozenset[str] = frozenset(
-    {
-        "thank you",
-        "thanks",
-        "thank you so much",
-        "thanks so much",
-        "thank you very much",
-        "many thanks",
-        "thx",
-        "ty",
-        "sounds good",
-        "sounds great",
-        "ok",
-        "okay",
-        "perfect",
-        "great",
-        "awesome",
-        "got it",
-        "understood",
-        "appreciate it",
-        "much appreciated",
-        "will do",
-        "see you then",
-        "see you soon",
-        "no problem",
-        "no worries",
-    }
+# -- closing detection ----------------------------------------------------
+#
+# A guest ends an exchange in more ways than saying "thanks". An earlier version
+# of this recognised only short acknowledgement phrases, so a perfectly clear
+# closing -- "I don't worry, I was just curious. I'll have a look outside
+# anyway" -- read as a live request and drew a reply nobody needed.
+#
+# So closure is not decided by matching a phrase list. It is decided by two
+# independent questions:
+#
+#   1. Does the message contain anything ACTIONABLE -- a question, a request, a
+#      problem, or a changed plan?
+#   2. Does it contain positive evidence of CLOSURE?
+#
+# A message is a closing only when the answer is no to the first and yes to the
+# second. Both halves matter. Requiring positive evidence is what stops silence
+# being the default for a message we simply failed to understand, and a message
+# carrying new information the host should acknowledge -- "we're arriving at
+# 11pm" -- has no closing cue, so it still draws a reply.
+#
+# The asymmetry is deliberate throughout: an unnecessary draft costs the host
+# ten seconds, a false NO_REPLY_NEEDED leaves a real guest ignored.
+
+# Interrogatives that appear without a question mark. Guests routinely drop it.
+QUESTION_MARKERS: tuple[str, ...] = (
+    "what time",
+    "what is",
+    "what are",
+    "what should",
+    "how much",
+    "how many",
+    "how do",
+    "how does",
+    "how can",
+    "where is",
+    "where are",
+    "where can",
+    "where should",
+    "where do",
+    "when is",
+    "when are",
+    "when can",
+    "when do",
+    "when should",
+    "which one",
+    "who is",
+    "is there",
+    "are there",
+    "is it possible",
+    "do you",
+    "does it",
+    "did you",
+    "can we",
+    "can i",
+    "could we",
+    "could i",
+    "would it",
+    "should we",
+    "should i",
+    "any chance",
 )
 
-# An acknowledgement is short by nature. A longer message that merely opens with
-# "thanks" is usually carrying a new request behind it.
-MAX_ACKNOWLEDGEMENT_WORDS = 6
+# Asking us to do something, however politely. "I was wondering if" belongs here
+# rather than among the softeners: it almost always introduces a request.
+REQUEST_MARKERS: tuple[str, ...] = (
+    "please",
+    "can you",
+    "could you",
+    "would you",
+    "will you",
+    "let me know",
+    "let us know",
+    "send me",
+    "send us",
+    "i need",
+    "we need",
+    "i would like",
+    "we would like",
+    "i'd like",
+    "we'd like",
+    "want you to",
+    "was wondering",
+    "am wondering",
+    "wondering if",
+    "confirm",
+    "get back to me",
+    "check for me",
+)
+
+# Something is wrong. These outrank every closing cue in the same message.
+PROBLEM_MARKERS: tuple[str, ...] = (
+    "not working",
+    "isn't working",
+    "is not working",
+    "doesn't work",
+    "does not work",
+    "won't work",
+    "won't open",
+    "won't turn",
+    "can't get in",
+    "cannot get in",
+    "broken",
+    "issue",
+    "problem with",
+    "something wrong",
+    "went wrong",
+    "missing",
+    "no hot water",
+    "no water",
+    "no heat",
+    "leaking",
+    "unhappy",
+    "disappointed",
+    "complaint",
+    "refund",
+    "cancel",
+    "stuck",
+    "dirty",
+)
+
+# New facts about the stay. Even phrased as a closing, these need a human to see
+# them -- an extra guest or a late arrival changes what the host has to do.
+PLAN_CHANGE_MARKERS: tuple[str, ...] = (
+    "actually",
+    "instead",
+    "another guest",
+    "extra guest",
+    "additional guest",
+    "one more person",
+    "one more thing",
+    "change",
+    "changing",
+    "changed",
+    "reschedule",
+    "rescheduling",
+    "postpone",
+    # Spelled out rather than stemmed: markers are matched on whole words, so a
+    # stem like "arriv" would never match "arriving".
+    "arrive",
+    "arrives",
+    "arriving",
+    "arrival",
+    "landing",
+    "flight",
+    "running late",
+    "be late",
+    "delayed",
+    "earlier than",
+    "later than",
+)
+
+# Positive evidence that the guest is closing the exchange rather than opening
+# one. Grouped by what they do, not by topic.
+CLOSING_MARKERS: tuple[str, ...] = (
+    # thanks
+    "thank you",
+    "thanks",
+    "thx",
+    "ty",
+    "appreciate it",
+    "much appreciated",
+    "appreciated",
+    # agreement
+    "sounds good",
+    "sounds great",
+    "ok",
+    "okay",
+    "perfect",
+    "great",
+    "awesome",
+    "got it",
+    "understood",
+    "noted",
+    "will do",
+    "fair enough",
+    "that works",
+    "that will work",
+    "that'll work",
+    "works for us",
+    "works for me",
+    "that's fine",
+    "thats fine",
+    "that is fine",
+    "all good",
+    # de-escalation -- the guest withdrawing the request themselves
+    "no worries",
+    "no problem",
+    "not a problem",
+    "no need",
+    "no rush",
+    "no hurry",
+    "don't worry",
+    "dont worry",
+    "curious",
+    "just checking",
+    "just asking",
+    # farewell
+    "see you",
+    "looking forward",
+    "safe travels",
+)
+
+# First-person future intent: the guest saying what *they* will do. This is the
+# structural half of closure detection and the reason a novel sentence like
+# "I'll have a look outside anyway" is recognised without listing it anywhere.
+SELF_RESOLUTION_PATTERN = re.compile(
+    r"\b(?:i|we)\s*(?:'|’)?\s*(?:ll|will|can|shall|am going to|are going to)\b",
+)
+
+
+def normalise_text(text: str) -> str:
+    """Lowercase, with curly apostrophes folded so contractions match."""
+    return text.lower().replace("’", "'")
+
+
+def contains_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """Whether any marker appears as a whole word or phrase."""
+    return any(
+        re.search(r"(?<![a-z])" + re.escape(marker) + r"(?![a-z])", text)
+        for marker in markers
+    )
+
+
+def actionable_signals(text: str) -> tuple[str, ...]:
+    """Why a message still needs a reply, named rather than implied.
+
+    Returned to the model as well as used for the decision, so a draft can see
+    *what* was detected instead of being handed a bare verdict.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ()
+
+    normalised = normalise_text(text)
+
+    signals: list[str] = []
+
+    if "?" in text:
+        signals.append("question_mark")
+
+    if contains_marker(normalised, QUESTION_MARKERS):
+        signals.append("question")
+
+    if contains_marker(normalised, REQUEST_MARKERS):
+        signals.append("request")
+
+    if contains_marker(normalised, PROBLEM_MARKERS):
+        signals.append("problem")
+
+    if contains_marker(normalised, PLAN_CHANGE_MARKERS):
+        signals.append("plan_change")
+
+    return tuple(signals)
+
+
+def closing_signals(text: str) -> tuple[str, ...]:
+    """Positive evidence that the guest is wrapping up."""
+    if not isinstance(text, str) or not text.strip():
+        return ()
+
+    normalised = normalise_text(text)
+
+    signals: list[str] = []
+
+    if contains_marker(normalised, CLOSING_MARKERS):
+        signals.append("closing_phrase")
+
+    if SELF_RESOLUTION_PATTERN.search(normalised):
+        signals.append("self_resolution")
+
+    return tuple(signals)
+
 
 CONVERSATION_STATE_RULES: tuple[str, ...] = (
     "Read the whole conversation in order before writing anything.",
@@ -204,10 +442,17 @@ CONVERSATION_STATE_RULES: tuple[str, ...] = (
         "fact to replace it with."
     ),
     (
-        "If the guest's latest message is an acknowledgement and nothing is "
-        "open, either send one short friendly closing line or reply with "
+        "If the guest's latest message closes the exchange and nothing is open, "
+        "either send one short friendly closing line or reply with "
         f"{NO_REPLY_NEEDED}. Do not manufacture an operational explanation just "
         "because earlier messages contained questions."
+    ),
+    (
+        "A closing is not only 'thanks'. A guest who accepts an answer, "
+        "withdraws their own request, or says what they will do themselves -- "
+        "'no worries, I was just curious', 'that's fine, we'll sort it out' -- "
+        "is ending the conversation. Do not answer a question they have stopped "
+        "asking, and do not restate a limitation they have already accepted."
     ),
     (
         "A conditional answer ('we'll know tonight') is not resolved, but it is "
@@ -227,47 +472,22 @@ NO_REPLY_GUIDANCE = (
 )
 
 
-def normalise_acknowledgement(text: str) -> str:
-    """Reduce a message to comparable words: lowercase, letters and spaces only.
+def is_closing_message(text: str) -> bool:
+    """Whether a guest message closes the exchange rather than opening one.
 
-    Strips punctuation and emoji so "Thank you!!" and "thank you 🙏" both land on
-    "thank you".
+    True only when nothing actionable is present *and* there is positive
+    evidence of closure. Length is not a criterion: a two-sentence message that
+    accepts an answer and says what the guest will do themselves is as final as
+    "Thanks", and the earlier word-count rule is exactly what missed it.
+
+    Both halves are load-bearing. Dropping the actionable check would silence
+    real questions; dropping the closure requirement would make silence the
+    default for any message the rules failed to parse.
     """
-    kept = [character.lower() if character.isalnum() else " " for character in text]
-
-    return " ".join("".join(kept).split())
-
-
-def is_acknowledgement(text: str) -> bool:
-    """Whether a guest message is a closing courtesy carrying no new request.
-
-    Conservative in the direction that matters: anything with a question mark,
-    and anything longer than a short phrase, is *not* an acknowledgement. The
-    cost of missing one is a slightly unnecessary reply; the cost of a false
-    positive is ignoring a real question.
-    """
-    if "?" in text:
+    if actionable_signals(text):
         return False
 
-    normalised = normalise_acknowledgement(text)
-
-    if not normalised:
-        return False
-
-    if normalised in ACKNOWLEDGEMENT_PHRASES:
-        return True
-
-    words = normalised.split()
-
-    if len(words) > MAX_ACKNOWLEDGEMENT_WORDS:
-        return False
-
-    # "thank you so much!" and "ok great thanks" -- built only from
-    # acknowledgement words, so still carrying no request.
-    return all(
-        any(word in phrase.split() for phrase in ACKNOWLEDGEMENT_PHRASES)
-        for word in words
-    )
+    return bool(closing_signals(text))
 
 
 def analyse_conversation(messages: Any) -> dict[str, Any]:
@@ -311,14 +531,20 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
 
     latest_guest = guest_rows[-1] if guest_rows else None
 
-    latest_is_acknowledgement = bool(
-        latest_guest and is_acknowledgement(latest_guest["message"])
+    latest_is_closing = bool(
+        latest_guest and is_closing_message(latest_guest["message"])
+    )
+
+    # Every reason any still-open message needs answering, so the model sees
+    # what was detected rather than a bare verdict it has to take on trust.
+    open_signals = sorted(
+        {signal for row in unanswered for signal in actionable_signals(row["message"])}
     )
 
     if not unanswered:
         outcome = "already_replied"
 
-    elif all(is_acknowledgement(row["message"]) for row in unanswered):
+    elif all(is_closing_message(row["message"]) for row in unanswered):
         outcome = "no_reply_needed"
 
     else:
@@ -330,7 +556,8 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         "awaiting_our_reply": bool(unanswered),
         "unanswered_guest_messages": [row["message"] for row in unanswered],
         "latest_guest_message": latest_guest["message"] if latest_guest else None,
-        "latest_guest_message_is_acknowledgement": latest_is_acknowledgement,
+        "latest_guest_message_is_closing": latest_is_closing,
+        "open_signals": open_signals,
         "answered_earlier_by_us": [
             row["message"]
             for index, row in enumerate(rows)
@@ -339,9 +566,12 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         "suggested_outcome": outcome,
         "note": (
             "answered_earlier_by_us lists guest messages a later Owner message "
-            "already responded to. Do not answer those again. suggested_outcome "
-            "is advice from a simple rule -- read the conversation and override "
-            "it if the wording tells you otherwise."
+            "already responded to. Do not answer those again. open_signals "
+            "names why anything still open needs a reply -- an empty list with "
+            "unanswered messages present means the guest was closing the "
+            "conversation, not asking for anything. suggested_outcome is advice "
+            "from a simple rule -- read the conversation and override it if the "
+            "wording tells you otherwise."
         ),
     }
 
