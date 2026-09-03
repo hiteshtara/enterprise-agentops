@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.cancellation import is_cancelled
 from app.connectors.lodgify.config import LODGIFY_PROPERTIES, LODGIFY_SLUGS
 from app.connectors.lodgify.errors import (
     LodgifySendAmbiguous,
@@ -33,7 +34,6 @@ from app.connectors.lodgify.messaging_client import (
     STAY_FILTER_ALL,
     LodgifyMessagingClient,
 )
-
 from app.connectors.lodgify.messaging_models import (
     SENDER_OWNER,
     SENDER_RENTER,
@@ -44,6 +44,7 @@ from app.connectors.lodgify.messaging_models import (
     SendOutcome,
     SendStatus,
     SentMessage,
+    conversation_fingerprint,
     excerpt,
     message_ref_for,
     normalise_message_status,
@@ -64,6 +65,7 @@ BOOKING_SCAN_SIZE = 100
 
 # The only booking status that occupies the calendar. Verified live against the
 # account: the vocabulary is Booked / Declined / Open, and only Booked is a stay.
+OCCUPYING_STATUS = "Booked"
 
 # A safety cap on paging, not a working limit. It was 20 while the account was
 # believed to hold ~145 bookings; asking the provider for every stay rather than
@@ -71,10 +73,6 @@ BOOKING_SCAN_SIZE = 100
 # being a silent truncation. Sized well clear of the real archive, and reviewed
 # whenever the account grows.
 MAX_LOOKUP_PAGES = 60
-
-# How many thread reads run at once during an Inbox scan. Modest on purpose:
-# this is someone else's API, and the goal is an Inbox that returns before the
-# next poll, not maximum throughput.
 
 # How many thread reads run at once during an Inbox scan. Modest on purpose:
 # this is someone else's API, and the goal is an Inbox that returns before the
@@ -231,10 +229,14 @@ class ResolvedConversation:
     conversation_ref: str
     booking_id: int
     thread_uid: str
+    property_id: int | None
     property_slug: str | None
     property_name: str | None
     source: str | None
     booking_status: str | None
+    arrival: str | None
+    departure: str | None
+    canceled_at: str | None
 
 
 PROPERTIES_BY_ID = {prop.lodgify_property_id: prop for prop in LODGIFY_PROPERTIES}
@@ -243,7 +245,7 @@ PROPERTIES_BY_ID = {prop.lodgify_property_id: prop for prop in LODGIFY_PROPERTIE
 def read_booking(row: dict[str, Any]) -> ResolvedConversation | None:
     """Construct the internal view of one booking, field by field.
 
-    Five fields are read and nothing else. The upstream row also carries a guest
+    Nine fields are read and nothing else. The upstream row also carries a guest
     block with name, email and phone, the originating IP address, financial
     totals, transactions, notes, and `source_text` -- which
     docs/LODGIFY_API.md section 6 records as untrusted free text that has been
@@ -265,14 +267,26 @@ def read_booking(row: dict[str, Any]) -> ResolvedConversation | None:
     source = row.get("source")
     status = row.get("status")
 
+    # Stay dates, read for the turnover question only. They are dates and
+    # nothing else -- no guest block, no reservation identifier, no financials.
+    arrival = row.get("arrival")
+    departure = row.get("departure")
+
+    # The authoritative cancellation signal. Lodgify spells it with one "l".
+    canceled_at = row.get("canceled_at")
+
     return ResolvedConversation(
         conversation_ref=conversation_ref_for(booking_id),
         booking_id=booking_id,
         thread_uid=thread_uid,
+        property_id=property_id if isinstance(property_id, int) else None,
         property_slug=prop.slug if prop else None,
         property_name=prop.display_name if prop else None,
         source=source if isinstance(source, str) else None,
         booking_status=status if isinstance(status, str) else None,
+        arrival=arrival if isinstance(arrival, str) else None,
+        departure=departure if isinstance(departure, str) else None,
+        canceled_at=canceled_at if isinstance(canceled_at, str) else None,
     )
 
 
@@ -538,6 +552,85 @@ class LodgifyInbox:
 
         return found
 
+    # -- turnover ----------------------------------------------------------
+
+    def turnover_for(self, conversation_ref: str) -> dict[str, Any]:
+        """Whether another stay ends on this guest's arrival day.
+
+        The single question the early-check-in policy turns on, and the only
+        thing this returns: a date the guest already knows, and one boolean.
+
+        `same_day_checkout` is three-valued and `None` means *we do not know*.
+        That distinction is the whole point -- treating a provider failure as
+        "no checkout" would turn an outage into a promise of early access on a
+        turnover day. Availability cannot answer this: docs/LODGIFY_API.md
+        section 4 records that a checkout day reads as *available*, because it
+        is bookable for a same-day arrival. Only the stay dates can.
+
+        Nothing about the other reservation is returned or even retained --
+        not its dates, not its status, not its id, and the guest block of every
+        row is never read at all.
+        """
+        booking = self.resolve(conversation_ref)
+
+        arrival = booking.arrival
+
+        if not arrival or booking.property_id is None:
+            return {
+                "conversation_ref": booking.conversation_ref,
+                "arrival_date": arrival,
+                "same_day_checkout": None,
+                "reason": "The arrival date for this booking could not be read.",
+            }
+
+        try:
+            occupied = self.departures_on(booking.property_id, arrival)
+
+        except LodgifyUnavailable:
+            return {
+                "conversation_ref": booking.conversation_ref,
+                "arrival_date": arrival,
+                "same_day_checkout": None,
+                "reason": "The provider could not be reached, so the schedule is unknown.",
+            }
+
+        return {
+            "conversation_ref": booking.conversation_ref,
+            "arrival_date": arrival,
+            "same_day_checkout": any(
+                other.booking_id != booking.booking_id for other in occupied
+            ),
+            "reason": None,
+        }
+
+    def departures_on(self, property_id: int, date: str) -> list[ResolvedConversation]:
+        """Confirmed stays at one property ending on one date.
+
+        Only `Booked` counts. A `Declined` or `Open` enquiry does not occupy the
+        calendar, so counting it would deny early check-in on a day nobody is
+        actually leaving.
+        """
+        found: list[ResolvedConversation] = []
+
+        for page in range(1, MAX_LOOKUP_PAGES + 1):
+            bookings = self.booking_page(page=page, size=BOOKING_SCAN_SIZE)
+
+            if not bookings:
+                break
+
+            found.extend(
+                booking
+                for booking in bookings
+                if booking.property_id == property_id
+                and booking.departure == date
+                and booking.booking_status == OCCUPYING_STATUS
+            )
+
+            if len(bookings) < BOOKING_SCAN_SIZE:
+                break
+
+        return found
+
     def resolve(self, conversation_ref: object) -> ResolvedConversation:
         """Turn a safe ref into provider identifiers, or refuse.
 
@@ -626,6 +719,79 @@ class LodgifyInbox:
 
         return [summary.to_dict() for summary in summaries[:count]]
 
+    def summarise_refs(self, refs: set[str]) -> dict[str, dict[str, Any]]:
+        """Summarise named conversations, wherever they sit in the archive.
+
+        The Inbox listing enumerates current and upcoming stays only. This is
+        how a conversation outside that set -- a Historic one, known because a
+        webhook named it -- gets a live summary.
+
+        Costs **one** archive scan for the whole call, plus one thread read per
+        requested ref. Resolving each ref on its own would re-page the archive
+        every time, and a Historic booking sits near the end of it, so the cost
+        would multiply by the number of rows and reach the provider's rate
+        limit. Never call `get_conversation` in a loop for this.
+
+        Absence carries one meaning and one only: **we did not observe this
+        conversation**. A ref that matches no booking is absent, and so is one
+        whose thread could not be read -- an unknown conversation is not an
+        error here, and neither is an outage. A summary that is present was
+        genuinely read, even if the thread turned out to be empty.
+
+        The fail-closed UNKNOWN placeholder `summarise` returns must never
+        appear here. It is right for the live listing, where a later poll reads
+        the row again, and wrong for this caller: these summaries are written
+        into the activity index, and the index is the only record that a
+        Historic conversation moved. Writing a placeholder's nulls over a
+        webhook-recorded timestamp would sink that conversation to the bottom
+        of the Inbox permanently, because the live scan can never rediscover
+        it. Callers must treat absence as *keep what you already knew*.
+        """
+        if not refs:
+            return {}
+
+        wanted = [
+            booking
+            for booking in self.all_bookings(stay_filters=(STAY_FILTER_ALL,))
+            if booking.conversation_ref in refs
+        ]
+
+        return {
+            summary.conversation_ref: summary.to_dict()
+            for summary in self.summarise_readable(wanted)
+        }
+
+    def summarise_readable(
+        self,
+        bookings: list[ResolvedConversation],
+    ) -> list[ConversationSummary]:
+        """Summarise only the conversations whose threads could be read.
+
+        Same concurrency as `summarise_all`; the difference is what happens to
+        a thread that will not load. Here it is dropped rather than turned into
+        a placeholder, so the caller can tell an observation from an outage.
+        """
+        if not bookings:
+            return []
+
+        workers = min(THREAD_READ_WORKERS, len(bookings))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            attempted = list(pool.map(self.attempt_summary, bookings))
+
+        return [summary for summary in attempted if summary is not None]
+
+    def attempt_summary(
+        self,
+        booking: ResolvedConversation,
+    ) -> ConversationSummary | None:
+        """One inbox row, or None if the provider would not serve the thread."""
+        try:
+            return self.read_summary(booking)
+
+        except LodgifyUnavailable:
+            return None
+
     def summarise_all(
         self,
         bookings: list[ResolvedConversation],
@@ -652,9 +818,15 @@ class LodgifyInbox:
             return list(pool.map(self.summarise, bookings))
 
     def summarise(self, booking: ResolvedConversation) -> ConversationSummary:
-        """One inbox row. A thread we cannot read becomes UNKNOWN, not empty."""
+        """One inbox row. A thread we cannot read becomes UNKNOWN, not empty.
+
+        The fail-closed answer is deliberately indistinguishable *in its
+        fields* from a genuinely empty thread, so no caller may infer failure
+        from `last_message_at is None`. A caller that needs to tell the two
+        apart uses `attempt_summary`, where failure is absence.
+        """
         try:
-            messages = read_messages(self._client.get_thread(booking.thread_uid))
+            return self.read_summary(booking)
 
         except LodgifyUnavailable:
             # Fail closed: an unreadable thread is not "responded" and not
@@ -670,7 +842,17 @@ class LodgifyInbox:
                 last_message_sender=None,
                 last_message_excerpt=None,
                 message_count=0,
+                fingerprint=conversation_fingerprint(()),
             )
+
+    def read_summary(self, booking: ResolvedConversation) -> ConversationSummary:
+        """One inbox row built from an actual thread read.
+
+        Raises `LodgifyUnavailable` rather than inventing a row. Every caller
+        that must distinguish a real observation from an outage goes through
+        here.
+        """
+        messages = read_messages(self._client.get_thread(booking.thread_uid))
 
         latest = messages[-1] if messages else None
 
@@ -685,6 +867,9 @@ class LodgifyInbox:
             last_message_sender=latest.sender if latest else None,
             last_message_excerpt=excerpt(latest.message) if latest else None,
             message_count=len(messages),
+            fingerprint=conversation_fingerprint(
+                [message.to_dict() for message in messages]
+            ),
         )
 
     def get_conversation(self, conversation_ref: str) -> dict[str, Any]:
@@ -701,6 +886,7 @@ class LodgifyInbox:
             property_name=booking.property_name,
             source=booking.source,
             booking_status=booking.booking_status,
+            booking_cancelled=is_cancelled(booking.booking_status, booking.canceled_at),
             subject=plain_text(thread.get("subject")) or None,
             is_read=is_read if isinstance(is_read, bool) else None,
             status=classify_conversation(messages),

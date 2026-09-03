@@ -15,8 +15,13 @@ import {
   confirmedFailed,
   confirmedSent,
   conversationDetail,
+  editedDraft,
   guestReplyWaiting,
+  noReplyDraft,
+  readyDraft,
+  reviewDraft,
   sendResolved,
+  staleDraft,
   unknownSendState,
 } from '../test/factories'
 
@@ -36,6 +41,7 @@ async function composeAndSubmit() {
 
   await screen.findByText('Is there parking at the house?')
 
+  await user.clear(screen.getByLabelText('Message'))
   await user.clear(screen.getByLabelText('Subject'))
   await user.type(screen.getByLabelText('Subject'), GUEST_REPLY_SUBJECT)
   await user.type(screen.getByLabelText('Message'), GUEST_REPLY_BODY)
@@ -80,6 +86,7 @@ describe('ConversationPage', () => {
     const user = userEvent.setup()
     const body = screen.getByLabelText('Message')
 
+    await user.clear(body)
     await user.type(body, 'Hello there')
 
     expect(body).toHaveValue('Hello there')
@@ -230,213 +237,206 @@ describe('ConversationPage', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('drafts through the ordinary agent run rather than a hidden path', async () => {
-    vi.mocked(api.runAgent).mockResolvedValue({
-      run_id: 'run-draft',
-      status: 'COMPLETED',
-      answer: 'Parking is shared and there is no extra charge.',
-      trace: [],
-      approval_required: null,
-    })
-
+  it('does not draft on demand -- the reply is already prepared', async () => {
     renderConversation()
 
     await screen.findByText('Is there parking at the house?')
 
-    const user = userEvent.setup()
+    // Proactive drafting removes the "generate, then wait" step entirely.
+    expect(screen.queryByRole('button', { name: 'Generate draft' })).toBeNull()
+  })
+})
 
-    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+describe('the prepared reply', () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    vi.mocked(api.getConversation).mockResolvedValue(conversationDetail)
+  })
 
-    await waitFor(() =>
-      expect(screen.getByLabelText('Message')).toHaveValue(
-        'Parking is shared and there is no extra charge.',
-      ),
-    )
+  function withDraft(draft: typeof readyDraft | null) {
+    vi.mocked(api.getConversation).mockResolvedValue({
+      ...conversationDetail,
+      draft,
+    })
+  }
 
-    // A draft is model output only: nothing was submitted or sent.
+  it('is already in the editor when the conversation opens', async () => {
+    renderConversation()
+
+    await screen.findByText('Is there parking at the house?')
+
+    expect(screen.getByLabelText('Message')).toHaveValue(readyDraft.message)
+    expect(screen.getByLabelText('Subject')).toHaveValue(readyDraft.subject)
+
+    // Opening a conversation reads it. It never prepares, and never sends.
+    expect(api.regenerateDraft).not.toHaveBeenCalled()
     expect(api.requestGuestReply).not.toHaveBeenCalled()
     expect(api.resolveApproval).not.toHaveBeenCalled()
   })
 
-  describe('NO_REPLY_NEEDED', () => {
-    function draftAnswering(answer: string) {
-      vi.mocked(api.runAgent).mockResolvedValue({
-        run_id: 'run-draft',
-        status: 'COMPLETED',
-        answer,
-        trace: [],
-        approval_required: null,
-      })
-    }
+  it('shows the operator their own edited wording', async () => {
+    withDraft(editedDraft)
 
-    async function generateDraft() {
-      const user = userEvent.setup()
+    renderConversation()
 
-      await screen.findByText('Is there parking at the house?')
-      await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+    await screen.findByText('Is there parking at the house?')
 
-      return user
-    }
+    expect(screen.getByLabelText('Message')).toHaveValue(
+      'My own wording for this guest.',
+    )
+  })
 
-    it('shows "No reply needed" instead of inventing text', async () => {
-      draftAnswering('NO_REPLY_NEEDED')
+  it('persists an edit without sending anything', async () => {
+    vi.mocked(api.editDraft).mockResolvedValue(editedDraft)
 
-      renderConversation()
+    renderConversation()
 
-      await generateDraft()
+    await screen.findByText('Is there parking at the house?')
 
-      expect(await screen.findByText('No reply needed')).toBeInTheDocument()
+    const user = userEvent.setup()
+    const body = screen.getByLabelText('Message')
 
-      // Nothing was written into the box for a person to accidentally send.
-      expect(screen.getByLabelText('Message')).toHaveValue('')
-    })
+    await user.clear(body)
+    await user.type(body, 'My own wording for this guest.')
+    await user.click(screen.getByRole('button', { name: 'Save edit' }))
 
-    it('sends nothing and creates no approval', async () => {
-      draftAnswering('NO_REPLY_NEEDED')
+    await waitFor(() =>
+      expect(api.editDraft).toHaveBeenCalledWith(CONVERSATION_REF, {
+        subject: readyDraft.subject,
+        message: 'My own wording for this guest.',
+      }),
+    )
 
-      renderConversation()
+    expect(api.requestGuestReply).not.toHaveBeenCalled()
+    expect(api.resolveApproval).not.toHaveBeenCalled()
+  })
 
-      await generateDraft()
+  it('regenerates against the conversation as it stands now', async () => {
+    vi.mocked(api.regenerateDraft).mockResolvedValue(readyDraft)
 
-      await screen.findByText('No reply needed')
+    renderConversation()
 
-      expect(api.requestGuestReply).not.toHaveBeenCalled()
-      expect(api.resolveApproval).not.toHaveBeenCalled()
+    await screen.findByText('Is there parking at the house?')
 
-      // And the action that would send stays unavailable while the box is empty.
-      expect(screen.getByRole('button', { name: 'Send for approval' })).toBeDisabled()
-    })
+    const user = userEvent.setup()
 
-    it('tolerates a trailing full stop on the sentinel', async () => {
-      draftAnswering('NO_REPLY_NEEDED.')
+    await user.click(screen.getByRole('button', { name: 'Regenerate' }))
 
-      renderConversation()
+    await waitFor(() =>
+      expect(api.regenerateDraft).toHaveBeenCalledWith(CONVERSATION_REF),
+    )
 
-      await generateDraft()
+    // Regeneration re-reads the thread rather than trusting its own response,
+    // because staleness is judged against the conversation.
+    await waitFor(() => expect(api.getConversation).toHaveBeenCalledTimes(2))
 
-      expect(await screen.findByText('No reply needed')).toBeInTheDocument()
-    })
+    expect(api.requestGuestReply).not.toHaveBeenCalled()
+  })
 
-    it('treats a real draft as a draft, not as the sentinel', async () => {
-      draftAnswering("You're very welcome!")
+  it('reports a preparation failure instead of an empty box', async () => {
+    withDraft(reviewDraft)
 
-      renderConversation()
+    renderConversation()
 
-      await generateDraft()
+    expect(
+      await screen.findByText(/A reply could not be prepared automatically/),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Needs human review')).toBeInTheDocument()
 
-      await waitFor(() =>
-        expect(screen.getByLabelText('Message')).toHaveValue("You're very welcome!"),
-      )
+    expect(screen.getByLabelText('Message')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Send for approval' })).toBeDisabled()
+  })
 
-      expect(screen.queryByText('No reply needed')).not.toBeInTheDocument()
-    })
+  it('shows a deliberate silence as a decision, not an empty draft', async () => {
+    withDraft(noReplyDraft)
 
-    it('clears the notice once the host writes something', async () => {
-      draftAnswering('NO_REPLY_NEEDED')
+    renderConversation()
 
-      renderConversation()
+    expect(
+      await screen.findByText(/The guest closed the conversation, so no reply/),
+    ).toBeInTheDocument()
+    expect(screen.getByText('No reply needed')).toBeInTheDocument()
 
-      const user = await generateDraft()
+    // Nothing was written for a person to accidentally send.
+    expect(screen.getByLabelText('Message')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Send for approval' })).toBeDisabled()
 
-      await screen.findByText('No reply needed')
+    expect(api.requestGuestReply).not.toHaveBeenCalled()
+  })
 
-      await user.type(screen.getByLabelText('Message'), 'Actually, one thing…')
+  it('lets the owner overrule a silence by writing their own reply', async () => {
+    withDraft(noReplyDraft)
+    vi.mocked(api.requestGuestReply).mockResolvedValue(guestReplyWaiting)
 
-      expect(screen.queryByText('No reply needed')).not.toBeInTheDocument()
-    })
+    renderConversation()
+
+    await screen.findByText(/The guest closed the conversation, so no reply/)
+
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Message'), 'Actually, one more thing.')
+
+    expect(screen.getByRole('button', { name: 'Send for approval' })).toBeEnabled()
+  })
+
+  it('says so plainly when nothing has been prepared yet', async () => {
+    withDraft(null)
+
+    renderConversation()
+
+    expect(
+      await screen.findByText('No reply has been prepared for this conversation yet.'),
+    ).toBeInTheDocument()
   })
 })
 
-describe('historical retrieval indicator', () => {
-  it('reports how many past replies informed the draft', async () => {
-    vi.mocked(api.runAgent).mockResolvedValue({
-      run_id: 'run-draft',
-      status: 'COMPLETED',
-      answer: 'Parking is shared, no extra charge.',
-      trace: [
-        {
-          tool: 'get_guest_conversation',
-          arguments: { conversation_ref: CONVERSATION_REF },
-          result: {
-            historical_examples: {
-              examples: [{ guest_example: 'a' }, { guest_example: 'b' }],
-            },
-          },
-        },
-      ],
-      approval_required: null,
+describe('a stale prepared reply', () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    vi.mocked(api.getConversation).mockResolvedValue({
+      ...conversationDetail,
+      draft: staleDraft,
     })
-
-    renderConversation()
-
-    const user = userEvent.setup()
-
-    await screen.findByText('Is there parking at the house?')
-    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
-
-    expect(
-      await screen.findByText(/Draft informed by 2 similar past replies/),
-    ).toBeInTheDocument()
   })
 
-  it('says nothing when no precedent was found', async () => {
-    vi.mocked(api.runAgent).mockResolvedValue({
-      run_id: 'run-draft',
-      status: 'COMPLETED',
-      answer: 'Parking is shared.',
-      trace: [],
-      approval_required: null,
-    })
+  it('warns that the guest has written again', async () => {
+    renderConversation()
+
+    expect(await screen.findByText(/The guest has written again/)).toBeInTheDocument()
+    expect(screen.getByText('Draft stale')).toBeInTheDocument()
+  })
+
+  it('cannot be sent', async () => {
+    renderConversation()
+
+    await screen.findByText(/The guest has written again/)
+
+    expect(screen.getByRole('button', { name: 'Send for approval' })).toBeDisabled()
+  })
+
+  it('does not put its text in the editor for a person to send by hand', async () => {
+    renderConversation()
+
+    await screen.findByText(/The guest has written again/)
+
+    // The safety property is that the outdated wording is never sendable --
+    // not merely that a button is greyed out.
+    expect(screen.getByLabelText('Message')).toHaveValue('')
+  })
+
+  it('can be regenerated', async () => {
+    vi.mocked(api.regenerateDraft).mockResolvedValue(readyDraft)
 
     renderConversation()
 
+    await screen.findByText(/The guest has written again/)
+
     const user = userEvent.setup()
 
-    await screen.findByText('Is there parking at the house?')
-    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+    await user.click(screen.getByRole('button', { name: 'Regenerate' }))
 
     await waitFor(() =>
-      expect(screen.getByLabelText('Message')).toHaveValue('Parking is shared.'),
+      expect(api.regenerateDraft).toHaveBeenCalledWith(CONVERSATION_REF),
     )
-
-    expect(screen.queryByText(/Draft informed by/)).not.toBeInTheDocument()
-  })
-
-  it('never renders the historical examples themselves', async () => {
-    vi.mocked(api.runAgent).mockResolvedValue({
-      run_id: 'run-draft',
-      status: 'COMPLETED',
-      answer: 'Parking is shared.',
-      trace: [
-        {
-          tool: 'get_guest_conversation',
-          arguments: {},
-          result: {
-            historical_examples: {
-              examples: [
-                {
-                  guest_example: 'SECRET PAST GUEST QUESTION',
-                  owner_example: 'SECRET PAST OWNER REPLY',
-                },
-              ],
-            },
-          },
-        },
-      ],
-      approval_required: null,
-    })
-
-    const { container } = renderConversation()
-
-    const user = userEvent.setup()
-
-    await screen.findByText('Is there parking at the house?')
-    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
-
-    await screen.findByText(/Draft informed by 1 similar past reply/)
-
-    // Another guest's conversation must not appear while writing to this one.
-    expect(container.textContent).not.toContain('SECRET PAST GUEST QUESTION')
-    expect(container.textContent).not.toContain('SECRET PAST OWNER REPLY')
   })
 })

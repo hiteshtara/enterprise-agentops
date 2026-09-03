@@ -6,6 +6,8 @@ import type {
   AgentResponse,
   ConversationDetail,
   CurrentUser,
+  DraftSummary,
+  InboxRefreshResult,
   InboxPage,
   KnowledgeCreate,
   KnowledgeItem,
@@ -193,5 +195,30 @@ export function supersedeKnowledge(
   return request<KnowledgeItem>(`/knowledge/${knowledgeRef}/supersede`, {
     method: 'POST',
     body: JSON.stringify(replacement),
+  })
+}
+
+/** Prepares replies for conversations that need one. Sends nothing. */
+export function refreshInbox(limit?: number): Promise<InboxRefreshResult> {
+  return request<InboxRefreshResult>(`/inbox/refresh${query({ limit })}`, {
+    method: 'POST',
+  })
+}
+
+/** Saves the operator's wording. Editing never sends. */
+export function editDraft(
+  conversationRef: string,
+  edit: { subject?: string; message?: string },
+): Promise<DraftSummary> {
+  return request<DraftSummary>(`/inbox/${conversationRef}/draft`, {
+    method: 'PATCH',
+    body: JSON.stringify(edit),
+  })
+}
+
+/** Redoes the work for the conversation as it stands now. */
+export function regenerateDraft(conversationRef: string): Promise<DraftSummary> {
+  return request<DraftSummary>(`/inbox/${conversationRef}/draft/regenerate`, {
+    method: 'POST',
   })
 }

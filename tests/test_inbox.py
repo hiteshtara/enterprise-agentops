@@ -120,6 +120,7 @@ def test_summary_exposes_only_the_agreed_fields():
 
     assert set(row) == {
         "conversation_ref",
+        "fingerprint",
         "property_slug",
         "property_name",
         "source",
@@ -869,3 +870,190 @@ def test_a_conversation_on_a_deep_page_is_still_discovered():
     rows = activity_fake(entries).inbox().list_conversations(limit=5)
 
     assert refs(rows)[0] == conversation_ref_for(9001)
+
+
+# -- 14. enrichment of conversations the Inbox does not enumerate ----------
+#
+# A Historic conversation is not in the Current+Upcoming scan, so supplying a
+# live excerpt for one means resolving it against the whole archive. Resolving
+# each independently would re-page the archive per row -- roughly 11 booking
+# calls each -- which is how the 429 happened. One scan serves them all.
+
+
+def test_summarise_refs_returns_safe_summaries():
+    fake = activity_fake(
+        [
+            (1001, "thread-a", "2026-09-03T12:06:33", "Renter"),
+            (1002, "thread-b", "2026-08-01T09:00:00", "Owner"),
+        ]
+    )
+
+    found = fake.inbox().summarise_refs({conversation_ref_for(1001)})
+
+    assert set(found) == {conversation_ref_for(1001)}
+    assert found[conversation_ref_for(1001)]["last_message_at"] == (
+        "2026-09-03T12:06:33"
+    )
+    # Provider identifiers never cross this seam.
+    assert "thread_uid" not in json.dumps(found)
+    assert "booking_id" not in json.dumps(found)
+
+
+def test_summarise_refs_pages_the_archive_once_for_many_refs():
+    """The regression guard for the rate limit. Asserts request count, not time."""
+    entries = filler(BOOKING_SCAN_SIZE + 40) + [
+        (9001, "thread-x", "2026-09-03T10:00:00", "Renter"),
+        (9002, "thread-y", "2026-09-03T11:00:00", "Renter"),
+        (9003, "thread-z", "2026-09-03T12:00:00", "Renter"),
+    ]
+
+    fake = activity_fake(entries)
+
+    refs = {
+        conversation_ref_for(9001),
+        conversation_ref_for(9002),
+        conversation_ref_for(9003),
+    }
+
+    found = fake.inbox().summarise_refs(refs)
+
+    assert set(found) == refs
+    # Two pages, scanned once in total -- not once per requested ref.
+    assert len(fake.booking_reads) == 2
+    # One thread read per requested ref, and no more.
+    assert len(fake.thread_reads) == 3
+
+
+def test_summarise_refs_omits_a_ref_that_resolves_to_nothing():
+    fake = activity_fake([(1001, "thread-a", "2026-09-03T12:06:33", "Renter")])
+
+    found = fake.inbox().summarise_refs({conversation_ref_for(9999)})
+
+    assert found == {}
+
+
+def test_summarise_refs_reads_nothing_when_asked_for_nothing():
+    fake = activity_fake([(1001, "thread-a", "2026-09-03T12:06:33", "Renter")])
+
+    assert fake.inbox().summarise_refs(set()) == {}
+    assert fake.requests == []
+
+
+# -- 15. failure is absence, not a placeholder ------------------------------
+#
+# `summarise` fails closed to an UNKNOWN placeholder, which is right for the
+# live listing: an unreadable thread is not "responded" and not "needs
+# attention". But that placeholder is indistinguishable from a real read of an
+# empty thread, and `summarise_refs` feeds the activity index -- so returning
+# it there would write nulls over a webhook-recorded timestamp that the live
+# scan can never rediscover. Absence is the only honest answer.
+
+
+def unreadable_thread_fake(entries, failures):
+    fake = activity_fake(entries)
+    fake.thread_failures = failures
+
+    return fake
+
+
+def test_summarise_refs_omits_a_ref_whose_thread_cannot_be_read():
+    """A 429 must not be reported as a conversation with no messages."""
+    fake = unreadable_thread_fake(
+        [(9001, "thread-x", "2026-09-03T12:06:33", "Renter")],
+        {"thread-x": 429},
+    )
+
+    found = fake.inbox().summarise_refs({conversation_ref_for(9001)})
+
+    assert found == {}
+
+
+def test_summarise_refs_omits_a_ref_whose_thread_read_times_out():
+    fake = unreadable_thread_fake(
+        [(9001, "thread-x", "2026-09-03T12:06:33", "Renter")],
+        {"thread-x": httpx.ReadTimeout("scripted timeout")},
+    )
+
+    found = fake.inbox().summarise_refs({conversation_ref_for(9001)})
+
+    assert found == {}
+
+
+def test_summarise_refs_includes_a_genuinely_empty_thread():
+    """An empty successful read is an observation, not a failure.
+
+    Its fields are identical to the fail-closed placeholder, so presence is
+    the only thing that can tell the two apart -- which is why the contract is
+    about presence and never about `last_message_at is None`.
+    """
+    fake = FakeLodgify(
+        bookings=[booking(9001, "thread-empty")],
+        threads={"thread-empty": thread("thread-empty", [])},
+    )
+
+    found = fake.inbox().summarise_refs({conversation_ref_for(9001)})
+
+    assert set(found) == {conversation_ref_for(9001)}
+
+    summary = found[conversation_ref_for(9001)]
+
+    assert summary["last_message_at"] is None
+    assert summary["message_count"] == 0
+    assert summary["status"] == ConversationStatus.UNKNOWN.value
+
+
+def test_one_unreadable_ref_does_not_hide_the_readable_ones():
+    fake = unreadable_thread_fake(
+        [
+            (9001, "thread-x", "2026-09-03T10:00:00", "Renter"),
+            (9002, "thread-y", "2026-09-03T11:00:00", "Renter"),
+        ],
+        {"thread-x": 503},
+    )
+
+    found = fake.inbox().summarise_refs(
+        {conversation_ref_for(9001), conversation_ref_for(9002)}
+    )
+
+    assert set(found) == {conversation_ref_for(9002)}
+    assert found[conversation_ref_for(9002)]["last_message_at"] == (
+        "2026-09-03T11:00:00"
+    )
+
+
+def test_summarise_refs_still_pages_the_archive_once_when_a_read_fails():
+    """The rate-limit guard must survive the failure path too."""
+    entries = filler(BOOKING_SCAN_SIZE + 40) + [
+        (9001, "thread-x", "2026-09-03T10:00:00", "Renter"),
+        (9002, "thread-y", "2026-09-03T11:00:00", "Renter"),
+    ]
+
+    fake = unreadable_thread_fake(entries, {"thread-x": 429})
+
+    fake.inbox().summarise_refs(
+        {conversation_ref_for(9001), conversation_ref_for(9002)}
+    )
+
+    assert len(fake.booking_reads) == 2
+
+
+def test_the_live_listing_still_fails_closed_to_an_unknown_placeholder():
+    """Unchanged behaviour: `list_conversations` never drops a row.
+
+    The live path enumerates Current+Upcoming, so a row it cannot read is one
+    a later poll will read again. Dropping it there would make the Inbox flap;
+    dropping it in `summarise_refs` is what protects the index.
+    """
+    fake = unreadable_thread_fake(
+        [(9001, "thread-x", "2026-09-03T12:06:33", "Renter")],
+        {"thread-x": 429},
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows) == [conversation_ref_for(9001)]
+    assert rows[0]["status"] == ConversationStatus.UNKNOWN.value
+    assert rows[0]["last_message_at"] is None
+    assert rows[0]["last_message_sender"] is None
+    assert rows[0]["message_count"] == 0
+    assert rows[0]["last_message_excerpt"] is None

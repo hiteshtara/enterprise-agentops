@@ -458,3 +458,46 @@ class HistoricalReplyStore:
     def count(self) -> int:
         with self.database.session() as session:
             return len(session.scalars(select(HistoricalReplyExampleRecord.id)).all())
+
+
+def index_one_conversation(
+    inbox: Any,
+    store: "HistoricalReplyStore",
+    conversation_ref: str,
+) -> tuple[int, int]:
+    """Fold one conversation into the historical index. Returns (created, updated).
+
+    The targeted learning path: after a reply is *confirmed* sent, that
+    exchange is now a real example of how this owner answers, so it becomes
+    available as precedent. One thread read, no scheduler, no periodic scan.
+
+    Deliberately narrow about when it runs. A reply that failed, or whose
+    delivery is unknown, is not an example of anything -- and indexing an
+    unconfirmed send would teach the model from a message that may never have
+    arrived.
+
+    It stops at the historical index. Nothing here distils knowledge, approves
+    anything, or sends: an example becomes a *proposed* rule only through the
+    explicit distillation command and a human review.
+    """
+    booking = inbox.find_booking(
+        lambda candidate: candidate.conversation_ref == conversation_ref
+    )
+
+    if booking is None:
+        return 0, 0
+
+    thread = inbox.thread_for_indexing(booking.thread_uid)
+
+    exchanges = extract_exchanges(
+        [message.to_dict() for message in thread.messages],
+        property_slug=booking.property_slug,
+        source=booking.source,
+        # The guest's own name and email, removed from message bodies by value.
+        # Neither is persisted.
+        identities=thread.identities,
+    )
+
+    # The same fingerprint the full rebuild uses, so a conversation indexed here
+    # and later re-indexed by the full command produces no duplicates.
+    return store.upsert(exchanges)

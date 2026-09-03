@@ -250,6 +250,8 @@ export interface ConversationMessage {
 
 export interface ConversationSummary {
   conversation_ref: string
+  fingerprint: string | null
+  draft: DraftSummary | null
   property_slug: string | null
   property_name: string | null
   source: string | null
@@ -258,6 +260,7 @@ export interface ConversationSummary {
   last_message_at: string | null
   last_message_sender: MessageSender | null
   last_message_excerpt: string | null
+  preview_unavailable: boolean
   message_count: number
 }
 
@@ -268,6 +271,8 @@ export interface InboxPage {
 
 export interface ConversationDetail {
   conversation_ref: string
+  fingerprint: string | null
+  draft: DraftSummary | null
   property_slug: string | null
   property_name: string | null
   source: string | null
@@ -342,4 +347,44 @@ export interface KnowledgeCreate {
   title: string
   content: string
   audience: KnowledgeAudience
+}
+
+export type DraftStatus =
+  | 'DRAFT_READY'
+  | 'EDITED'
+  | 'NO_REPLY_NEEDED'
+  | 'NEEDS_HUMAN_REVIEW'
+  | 'STALE'
+  | 'SENT'
+  | 'DISCARDED'
+
+/**
+ * A prepared reply, or the recorded decision not to prepare one.
+ *
+ * `status` is the effective status: a sendable draft whose conversation has
+ * moved on reads STALE here even though `stored_status` does not say so.
+ */
+export interface DraftSummary {
+  draft_ref: string
+  conversation_ref: string
+  property_slug: string | null
+  status: DraftStatus
+  stored_status: DraftStatus
+  is_current: boolean
+  subject: string | null
+  message: string | null
+  detail: string | null
+  source_run_id: string | null
+  created_at: string
+  updated_at: string
+  edited_at: string | null
+  sent_at: string | null
+}
+
+export interface InboxRefreshResult {
+  processed: number
+  drafted: number
+  skipped: number
+  no_reply: number
+  failed: number
 }

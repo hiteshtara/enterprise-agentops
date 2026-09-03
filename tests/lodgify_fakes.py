@@ -36,6 +36,9 @@ def booking(
     property_id: int = ROSLINDALE_ID,
     source: str = "BookingCom",
     status: str = "Booked",
+    arrival: str = "2026-11-25",
+    departure: str = "2026-11-29",
+    canceled_at: str | None = None,
 ) -> dict[str, Any]:
     """A booking row shaped like the real one, PII included so it can be
     asserted absent from everything downstream."""
@@ -54,8 +57,9 @@ def booking(
             }
         ),
         "status": status,
-        "arrival": "2026-11-25",
-        "departure": "2026-11-29",
+        "arrival": arrival,
+        "departure": departure,
+        "canceled_at": canceled_at,
         "guest": {
             "name": "Fixture Guest",
             "email": "fixture.guest@example.invalid",
@@ -132,6 +136,7 @@ class FakeLodgify:
         post_raises: Exception | None = None,
         bookings_status: int = 200,
         thread_status: int = 200,
+        thread_failures: dict[str, int | Exception] | None = None,
     ) -> None:
         self.bookings = bookings if bookings is not None else []
         self.threads = threads or {}
@@ -140,6 +145,10 @@ class FakeLodgify:
         self.post_raises = post_raises
         self.bookings_status = bookings_status
         self.thread_status = thread_status
+        # Per-thread failure, so a test can break one read without breaking
+        # every read. An int is answered as that status; an exception is raised
+        # from the transport, which is how a timeout is reproduced.
+        self.thread_failures = thread_failures or {}
 
         self.requests: list[httpx.Request] = []
 
@@ -195,10 +204,18 @@ class FakeLodgify:
             )
 
         if path.startswith("/v2/messaging/"):
+            uid = path.rsplit("/", 1)[-1]
+
+            failure = self.thread_failures.get(uid)
+
+            if failure is not None:
+                if isinstance(failure, Exception):
+                    raise failure
+
+                return httpx.Response(failure, json={})
+
             if self.thread_status != 200:
                 return httpx.Response(self.thread_status, json={})
-
-            uid = path.rsplit("/", 1)[-1]
 
             queue = self.thread_sequence.get(uid)
 

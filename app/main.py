@@ -1,7 +1,15 @@
 import logging
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent import AgentService
@@ -26,11 +34,23 @@ from app.connectors.lodgify.errors import (
 )
 from app.connectors.lodgify.inbox import LodgifyInbox
 from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
+from app.connectors.lodgify.messaging_models import (
+    SendStatus,
+    conversation_fingerprint,
+)
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
 from app.connectors.lodgify.tools import LodgifyTools
+from app.conversation_activity import ConversationActivityStore
+from app.conversation_refresh import ConversationRefreshService
 from app.database import Database
-from app.historical_replies import HistoricalReplyStore
+from app.drafts import (
+    SENDABLE_STATUSES,
+    DraftStatus,
+    DraftStore,
+)
+from app.historical_replies import HistoricalReplyStore, index_one_conversation
 from app.identity import PermissionDenied, User
+from app.inbox_view import build_inbox
 from app.knowledge import KnowledgeStatus, KnowledgeStore
 from app.knowledge_conflicts import find_conflicts
 from app.knowledge_topics import GUEST_FACING, INTERNAL_OPERATION
@@ -46,8 +66,11 @@ from app.models import (
     AuditEvent,
     ConversationDetail,
     CurrentUser,
+    DraftEdit,
+    DraftSummary,
     GuestReplyRequest,
     InboxPage,
+    InboxRefreshResult,
     KnowledgeConflictSummary,
     KnowledgeCreate,
     KnowledgeEdit,
@@ -156,6 +179,13 @@ knowledge_store = KnowledgeStore(database=database)
 # or repeated event costs nothing.
 webhook_log = WebhookLog()
 
+# Prepared replies, and the one service that prepares them. Both the webhook
+# fast path and the Inbox poll converge here, so there is a single idea of what
+# processing a conversation means.
+draft_store = DraftStore(database=database)
+
+activity_store = ConversationActivityStore(database=database)
+
 tool_registry = build_tool_registry(
     migration_store=migration_store,
     lodgify=lodgify_tools,
@@ -193,6 +223,16 @@ agent = AgentService(
     run_store=run_store,
     model_executions=model_execution_store,
     tool_executions=tool_execution_store,
+)
+
+conversation_refresh = (
+    ConversationRefreshService(
+        inbox=lodgify_inbox,
+        drafts=draft_store,
+        agent=agent,
+    )
+    if lodgify_inbox is not None
+    else None
 )
 
 
@@ -298,7 +338,70 @@ def resolve_approval(
             detail=str(exc),
         ) from exc
 
+    # A confirmed send is the one moment two things become true: the prepared
+    # reply is spent, and the exchange is now a real example of how this owner
+    # answers. Neither happens for a failed or uncertain send -- indexing an
+    # unconfirmed message would teach from something that may never have
+    # arrived, and marking it sent would hide that a person still needs to look.
+    if decision.approved:
+        settle_confirmed_send(pending.tool, result)
+
     return ApprovalResponse(**result)
+
+
+def settle_confirmed_send(tool: str, result: dict[str, Any]) -> None:
+    """After a CONFIRMED_SENT guest reply: retire the draft, learn the exchange.
+
+    Best effort by design. Both steps are bookkeeping after an irreversible
+    action that already succeeded, so a failure here must never turn a
+    successful send into an error for the caller.
+    """
+    if tool != SEND_GUEST_REPLY_TOOL:
+        return
+
+    outcome = result.get("result")
+
+    if not isinstance(outcome, dict):
+        return
+
+    if outcome.get("status") != SendStatus.CONFIRMED_SENT.value:
+        return
+
+    conversation_ref = outcome.get("conversation_ref")
+
+    if not conversation_ref:
+        return
+
+    draft = draft_store.current_for(conversation_ref)
+
+    if draft is not None and draft.status in SENDABLE_STATUSES:
+        try:
+            draft_store.mark_sent(draft.draft_ref)
+
+        except ValueError:
+            logger.warning("could not mark draft sent for %s", conversation_ref)
+
+    if lodgify_inbox is None:
+        return
+
+    try:
+        # The targeted learning path: one thread read, sanitized through the
+        # existing pipeline, fingerprinted so a later full rebuild finds no
+        # duplicate. It stops at the historical index -- nothing distils
+        # knowledge or approves anything.
+        created, updated = index_one_conversation(
+            lodgify_inbox, historical_replies, conversation_ref
+        )
+
+        logger.info(
+            "indexed sent exchange for %s: %d new, %d refreshed",
+            conversation_ref,
+            created,
+            updated,
+        )
+
+    except Exception:  # noqa: BLE001 -- learning must never break a send
+        logger.warning("post-send indexing failed for %s", conversation_ref)
 
 
 SEND_GUEST_REPLY_TOOL = "send_guest_reply"
@@ -334,7 +437,9 @@ def get_inbox(
     inbox = require_inbox()
 
     try:
-        conversations = inbox.list_conversations(
+        conversations = build_inbox(
+            inbox,
+            activity_store,
             property_slug=property_slug,
             limit=limit,
         )
@@ -354,6 +459,18 @@ def get_inbox(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Conversations could not be loaded from the provider.",
         ) from exc
+
+    prepared = draft_store.latest_by_conversation()
+
+    for row in conversations:
+        draft = prepared.get(row["conversation_ref"])
+
+        # Staleness is decided here, against the fingerprint just read from the
+        # provider -- so a draft written for an older state can never be shown
+        # as ready.
+        row["draft"] = (
+            draft.to_dict(row.get("fingerprint")) if draft is not None else None
+        )
 
     return InboxPage(conversations=conversations, count=len(conversations))
 
@@ -386,7 +503,186 @@ def get_conversation(
             detail="The conversation could not be loaded from the provider.",
         ) from exc
 
-    return ConversationDetail(**conversation)
+    fingerprint = conversation_fingerprint(conversation.get("messages"))
+
+    draft = draft_store.current_for(conversation_ref)
+
+    return ConversationDetail(
+        **conversation,
+        fingerprint=fingerprint,
+        draft=(
+            DraftSummary(**draft.to_dict(fingerprint)) if draft is not None else None
+        ),
+    )
+
+
+MAX_REFRESH_PER_POLL = 5
+
+
+def require_refresh() -> ConversationRefreshService:
+    if conversation_refresh is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=INBOX_UNAVAILABLE,
+        )
+
+    return conversation_refresh
+
+
+@app.post(
+    "/inbox/refresh",
+    response_model=InboxRefreshResult,
+)
+def refresh_inbox(
+    user: User = Depends(require_run_agent),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> InboxRefreshResult:
+    """Prepare replies for conversations that need one.
+
+    The recovery path. The console calls this on a slow cadence while the Inbox
+    is open, and it calls the same service the webhook does -- so a webhook that
+    never arrived, or whose background task died with the process, is picked up
+    here instead.
+
+    Bounded per call: a burst of new conversations should cost a predictable
+    number of model calls, not all of them at once. The rest arrive on the next
+    poll.
+    """
+    service = require_refresh()
+    inbox = require_inbox()
+
+    try:
+        conversations = inbox.list_conversations(limit=limit)
+
+    except LodgifyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Conversations could not be loaded from the provider.",
+        ) from exc
+
+    processed = drafted = skipped = no_reply = failed = 0
+
+    for row in conversations:
+        ref = row["conversation_ref"]
+
+        existing = draft_store.for_state(ref, row.get("fingerprint") or "")
+
+        if existing is not None and existing.is_settled():
+            # Nothing has changed since this was worked out. No model call.
+            skipped += 1
+            continue
+
+        if processed >= MAX_REFRESH_PER_POLL:
+            break
+
+        processed += 1
+
+        result = service.process(ref, actor_user_id=user.user_id)
+
+        if result.status == DraftStatus.DRAFT_READY.value:
+            drafted += 1
+
+        elif result.status == DraftStatus.NO_REPLY_NEEDED.value:
+            no_reply += 1
+
+        elif result.status == DraftStatus.NEEDS_HUMAN_REVIEW.value:
+            failed += 1
+
+        elif result.skipped:
+            skipped += 1
+
+    return InboxRefreshResult(
+        processed=processed,
+        drafted=drafted,
+        skipped=skipped,
+        no_reply=no_reply,
+        failed=failed,
+    )
+
+
+@app.get(
+    "/inbox/{conversation_ref}/draft",
+    response_model=DraftSummary,
+)
+def get_draft(
+    conversation_ref: str,
+    user: User = Depends(require_view_runs),
+) -> DraftSummary:
+    draft = draft_store.current_for(conversation_ref)
+
+    if draft is None:
+        raise HTTPException(status_code=404, detail="No prepared reply yet.")
+
+    return DraftSummary(**draft.to_dict(current_fingerprint_for(conversation_ref)))
+
+
+@app.patch(
+    "/inbox/{conversation_ref}/draft",
+    response_model=DraftSummary,
+)
+def edit_draft(
+    conversation_ref: str,
+    edit: DraftEdit,
+    user: User = Depends(require_run_agent),
+) -> DraftSummary:
+    """Keep the operator's wording. Editing does not send."""
+    draft = draft_store.current_for(conversation_ref)
+
+    if draft is None:
+        raise HTTPException(status_code=404, detail="No prepared reply yet.")
+
+    try:
+        updated = draft_store.edit(
+            draft.draft_ref, subject=edit.subject, message=edit.message
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return DraftSummary(**updated.to_dict(current_fingerprint_for(conversation_ref)))
+
+
+@app.post(
+    "/inbox/{conversation_ref}/draft/regenerate",
+    response_model=DraftSummary,
+)
+def regenerate_draft(
+    conversation_ref: str,
+    user: User = Depends(require_run_agent),
+) -> DraftSummary:
+    """Redo the work for the conversation as it stands now.
+
+    The manual override, and the only path that sets `force` -- nothing
+    automatic ever replaces a settled outcome.
+    """
+    service = require_refresh()
+
+    service.process(conversation_ref, force=True, actor_user_id=user.user_id)
+
+    draft = draft_store.current_for(conversation_ref)
+
+    if draft is None:
+        raise HTTPException(status_code=404, detail="No prepared reply yet.")
+
+    return DraftSummary(**draft.to_dict(current_fingerprint_for(conversation_ref)))
+
+
+def current_fingerprint_for(conversation_ref: str) -> str | None:
+    """The live conversation's fingerprint, or None if it cannot be read.
+
+    None means "cannot judge", and `status_for` treats that as current rather
+    than stale -- a provider hiccup should not make a good draft look dangerous.
+    """
+    if lodgify_inbox is None:
+        return None
+
+    try:
+        conversation = lodgify_inbox.get_conversation(conversation_ref)
+
+    except (LodgifyUnavailable, ValueError):
+        return None
+
+    return conversation_fingerprint(conversation.get("messages"))
 
 
 @app.post(
@@ -675,7 +971,10 @@ def edit_knowledge(
 
 
 @app.post("/webhooks/lodgify")
-async def receive_lodgify_webhook(request: Request) -> dict[str, Any]:
+async def receive_lodgify_webhook(
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
     """Receive one Lodgify event.
 
     Not model-facing and not bearer-authenticated: Lodgify calls this, and the
@@ -734,8 +1033,58 @@ async def receive_lodgify_webhook(request: Request) -> dict[str, Any]:
 
     webhook_log.record(receipt)
 
+    # The fast path: acknowledge now, prepare the reply after responding, so
+    # Lodgify never waits on a model call.
+    #
+    # BackgroundTasks is a local-V1 latency optimisation, NOT durable job
+    # infrastructure. If this process dies between the 200 and the refresh, that
+    # work is simply lost -- and correctness does not depend on it, because the
+    # Inbox poll calls the very same service and will pick the conversation up
+    # within its normal interval. The webhook makes drafting fast; polling makes
+    # it certain.
+    if receipt.resolved and receipt.conversation_ref and conversation_refresh:
+        background.add_task(refresh_conversation_safely, receipt.conversation_ref)
+
     # Only the safe projection is returned, and never the payload.
     return {"received": True, **receipt.to_dict()}
+
+
+def refresh_conversation_safely(conversation_ref: str) -> None:
+    """Run a refresh outside the request, swallowing nothing silently.
+
+    A background task has no caller to raise to, so a failure here would vanish.
+    It is logged, and the conversation stays unprocessed until the next poll --
+    which is exactly the recovery path this design relies on.
+    """
+    if conversation_refresh is None:
+        return
+
+    try:
+        conversation_refresh.process(conversation_ref)
+
+        # The webhook is why a Historic conversation is listable at all: the
+        # Inbox scan will never enumerate it, so what we learned here is the
+        # only record that it moved.
+        if lodgify_inbox is not None:
+            summary = lodgify_inbox.summarise_refs({conversation_ref}).get(
+                conversation_ref
+            )
+
+            if summary is not None:
+                activity_store.upsert(
+                    conversation_ref=summary["conversation_ref"],
+                    conversation_fingerprint=summary.get("fingerprint") or "",
+                    status=summary["status"],
+                    last_message_at=summary.get("last_message_at"),
+                    last_message_sender=summary.get("last_message_sender"),
+                    message_count=summary.get("message_count") or 0,
+                    property_slug=summary.get("property_slug"),
+                    source=summary.get("source"),
+                    booking_status=summary.get("booking_status"),
+                )
+
+    except Exception:
+        logger.exception("background refresh failed for %s", conversation_ref)
 
 
 @app.get("/webhooks/lodgify/recent")

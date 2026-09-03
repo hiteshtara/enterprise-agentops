@@ -1,5 +1,6 @@
 import type {
   AgentResponse,
+  DraftSummary,
   KnowledgeConflict,
   KnowledgeItem,
   KnowledgePage,
@@ -447,6 +448,64 @@ export const unknownRunMetrics: RunMetrics = {
 
 export const CONVERSATION_REF = 'PH-AAAAAAAA'
 
+function draft(overrides: Partial<DraftSummary> = {}): DraftSummary {
+  return {
+    draft_ref: 'dr-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    conversation_ref: CONVERSATION_REF,
+    property_slug: 'renovated-2nd-floor-home',
+    status: 'DRAFT_READY',
+    stored_status: 'DRAFT_READY',
+    is_current: true,
+    subject: 'Re: your message',
+    message: 'Parking is shared out front, and there is no extra charge.',
+    detail: null,
+    source_run_id: 'run-draft-1',
+    created_at: '2026-09-03T09:00:00',
+    updated_at: '2026-09-03T09:00:00',
+    edited_at: null,
+    sent_at: null,
+    ...overrides,
+  }
+}
+
+export const readyDraft = draft()
+
+export const noReplyDraft = draft({
+  conversation_ref: 'PH-BBBBBBBB',
+  status: 'NO_REPLY_NEEDED',
+  stored_status: 'NO_REPLY_NEEDED',
+  subject: null,
+  message: null,
+  detail: 'The guest closed the conversation, so no reply was prepared.',
+})
+
+export const staleDraft = draft({
+  status: 'STALE',
+  stored_status: 'DRAFT_READY',
+  is_current: false,
+})
+
+export const reviewDraft = draft({
+  status: 'NEEDS_HUMAN_REVIEW',
+  stored_status: 'NEEDS_HUMAN_REVIEW',
+  subject: null,
+  message: null,
+  detail: 'A reply could not be prepared automatically. Use Regenerate.',
+})
+
+export const sentDraft = draft({
+  status: 'SENT',
+  stored_status: 'SENT',
+  sent_at: '2026-09-03T10:00:00',
+})
+
+export const editedDraft = draft({
+  status: 'EDITED',
+  stored_status: 'EDITED',
+  message: 'My own wording for this guest.',
+  edited_at: '2026-09-03T09:30:00',
+})
+
 export const inboxPage: InboxPage = {
   count: 2,
   conversations: [
@@ -460,7 +519,10 @@ export const inboxPage: InboxPage = {
       last_message_at: '2026-09-02T17:39:40',
       last_message_sender: 'Renter',
       last_message_excerpt: 'Is there parking at the house?',
+      preview_unavailable: false,
       message_count: 2,
+      fingerprint: 'fp-needs-reply',
+      draft: readyDraft,
     },
     {
       conversation_ref: 'PH-BBBBBBBB',
@@ -472,7 +534,10 @@ export const inboxPage: InboxPage = {
       last_message_at: '2026-09-01T11:00:00',
       last_message_sender: 'Owner',
       last_message_excerpt: 'Parking is shared and there is no extra charge.',
+      preview_unavailable: false,
       message_count: 3,
+      fingerprint: 'fp-responded',
+      draft: noReplyDraft,
     },
   ],
 }
@@ -486,6 +551,8 @@ export const conversationDetail: ConversationDetail = {
   subject: 'Booking enquiry',
   is_read: true,
   status: 'needs_attention',
+  fingerprint: 'fp-needs-reply',
+  draft: readyDraft,
   messages: [
     {
       message_ref: 'm-aaaa',

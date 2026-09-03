@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { InboxPage } from './InboxPage'
 import { renderWithRouter } from '../test/render'
 import * as api from '../api/agentguard'
-import { inboxPage } from '../test/factories'
+import { inboxPage, reviewDraft, sentDraft, staleDraft } from '../test/factories'
 
 vi.mock('../api/agentguard')
 
@@ -113,5 +113,135 @@ describe('InboxPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Something went wrong loading this view.',
     )
+  })
+
+  it('shows a neutral notice when a remembered conversation has no preview', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue({
+      count: 1,
+      conversations: [
+        {
+          ...inboxPage.conversations[0],
+          conversation_ref: 'PH-HISTORIC1',
+          last_message_excerpt: null,
+          preview_unavailable: true,
+        },
+      ],
+    })
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Preview unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('No messages could be read.')).not.toBeInTheDocument()
+  })
+
+  it('still distinguishes an unreadable live thread', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue({
+      count: 1,
+      conversations: [
+        {
+          ...inboxPage.conversations[0],
+          last_message_excerpt: null,
+          preview_unavailable: false,
+        },
+      ],
+    })
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('No messages could be read.')).toBeInTheDocument()
+    expect(screen.queryByText('Preview unavailable')).not.toBeInTheDocument()
+  })
+})
+
+describe('prepared replies in the Inbox', () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+  })
+
+  afterEach(() => vi.useRealTimers())
+
+  function withDraft(draft: (typeof inboxPage)['conversations'][number]['draft']) {
+    vi.mocked(api.getInbox).mockResolvedValue({
+      count: 1,
+      conversations: [{ ...inboxPage.conversations[0], draft }],
+    })
+  }
+
+  it('badges a conversation that already has a reply waiting', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue(inboxPage)
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Draft ready')).toBeInTheDocument()
+    expect(screen.getByText('No reply needed')).toBeInTheDocument()
+  })
+
+  it('previews the prepared reply so the owner can triage without opening it', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue(inboxPage)
+
+    renderWithRouter(<InboxPage />)
+
+    expect(
+      await screen.findByText(/Parking is shared out front, and there is no extra/),
+    ).toBeInTheDocument()
+  })
+
+  it('marks a draft the conversation has moved past as stale', async () => {
+    withDraft(staleDraft)
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Draft stale')).toBeInTheDocument()
+
+    // A stale draft is never previewed as if it were ready to send.
+    expect(screen.queryByText(/Prepared reply/)).not.toBeInTheDocument()
+  })
+
+  it('surfaces a failed preparation rather than hiding it', async () => {
+    withDraft(reviewDraft)
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Needs human review')).toBeInTheDocument()
+  })
+
+  it('shows a sent conversation as sent', async () => {
+    withDraft(sentDraft)
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Sent')).toBeInTheDocument()
+  })
+
+  it('shows no draft badge when nothing has been prepared', async () => {
+    withDraft(null)
+
+    renderWithRouter(<InboxPage />)
+
+    await screen.findByText('Needs attention')
+
+    expect(screen.queryByText('Draft ready')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Prepared reply/)).not.toBeInTheDocument()
+  })
+
+  it('asks the backend to bring prepared replies up to date', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue(inboxPage)
+
+    renderWithRouter(<InboxPage />)
+
+    // Polling is the recovery path for a webhook that never arrived, so it must
+    // happen without the operator pressing anything.
+    await waitFor(() => expect(api.refreshInbox).toHaveBeenCalled())
+  })
+
+  it('still lists conversations when preparation fails', async () => {
+    vi.mocked(api.getInbox).mockResolvedValue(inboxPage)
+    vi.mocked(api.refreshInbox).mockRejectedValue(new Error('model unavailable'))
+
+    renderWithRouter(<InboxPage />)
+
+    expect(await screen.findByText('Renovated 2nd-Floor Home')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

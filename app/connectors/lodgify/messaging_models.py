@@ -64,6 +64,28 @@ class SendStatus(str, Enum):
     UNKNOWN_SEND_STATE = "unknown_send_state"
 
 
+def conversation_fingerprint(messages: Any) -> str:
+    """A deterministic identity for one conversation state.
+
+    Built from the sanitized message references in order, so any new message --
+    from the guest or from us -- yields a different fingerprint. That symmetry
+    matters: our own send has to change the fingerprint too, or a prepared reply
+    would survive its own delivery.
+
+    Deliberately not a timestamp: a thread re-read a second later must
+    fingerprint identically, or the cost control built on this is worthless.
+    Built from message refs, which are already opaque, so no provider identifier
+    is involved.
+    """
+    refs = [
+        message.get("message_ref", "")
+        for message in (messages or [])
+        if isinstance(message, dict)
+    ]
+
+    return hashlib.sha256("\x1f".join(refs).encode("utf-8")).hexdigest()[:32]
+
+
 def message_ref_for(message_id: object) -> str:
     """A stable, opaque reference for one message row.
 
@@ -146,10 +168,12 @@ class ConversationSummary:
     last_message_sender: str | None
     last_message_excerpt: str | None
     message_count: int
+    fingerprint: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "conversation_ref": self.conversation_ref,
+            "fingerprint": self.fingerprint,
             "property_slug": self.property_slug,
             "property_name": self.property_name,
             "source": self.source,
@@ -175,6 +199,10 @@ class Conversation:
     is_read: bool | None
     status: ConversationStatus
     messages: tuple[ConversationMessage, ...]
+    # About this guest's own reservation, derived from authoritative booking
+    # state rather than from anything said in the thread. `None` means the
+    # booking state could not be established -- never "not cancelled".
+    booking_cancelled: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,6 +211,7 @@ class Conversation:
             "property_name": self.property_name,
             "source": self.source,
             "booking_status": self.booking_status,
+            "booking_cancelled": self.booking_cancelled,
             "subject": self.subject,
             "is_read": self.is_read,
             "status": self.status.value,

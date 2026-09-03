@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from alembic import command
 from app.approval_store import ApprovalStore
@@ -350,3 +350,76 @@ def test_upgrading_a_populated_baseline_database_preserves_data(tmp_path):
             assert session.execute(text(f"select count(*) from {table}")).scalar() == 0
 
     database.dispose()
+
+
+# -- conversation activity index --------------------------------------------
+
+
+def test_conversation_activity_table_exists(migrated):
+    assert "conversation_activity" in inspect(migrated.engine).get_table_names()
+
+
+def test_conversation_activity_stores_no_guest_text_or_provider_ids(migrated):
+    """The absence of these columns is the safety property, not a convention."""
+    columns = {
+        column["name"]
+        for column in inspect(migrated.engine).get_columns("conversation_activity")
+    }
+
+    forbidden = {
+        "booking_id",
+        "thread_uid",
+        "guest_name",
+        "guest_email",
+        "guest_phone",
+        "phone",
+        "email",
+        "last_message_excerpt",
+        "excerpt",
+        "message",
+        "message_body",
+        "payload",
+    }
+
+    assert columns & forbidden == set()
+
+
+def test_conversation_activity_has_exactly_the_agreed_columns(migrated):
+    columns = {
+        column["name"]
+        for column in inspect(migrated.engine).get_columns("conversation_activity")
+    }
+
+    assert columns == {
+        "id",
+        "conversation_ref",
+        "property_slug",
+        "source",
+        "booking_status",
+        "last_message_at",
+        "last_message_sender",
+        "message_count",
+        "conversation_fingerprint",
+        "status",
+        "first_seen_at",
+        "last_refreshed_at",
+    }
+
+
+def test_conversation_ref_is_unique_in_the_activity_index(migrated):
+    """One conversation is one row; upsert depends on this."""
+    indexes = inspect(migrated.engine).get_indexes("conversation_activity")
+
+    assert any(
+        index["column_names"] == ["conversation_ref"] and index["unique"]
+        for index in indexes
+    )
+
+
+def test_migrations_seed_no_activity_rows(migrated):
+    with migrated.session() as session:
+        count = session.execute(
+            text("SELECT COUNT(*) FROM conversation_activity")
+        ).scalar()
+
+    assert count == 0

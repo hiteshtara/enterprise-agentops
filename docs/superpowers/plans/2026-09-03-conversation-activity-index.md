@@ -941,7 +941,9 @@ def build_inbox(
     for row in live:
         _remember(activity_store, row)
 
-    by_ref = {row["conversation_ref"]: dict(row, preview_unavailable=False) for row in live}
+    by_ref = {
+        row["conversation_ref"]: dict(row, preview_unavailable=False) for row in live
+    }
 
     for activity in activity_store.all_activity():
         if activity.conversation_ref in by_ref:
@@ -1115,32 +1117,30 @@ Leave the surrounding `except (ValueError, TypeError)` / `LodgifyConfigurationEr
 In `refresh_conversation_safely`, after `conversation_refresh.process(conversation_ref)` succeeds, record activity so a Historic conversation becomes listable:
 
 ```python
-    try:
-        conversation_refresh.process(conversation_ref)
+try:
+    conversation_refresh.process(conversation_ref)
 
-        # The webhook is why a Historic conversation is listable at all: the
-        # Inbox scan will never enumerate it, so what we learned here is the
-        # only record that it moved.
-        if lodgify_inbox is not None:
-            summary = lodgify_inbox.summarise_refs({conversation_ref}).get(
-                conversation_ref
+    # The webhook is why a Historic conversation is listable at all: the
+    # Inbox scan will never enumerate it, so what we learned here is the
+    # only record that it moved.
+    if lodgify_inbox is not None:
+        summary = lodgify_inbox.summarise_refs({conversation_ref}).get(conversation_ref)
+
+        if summary is not None:
+            activity_store.upsert(
+                conversation_ref=summary["conversation_ref"],
+                conversation_fingerprint=summary.get("fingerprint") or "",
+                status=summary["status"],
+                last_message_at=summary.get("last_message_at"),
+                last_message_sender=summary.get("last_message_sender"),
+                message_count=summary.get("message_count") or 0,
+                property_slug=summary.get("property_slug"),
+                source=summary.get("source"),
+                booking_status=summary.get("booking_status"),
             )
 
-            if summary is not None:
-                activity_store.upsert(
-                    conversation_ref=summary["conversation_ref"],
-                    conversation_fingerprint=summary.get("fingerprint") or "",
-                    status=summary["status"],
-                    last_message_at=summary.get("last_message_at"),
-                    last_message_sender=summary.get("last_message_sender"),
-                    message_count=summary.get("message_count") or 0,
-                    property_slug=summary.get("property_slug"),
-                    source=summary.get("source"),
-                    booking_status=summary.get("booking_status"),
-                )
-
-    except Exception:
-        logger.exception("background refresh failed for %s", conversation_ref)
+except Exception:
+    logger.exception("background refresh failed for %s", conversation_ref)
 ```
 
 **Do not otherwise modify `conversation_refresh.py` or `drafts.py`.**

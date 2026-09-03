@@ -28,7 +28,7 @@ from app.webhook_security import (
     resolve_webhook_secret,
     signature_matches,
 )
-from tests.lodgify_fakes import THREAD_A, FakeLodgify, booking
+from tests.lodgify_fakes import THREAD_A, FakeLodgify, booking, message, thread
 
 SECRET = "test-only-webhook-signing-secret-not-real"
 
@@ -450,3 +450,168 @@ def test_an_array_wrapped_event_is_accepted_over_http(webhook_api):
     assert response.status_code == 200
     assert response.json()["event_type"] == GUEST_MESSAGE_RECEIVED
     assert response.json()["resolved"] is True
+
+
+# -- the webhook feeds the activity index ----------------------------------
+#
+# The one path that makes a Historic conversation listable at all. The Inbox
+# scan covers Current+Upcoming only, so nothing else in the system can ever
+# discover booking 9001; if `refresh_conversation_safely` stops writing the
+# activity index, the conversation is simply invisible.
+
+
+HISTORIC_THREAD = "33333333-3333-4333-8333-333333333333"
+
+
+def historic_webhook_fake():
+    """A fake whose booking 9001 is reachable only under stayFilter=All.
+
+    `FakeLodgify` answers every stay filter from one list, which would make
+    9001 visible to the live Current+Upcoming scan and hide the whole point.
+    The thread's last message is ours, so the refresh settles deterministically
+    and no model is ever called.
+    """
+    current = booking(1001, THREAD_A)
+    historic = booking(9001, HISTORIC_THREAD)
+
+    threads = {
+        THREAD_A: thread(
+            THREAD_A,
+            [
+                message(
+                    "m-cur", "Owner", "Invented fixture text.", "2026-08-01T09:00:00"
+                )
+            ],
+        ),
+        HISTORIC_THREAD: thread(
+            HISTORIC_THREAD,
+            [
+                message(
+                    "m-hist", "Owner", "Invented fixture text.", "2026-09-03T14:15:00"
+                )
+            ],
+        ),
+    }
+
+    class StayFilterFake(FakeLodgify):
+        def handler(self, request):
+            if request.url.path == "/v2/reservations/bookings":
+                asked = request.url.params.get("stayFilter")
+                self.bookings = [current, historic] if asked == "All" else [current]
+
+            return super().handler(request)
+
+    return StayFilterFake(bookings=[current], threads=threads)
+
+
+@pytest.fixture
+def historic_webhook_api(api, monkeypatch):
+    """The reloaded app with the webhook fast path genuinely wired up.
+
+    `conversation_refresh` is None in tests because the connector is
+    unconfigured at import, so a test that only installs `lodgify_inbox` never
+    reaches `refresh_conversation_safely` at all. Both are installed here.
+    """
+    from app.conversation_refresh import ConversationRefreshService
+
+    monkeypatch.setenv("LODGIFY_WEBHOOK_SECRET", SECRET)
+
+    module = api.module
+    fake = historic_webhook_fake()
+
+    module.lodgify_inbox = fake.inbox()
+    module.conversation_refresh = ConversationRefreshService(
+        inbox=module.lodgify_inbox,
+        drafts=module.draft_store,
+        agent=module.agent,
+    )
+    module.webhook_log.clear()
+    api.fake = fake
+
+    return api
+
+
+def historic_refs(client):
+    page = client.get("/inbox")
+
+    assert page.status_code == 200, page.text
+
+    return [row["conversation_ref"] for row in page.json()["conversations"]]
+
+
+def test_a_verified_webhook_makes_a_historic_conversation_listable(
+    historic_webhook_api,
+):
+    """End to end through the real route, the real background task and /inbox.
+
+    Booking 9001 is invisible to the Inbox's Current+Upcoming scan, so the only
+    way it can appear in `GET /inbox` is `refresh_conversation_safely` having
+    written the activity index from the verified event.
+    """
+    module = historic_webhook_api.module
+    admin = historic_webhook_api.client("ADMIN")
+
+    ref = conversation_ref_for(9001)
+
+    assert ref not in historic_refs(admin)
+    assert module.activity_store.for_conversation(ref) is None
+
+    response = post_event(
+        historic_webhook_api.anonymous(),
+        {**GUEST_MESSAGE_PAYLOAD, "thread_uid": HISTORIC_THREAD},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["conversation_ref"] == ref
+
+    # The background task runs before TestClient returns the response.
+    stored = module.activity_store.for_conversation(ref)
+
+    assert stored is not None
+    assert stored.last_message_at == "2026-09-03T14:15:00"
+
+    assert ref in historic_refs(admin)
+
+
+def test_the_webhook_records_no_guest_text_in_the_activity_index(
+    historic_webhook_api,
+):
+    """Metadata only, even on the path that has the message in its hands."""
+    module = historic_webhook_api.module
+
+    post_event(
+        historic_webhook_api.anonymous(),
+        {**GUEST_MESSAGE_PAYLOAD, "thread_uid": HISTORIC_THREAD},
+    )
+
+    stored = module.activity_store.for_conversation(conversation_ref_for(9001))
+
+    body = json.dumps(stored.to_row())
+
+    assert "Invented message content" not in body
+    assert "Fictional Person" not in body
+    assert HISTORIC_THREAD not in body
+    assert "9001" not in body
+
+
+def test_an_unreadable_thread_leaves_the_activity_index_alone(
+    historic_webhook_api,
+):
+    """A webhook that cannot be followed up must not write a null row.
+
+    `summarise_refs` omits a ref whose thread will not load, and the caller
+    treats absence as "learn nothing" -- so a 429 arriving with the event
+    leaves the index exactly as it was rather than creating an empty row that
+    would sort to the bottom of the Inbox forever.
+    """
+    module = historic_webhook_api.module
+
+    historic_webhook_api.fake.thread_failures = {HISTORIC_THREAD: 429}
+
+    response = post_event(
+        historic_webhook_api.anonymous(),
+        {**GUEST_MESSAGE_PAYLOAD, "thread_uid": HISTORIC_THREAD},
+    )
+
+    assert response.status_code == 200
+    assert module.activity_store.for_conversation(conversation_ref_for(9001)) is None

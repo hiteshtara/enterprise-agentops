@@ -217,8 +217,50 @@ class ConversationMessageSummary(BaseModel):
     message_status: str | None = None
 
 
+class DraftSummary(BaseModel):
+    """A prepared reply, or the recorded decision not to prepare one.
+
+    `status` is the *effective* status: a sendable draft whose conversation has
+    moved on reads STALE here even though the stored row does not say so.
+    """
+
+    draft_ref: str
+    conversation_ref: str
+    property_slug: str | None = None
+    status: str
+    stored_status: str
+    is_current: bool
+    subject: str | None = None
+    message: str | None = None
+    detail: str | None = None
+    source_run_id: str | None = None
+    created_at: str
+    updated_at: str
+    edited_at: str | None = None
+    sent_at: str | None = None
+
+
+class DraftEdit(BaseModel):
+    """An operator rewriting a prepared reply. Editing never sends."""
+
+    subject: str | None = Field(default=None, min_length=1)
+    message: str | None = Field(default=None, min_length=1)
+
+
+class InboxRefreshResult(BaseModel):
+    """What one polling refresh did. Counts only."""
+
+    processed: int
+    drafted: int
+    skipped: int
+    no_reply: int
+    failed: int
+
+
 class ConversationSummary(BaseModel):
     conversation_ref: str
+    fingerprint: str | None = None
+    draft: DraftSummary | None = None
     property_slug: str | None = None
     property_name: str | None = None
     source: str | None = None
@@ -228,6 +270,8 @@ class ConversationSummary(BaseModel):
     last_message_sender: str | None = None
     last_message_excerpt: str | None = None
     message_count: int
+    # False on a live row; True on a row we remembered but could not re-read.
+    preview_unavailable: bool = False
 
 
 class InboxPage(BaseModel):
@@ -237,6 +281,8 @@ class InboxPage(BaseModel):
 
 class ConversationDetail(BaseModel):
     conversation_ref: str
+    fingerprint: str | None = None
+    draft: DraftSummary | None = None
     property_slug: str | None = None
     property_name: str | None = None
     source: str | None = None

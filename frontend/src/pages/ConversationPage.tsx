@@ -1,75 +1,49 @@
 import { useCallback, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
+  editDraft,
   getConversation,
+  regenerateDraft,
   requestGuestReply,
   resolveApproval,
-  runAgent,
 } from '../api/agentguard'
-import type { AgentResponse, ApprovalRequest, SendOutcome } from '../api/types'
+import type { ApprovalRequest, DraftSummary, SendOutcome } from '../api/types'
 import { useAsync } from '../hooks/useAsync'
 import { ApprovalCard } from '../components/ApprovalCard'
 import { PageHeader } from '../components/Layout'
 import { ErrorState, Loading } from '../components/States'
-import { StatusBadge } from './InboxPage'
+import { DraftBadge, StatusBadge } from './InboxPage'
 
 const DEFAULT_SUBJECT = 'Re: your message'
 
-/**
- * The exact token a draft uses to say that no message is worth sending.
- * Mirrors `NO_REPLY_NEEDED` in app/hospitality.py by hand, like the rest of the
- * API contract in src/api/types.ts.
- */
-const NO_REPLY_NEEDED = 'NO_REPLY_NEEDED'
+const STALE_WARNING =
+  'The guest has written again since this reply was prepared. Regenerate it before sending — the prepared text answers an older version of this conversation.'
 
 /**
- * Drafting goes through the ordinary agent run, so it is recorded, audited and
- * measured like any other model call. The instruction is explicit that this is
- * a draft: the model has no path to send from here anyway -- `send_guest_reply`
- * would park for approval -- but asking for a draft is clearer than relying on
- * the guard to catch it.
+ * The prepared reply, if it is safe to act on.
  *
- * The prompt stays deliberately thin. How to read a conversation, when to stay
- * quiet, and what may be claimed about a property are durable business rules,
- * so they live in the hospitality knowledge layer and arrive with the
- * conversation itself -- not in a string in the browser.
- */
-function draftPrompt(conversationRef: string): string {
-  return (
-    `Read guest conversation ${conversationRef} with get_guest_conversation, ` +
-    `then follow the reply_guidance it returns exactly -- especially ` +
-    `conversation_state and how_to_read_the_conversation. Reply only to what is ` +
-    `still open; never re-answer something already answered. Do NOT send ` +
-    `anything. Respond with the message text only -- no preamble, no subject ` +
-    `line, no quotes -- or exactly ${NO_REPLY_NEEDED} if no message is worth ` +
-    `sending.`
-  )
-}
-
-/** Whether the model concluded that sending anything would add no value. */
-function isNoReplyNeeded(answer: string): boolean {
-  return answer.trim().replace(/[.\s]+$/, '') === NO_REPLY_NEEDED
-}
-
-/**
- * How many past replies informed this draft, read from the run's own trace.
+ * A draft written before the guest's latest message answers a question that has
+ * moved on, so a STALE draft deliberately yields nothing here -- the operator
+ * gets a warning and a Regenerate button rather than sendable text.
  *
- * The examples themselves stay in model context and are never rendered: a
- * historical guest conversation is not something the console should surface
- * while someone writes to a different guest. The count is the useful part --
- * it tells the operator whether the draft had precedent behind it.
+ * NEEDS_HUMAN_REVIEW *with* text is included. That status covers two different
+ * things: a reply the owner has to decide about -- a request past what policy
+ * lets AgentGuard offer on its own -- and a draft that could not be written at
+ * all. The first has wording the owner needs to read; the second has nothing,
+ * and falls out here because there is no message.
  */
-function historicalExampleCount(trace: AgentResponse['trace']): number {
-  for (const step of trace) {
-    if (step.tool !== 'get_guest_conversation') continue
+function sendableDraft(draft: DraftSummary | null | undefined) {
+  if (!draft) return null
 
-    const block = (step.result as { historical_examples?: { examples?: unknown[] } })
-      ?.historical_examples
+  const carriesText =
+    draft.status === 'DRAFT_READY' ||
+    draft.status === 'EDITED' ||
+    draft.status === 'NEEDS_HUMAN_REVIEW'
 
-    if (Array.isArray(block?.examples)) return block.examples.length
-  }
+  if (!carriesText) return null
+  if (!draft.message) return null
 
-  return 0
+  return { subject: draft.subject ?? DEFAULT_SUBJECT, message: draft.message }
 }
 
 function outcomeTone(status: SendOutcome['status']): string {
@@ -91,39 +65,59 @@ export function ConversationPage() {
   const [message, setMessage] = useState('')
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [outcome, setOutcome] = useState<SendOutcome | null>(null)
-  const [noReplyNeeded, setNoReplyNeeded] = useState(false)
-  const [informedBy, setInformedBy] = useState(0)
   const [error, setError] = useState<unknown>(null)
-  const [busy, setBusy] = useState<'draft' | 'submit' | 'decide' | null>(null)
+  const [busy, setBusy] = useState<'regenerate' | 'save' | 'submit' | 'decide' | null>(
+    null,
+  )
 
   const detail = conversation.data
+  const draft = detail?.draft ?? null
+  const sendable = sendableDraft(draft)
+  const isStale = draft?.status === 'STALE'
+  const needsReview = draft?.status === 'NEEDS_HUMAN_REVIEW'
 
-  async function generateDraft() {
-    setBusy('draft')
+  // Which prepared draft the editor currently shows, keyed on the draft's own
+  // identity and revision: a poll returning the same draft must never overwrite
+  // what the operator is typing, while a regenerate must.
+  //
+  // Adjusted during render rather than in an effect, so the prepared text is
+  // present in the very commit that first shows the conversation -- there is no
+  // frame in which the box is empty and a keystroke could land in it.
+  const revision = draft ? `${draft.draft_ref}:${draft.updated_at}` : null
+  const [seeded, setSeeded] = useState<string | null>(null)
+
+  if (revision !== null && revision !== seeded) {
+    setSeeded(revision)
+    setSubject(draft?.subject ?? DEFAULT_SUBJECT)
+    setMessage(sendable?.message ?? '')
+  }
+
+  async function regenerate() {
+    setBusy('regenerate')
     setError(null)
-    setNoReplyNeeded(false)
-    setInformedBy(0)
 
     try {
-      const response = await runAgent(draftPrompt(conversationRef))
-      const answer = response.answer ?? ''
+      await regenerateDraft(conversationRef)
+      // Reload rather than trusting the returned draft: the conversation may
+      // have moved on again, and the fingerprint that decides staleness is
+      // computed against the thread, not against this response.
+      await conversation.reload()
+    } catch (caught) {
+      setError(caught)
+    } finally {
+      setBusy(null)
+    }
+  }
 
-      setInformedBy(historicalExampleCount(response.trace))
+  async function saveEdit() {
+    if (!message.trim()) return
 
-      if (isNoReplyNeeded(answer)) {
-        // Concluding that nothing needs saying is a real outcome, not an empty
-        // draft. Show it, leave the box empty, and touch nothing: no message is
-        // composed, no approval is created, and the Lodgify thread is not
-        // marked replied.
-        setNoReplyNeeded(true)
-        setMessage('')
+    setBusy('save')
+    setError(null)
 
-        return
-      }
-
-      // Otherwise the agent's answer is a suggestion. It lands in the textarea
-      // for a person to edit; nothing is sent.
-      if (answer) setMessage(answer)
+    try {
+      await editDraft(conversationRef, { subject, message })
+      await conversation.reload()
     } catch (caught) {
       setError(caught)
     } finally {
@@ -132,7 +126,7 @@ export function ConversationPage() {
   }
 
   async function submitForApproval() {
-    if (!subject.trim() || !message.trim()) return
+    if (!subject.trim() || !message.trim() || isStale) return
 
     setBusy('submit')
     setError(null)
@@ -162,7 +156,7 @@ export function ConversationPage() {
 
       if (approved && response.result) {
         setOutcome(response.result as SendOutcome)
-        conversation.reload()
+        await conversation.reload()
       }
     } catch (caught) {
       setError(caught)
@@ -192,6 +186,7 @@ export function ConversationPage() {
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <div className="row">
                 <StatusBadge status={detail.status} />
+                {draft ? <DraftBadge status={draft.status} /> : null}
                 {detail.source ? <span className="faint">{detail.source}</span> : null}
               </div>
               <span className="faint mono" style={{ fontSize: 12 }}>
@@ -251,17 +246,30 @@ export function ConversationPage() {
           ) : (
             <div className="card">
               <div className="approval-term" style={{ marginBottom: 8 }}>
-                Suggested reply
+                {sendable ? 'Prepared reply' : 'Reply'}
               </div>
 
-              {noReplyNeeded ? (
+              {needsReview && sendable ? (
+                <div className="state state-warn" role="status">
+                  {draft?.detail}
+                </div>
+              ) : null}
+
+              {isStale ? (
+                <div className="state state-warn" role="status">
+                  {STALE_WARNING}
+                </div>
+              ) : null}
+
+              {!isStale && draft && !sendable && draft.detail ? (
                 <div className="no-reply-needed" role="status">
-                  <strong>No reply needed</strong>
-                  <div>
-                    Everything the guest asked has been answered, and their last message
-                    was a closing courtesy. Nothing has been sent and the conversation
-                    has not been marked replied — write something below if you disagree.
-                  </div>
+                  <div>{draft.detail}</div>
+                </div>
+              ) : null}
+
+              {!draft ? (
+                <div className="state" role="status">
+                  No reply has been prepared for this conversation yet.
                 </div>
               ) : null}
 
@@ -285,11 +293,8 @@ export function ConversationPage() {
               <textarea
                 id="reply-message"
                 value={message}
-                placeholder="Write the reply, or generate a draft to edit."
-                onChange={(event) => {
-                  setMessage(event.target.value)
-                  setNoReplyNeeded(false)
-                }}
+                placeholder="Write the reply, or regenerate a draft to edit."
+                onChange={(event) => setMessage(event.target.value)}
                 disabled={busy !== null}
               />
 
@@ -298,25 +303,26 @@ export function ConversationPage() {
                 style={{ marginTop: 12, justifyContent: 'space-between' }}
               >
                 <span className="faint" style={{ fontSize: 12 }}>
-                  {informedBy > 0
-                    ? `Draft informed by ${informedBy} similar past ${
-                        informedBy === 1 ? 'reply' : 'replies'
-                      }. Nothing is sent until a human approves it.`
-                    : 'Nothing is sent until a human approves it.'}
+                  Nothing is sent until a human approves it.
                 </span>
                 <div className="row">
+                  <button type="button" onClick={regenerate} disabled={busy !== null}>
+                    {busy === 'regenerate' ? 'Regenerating…' : 'Regenerate'}
+                  </button>
                   <button
                     type="button"
-                    onClick={generateDraft}
-                    disabled={busy !== null}
+                    onClick={saveEdit}
+                    disabled={busy !== null || !message.trim()}
                   >
-                    {busy === 'draft' ? 'Drafting…' : 'Generate draft'}
+                    {busy === 'save' ? 'Saving…' : 'Save edit'}
                   </button>
                   <button
                     type="button"
                     className="primary"
                     onClick={submitForApproval}
-                    disabled={busy !== null || !subject.trim() || !message.trim()}
+                    disabled={
+                      busy !== null || isStale || !subject.trim() || !message.trim()
+                    }
                   >
                     {busy === 'submit' ? 'Submitting…' : 'Send for approval'}
                   </button>

@@ -357,3 +357,40 @@ def test_console_sees_the_send_tool_as_dangerous(inbox_api):
         "subject",
         "message",
     }
+
+
+# -- the conversation activity index ----------------------------------------
+
+
+def test_inbox_rows_expose_the_preview_flag(inbox_api):
+    rows = inbox_api.client("ADMIN").get("/inbox").json()["conversations"]
+
+    assert rows
+    assert all("preview_unavailable" in row for row in rows)
+
+
+def test_a_webhook_known_conversation_reaches_the_api(inbox_api):
+    """End to end: what a webhook remembered is listed by the route.
+
+    The module-level `activity_store` is bound to `inbox_api.module.database`
+    -- the isolated, per-test database the `api` fixture points
+    AGENTOPS_DATABASE_URL at -- so writing through it here is writing to
+    exactly what the route reads from. Using `inbox_api.module.activity_store`
+    directly keeps that binding explicit instead of constructing a second
+    store by hand.
+    """
+    inbox_api.module.activity_store.upsert(
+        conversation_ref="PH-HISTORIC1",
+        conversation_fingerprint="fp-1",
+        status="needs_attention",
+        last_message_at="2026-09-03T12:06:33",
+        last_message_sender="Renter",
+        message_count=2,
+        property_slug="renovated-2nd-floor-home",
+        source="BookingCom",
+        booking_status="Booked",
+    )
+
+    rows = inbox_api.client("ADMIN").get("/inbox").json()["conversations"]
+
+    assert rows[0]["conversation_ref"] == "PH-HISTORIC1"

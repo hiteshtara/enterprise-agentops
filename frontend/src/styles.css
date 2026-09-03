@@ -834,6 +834,18 @@ a.card.conversation-row:hover {
   color: var(--text-muted);
 }
 
+/* The prepared reply, previewed in the Inbox list. Indented and tinted so it
+   reads as ours-and-unsent, never as something the guest wrote. */
+.draft-preview {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--bg-inset);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 .message {
   border: 1px solid var(--border);
   border-radius: var(--radius);

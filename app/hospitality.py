@@ -19,7 +19,20 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.cancellation import POLICY_GUIDANCE as CANCELLATION_GUIDANCE
+from app.cancellation import outcome_for as cancellation_outcome
+from app.early_check_in import FAR_FUTURE_GUIDANCE, is_early_check_in_request
+from app.early_check_in import POLICY_GUIDANCE as EARLY_CHECK_IN_GUIDANCE
+from app.early_check_in import outcome_for as early_check_in_outcome
 from app.historical_replies import topics_for
+from app.late_checkout import (
+    AUTOMATIC_CEILING,
+    ESCALATION_REASON,
+    STANDARD_CHECKOUT,
+    is_late_checkout_request,
+    requires_owner_approval,
+)
+from app.late_checkout import POLICY_GUIDANCE as LATE_CHECKOUT_GUIDANCE
 
 # Sender type of an outbound message, mirroring the connector's vocabulary.
 # Duplicated rather than imported so this module stays free of the connector.
@@ -74,15 +87,13 @@ REPLY_RULES: tuple[ReplyRule, ...] = (
     ),
     ReplyRule(
         topic="late_checkout",
-        guidance=(
-            "Never guarantee late checkout automatically. It depends on the "
-            "next arrival and on the cleaning schedule. Say that we will check "
-            "and confirm. Do not state a specific later time as if it were "
-            "agreed."
-        ),
+        # Owner-authored policy, not a distilled habit: the extra hour to
+        # 11:00 AM is pre-approved, so hedging it would be wrong. Everything
+        # past 11:00 AM stays the owner's decision. See app/late_checkout.py.
+        guidance=LATE_CHECKOUT_GUIDANCE,
         example=(
-            "I'll check whether a later checkout works with the next arrival "
-            "and the cleaning schedule, and confirm as soon as I know."
+            "We can extend checkout until 11:00 AM for you -- our regular "
+            "checkout is 10:00 AM."
         ),
     ),
     ReplyRule(
@@ -547,6 +558,19 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
         {signal for row in unanswered for signal in actionable_signals(row["message"])}
     )
 
+    # A request to check out past the ceiling is the owner's call. Computed
+    # from the still-open messages only, so a request we already answered does
+    # not escalate the thread forever.
+    late_checkout_open = any(
+        is_late_checkout_request(row["message"]) for row in unanswered
+    )
+
+    beyond_policy = requires_owner_approval(unanswered)
+
+    early_check_in_open = any(
+        is_early_check_in_request(row["message"]) for row in unanswered
+    )
+
     if not unanswered:
         outcome = "already_replied"
 
@@ -570,6 +594,15 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
             if index < last_owner_index and row["sender"] == "Renter"
         ],
         "suggested_outcome": outcome,
+        "late_checkout_requested": late_checkout_open,
+        "early_check_in_requested": early_check_in_open,
+        "late_checkout_beyond_policy": beyond_policy,
+        "owner_approval_required": beyond_policy,
+        "owner_approval_reason": ESCALATION_REASON if beyond_policy else None,
+        "checkout_policy": {
+            "standard_checkout": STANDARD_CHECKOUT,
+            "automatic_ceiling": AUTOMATIC_CEILING,
+        },
         "note": (
             "answered_earlier_by_us lists guest messages a later Owner message "
             "already responded to. Do not answer those again. open_signals "
@@ -744,9 +777,15 @@ HISTORICAL_EXAMPLE_CAVEAT = (
 )
 
 
+def rows_of(messages: Any) -> list[dict[str, Any]]:
+    return [row for row in (messages or []) if isinstance(row, dict)]
+
+
 def reply_guidance(
     messages: Any = (),
     approved_knowledge: Any = (),
+    turnover: Any = None,
+    booking_cancelled: bool | None = None,
 ) -> dict[str, Any]:
     """The knowledge a model needs to draft a Priyanka Homes reply.
 
@@ -762,6 +801,8 @@ def reply_guidance(
 
     exceptions = conversation_exceptions(messages, knowledge)
 
+    state = analyse_conversation(messages)
+
     guidance: dict[str, Any] = {
         "authority_order": list(AUTHORITY_ORDER),
         "approved_knowledge": knowledge,
@@ -772,7 +813,8 @@ def reply_guidance(
             "this guest in this thread."
         ),
         "current_conversation_exceptions": exceptions,
-        "conversation_state": analyse_conversation(messages),
+        "conversation_state": state,
+        "late_checkout_policy": LATE_CHECKOUT_GUIDANCE,
         "how_to_read_the_conversation": list(CONVERSATION_STATE_RULES),
         "no_reply_needed": NO_REPLY_GUIDANCE,
         "historical_examples_caveat": HISTORICAL_EXAMPLE_CAVEAT,
@@ -801,5 +843,50 @@ def reply_guidance(
             "is always acceptable; a confident guess is not."
         ),
     }
+
+    if state.get("early_check_in_requested"):
+        guidance["early_check_in_policy"] = EARLY_CHECK_IN_GUIDANCE
+
+        verdict, reason, needs_owner = early_check_in_outcome(turnover)
+
+        guidance["arrival_day_turnover"] = {
+            # The guest's own arrival date and one verdict. Nothing about the
+            # other reservation -- no dates, no status, no identity.
+            "arrival_date": (
+                turnover.get("arrival_date") if isinstance(turnover, dict) else None
+            ),
+            "early_check_in": verdict,
+            "why": reason,
+            # No lookup was made at all -- the arrival is not near enough for
+            # the schedule to mean anything yet.
+            "how_to_answer": FAR_FUTURE_GUIDANCE if turnover is None else None,
+        }
+
+        if needs_owner:
+            state = {**state, "owner_approval_required": True}
+            state["owner_approval_reason"] = reason
+
+    offer, cancellation_escalates, cancellation_reason = cancellation_outcome(
+        booking_cancelled, rows_of(messages)
+    )
+
+    if offer or cancellation_escalates or booking_cancelled is True:
+        guidance["cancellation_policy"] = CANCELLATION_GUIDANCE
+        guidance["cancellation_state"] = {
+            # From authoritative booking state, never from the thread's wording.
+            "reservation_cancelled": booking_cancelled,
+            "make_retention_offer": offer,
+            "why": cancellation_reason,
+        }
+
+    if cancellation_escalates:
+        state = {**state, "owner_approval_required": True}
+        state["owner_approval_reason"] = cancellation_reason
+
+    if state.get("owner_approval_required"):
+        # Stated separately from conversation_state so it cannot be missed in a
+        # long block. The runtime enforces this regardless of what the model
+        # does with it -- see app/conversation_refresh.py.
+        guidance["owner_approval_required"] = state.get("owner_approval_reason")
 
     return guidance

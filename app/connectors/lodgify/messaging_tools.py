@@ -31,7 +31,11 @@ from app.connectors.lodgify.inbox import (
     LodgifyInbox,
 )
 from app.connectors.lodgify.models import unknown
-from app.hospitality import HISTORICAL_EXAMPLE_CAVEAT, reply_guidance
+from app.hospitality import (
+    HISTORICAL_EXAMPLE_CAVEAT,
+    analyse_conversation,
+    reply_guidance,
+)
 from app.knowledge import KnowledgeStore
 from app.reply_retrieval import HistoricalReplyRetriever
 
@@ -139,6 +143,27 @@ class LodgifyMessagingTools:
             "count": len(conversations),
         }
 
+    def turnover(self, conversation_ref: str, messages: Any) -> dict[str, Any] | None:
+        """Whether a stay ends on this guest's arrival day, when it matters.
+
+        Returns None when the thread never asked about arriving early, and an
+        `unknown` answer -- never an assumed one -- when the provider could not
+        say. A failure here must not become "nobody is checking out".
+        """
+        if not analyse_conversation(messages).get("early_check_in_requested"):
+            return None
+
+        try:
+            return self._inbox.turnover_for(conversation_ref)
+
+        except (LodgifyConfigurationError, LodgifyUnavailable, ValueError):
+            return {
+                "conversation_ref": conversation_ref,
+                "arrival_date": None,
+                "same_day_checkout": None,
+                "reason": "The schedule could not be checked.",
+            }
+
     def get_guest_conversation(self, conversation_ref: str) -> dict[str, Any]:
         try:
             conversation = self._inbox.get_conversation(conversation_ref)
@@ -163,7 +188,17 @@ class LodgifyMessagingTools:
         # the thread has ever mentioned.
         knowledge = self.approved_knowledge(conversation.get("property_slug"))
 
-        guidance = reply_guidance(conversation.get("messages"), knowledge)
+        # The turnover fact is looked up only when the thread actually asks
+        # about arriving early. Otherwise this would scan the booking archive
+        # on every single conversation read.
+        turnover = self.turnover(conversation_ref, conversation.get("messages"))
+
+        guidance = reply_guidance(
+            conversation.get("messages"),
+            knowledge,
+            turnover,
+            booking_cancelled=conversation.get("booking_cancelled"),
+        )
 
         examples = self.historical_examples(conversation, guidance)
 

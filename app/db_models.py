@@ -670,3 +670,161 @@ class HospitalityKnowledgeRecord(Base):
             return []
 
         return value if isinstance(value, list) else []
+
+
+class ConversationDraftRecord(Base):
+    """The outcome of processing one state of one conversation.
+
+    One row per (conversation, fingerprint): a prepared reply, a decision that
+    no reply is needed, or a recorded failure. That key is the idempotency
+    boundary for the whole proactive pipeline -- four duplicate webhook
+    deliveries and a poll all resolve to the same row.
+
+    `subject` and `message` are nullable because most outcomes carry no text: a
+    NO_REPLY_NEEDED row is a decision, not a draft.
+
+    Deliberately narrow. The conversation reference is already opaque, and there
+    is no column here that could hold a booking id, a thread uid, or a guest's
+    name.
+    """
+
+    __tablename__ = "conversation_drafts"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    draft_ref: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    conversation_ref: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+    )
+
+    property_slug: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
+    conversation_fingerprint: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    subject: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # DRAFT_READY / EDITED / NO_REPLY_NEEDED / NEEDS_HUMAN_REVIEW / SENT /
+    # DISCARDED. STALE is never stored: it is derived by comparing this row's
+    # fingerprint against the live conversation, so a row cannot be stale in the
+    # database and fresh on screen.
+    status: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        index=True,
+    )
+
+    # Why drafting could not produce a reply. Operator-facing prose, never a
+    # stack trace and never a provider message.
+    detail: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # The agent run that produced the draft, so it can be traced to its model
+    # call in observability.
+    source_run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )
+
+    updated_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )
+
+    edited_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    sent_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+
+class ConversationActivityRecord(Base):
+    """The latest known activity of one conversation.
+
+    An index, not an archive. It exists so a conversation the Inbox does not
+    enumerate -- a Historic stay, reachable only because a webhook named it --
+    can still be listed and ordered by recency.
+
+    Metadata only. There is deliberately no column that could hold a message
+    body, an excerpt, a guest's name, email or phone, a booking id or a thread
+    uid. Guest text lives in Lodgify, transiently in model context, and in
+    sanitized historical reply storage under its own rules. Never here.
+
+    `property_name` is not stored either: it is derived from `property_slug`
+    through configuration, so a rename cannot leave stale display text behind.
+    `needs_attention` is not stored: it is derived from `status`, so the two
+    cannot disagree.
+    """
+
+    __tablename__ = "conversation_activity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # One conversation is one row. The upsert depends on this being unique.
+    conversation_ref: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+
+    property_slug: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    booking_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # The ordering signal for the whole Inbox.
+    last_message_at: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+
+    last_message_sender: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    conversation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # A ConversationStatus value.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+
+    first_seen_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    last_refreshed_at: Mapped[str] = mapped_column(String(32), nullable=False)
