@@ -8,6 +8,7 @@ import * as api from '../api/agentguard'
 import type { CurrentUser } from '../api/types'
 import {
   APPROVAL_ID,
+  CONVERSATION_FINGERPRINT,
   CONVERSATION_REF,
   GUEST_REPLY_BODY,
   GUEST_REPLY_SUBJECT,
@@ -22,6 +23,7 @@ import {
   reviewDraft,
   sendResolved,
   staleDraft,
+  staleReplyConflict,
   unknownSendState,
 } from '../test/factories'
 
@@ -107,10 +109,29 @@ describe('ConversationPage', () => {
         CONVERSATION_REF,
         GUEST_REPLY_SUBJECT,
         GUEST_REPLY_BODY,
+        // The conversation state this text was written against. The server
+        // refuses the submission if it has moved on since.
+        CONVERSATION_FINGERPRINT,
       ),
     )
 
     // The console has no path that reaches the provider itself.
+    expect(api.resolveApproval).not.toHaveBeenCalled()
+  })
+
+  it('asks for a regenerate when the server refuses a submission as stale', async () => {
+    vi.mocked(api.requestGuestReply).mockRejectedValue(staleReplyConflict)
+
+    renderConversation()
+
+    await composeAndSubmit()
+
+    // The server is the authority on staleness, so its refusal is what the
+    // operator is shown -- even though the console let this one through.
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /Regenerate the draft before sending/,
+    )
+
     expect(api.resolveApproval).not.toHaveBeenCalled()
   })
 
@@ -422,6 +443,20 @@ describe('a stale prepared reply', () => {
     // The safety property is that the outdated wording is never sendable --
     // not merely that a button is greyed out.
     expect(screen.getByLabelText('Message')).toHaveValue('')
+  })
+
+  it('is never submitted, even if the button is reached', async () => {
+    renderConversation()
+
+    await screen.findByText(/The guest has written again/)
+
+    const user = userEvent.setup()
+
+    // The click is a no-op rather than merely a disabled button: the guard is
+    // in the handler, not only in the markup.
+    await user.click(screen.getByRole('button', { name: 'Send for approval' }))
+
+    expect(api.requestGuestReply).not.toHaveBeenCalled()
   })
 
   it('can be regenerated', async () => {

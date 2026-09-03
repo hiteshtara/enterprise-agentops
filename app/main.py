@@ -720,6 +720,12 @@ def current_fingerprint_for(conversation_ref: str) -> str | None:
     return conversation_fingerprint(conversation.get("messages"))
 
 
+STALE_DRAFT_CONFLICT = (
+    "New activity arrived in this conversation after this draft was prepared. "
+    "Regenerate the draft before sending."
+)
+
+
 @app.post(
     "/inbox/{conversation_ref}/reply",
     response_model=AgentResponse,
@@ -738,6 +744,11 @@ def request_guest_reply(
 
     The text is passed through untouched so the string an approver reads is the
     string the guest receives.
+
+    Before any of that, the submission has to still be about the conversation it
+    was written for. The console already refuses to submit a STALE draft, but a
+    check in a browser is convenience, not authority -- this is the one that
+    counts.
     """
     require_inbox()
 
@@ -745,6 +756,30 @@ def request_guest_reply(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=INBOX_UNAVAILABLE,
+        )
+
+    live_fingerprint = current_fingerprint_for(conversation_ref)
+
+    # Currency is decided on the fingerprint and never on the text. A reply
+    # prepared before the guest's latest message answers a question that has
+    # moved on, and it is still stale when its wording happens to be identical
+    # to what a fresh draft would say -- so the strings are not compared at all.
+    # Requiring the fingerprint of *every* submission, including hand-composed
+    # text, is what stops "write it yourself" being the way round this.
+    #
+    # `None` means the live conversation could not be read, which is "cannot
+    # judge" rather than "changed" -- the same policy `current_fingerprint_for`
+    # documents and `DraftRecord.status_for` follows. Allowing the submission is
+    # a deliberate, bounded fail-open: a provider hiccup must not make every
+    # good draft unsendable, and what it buys is a PENDING approval, not a send.
+    # The DANGEROUS gate still stands between this and the guest, and a blank
+    # fingerprint is refused by the schema whatever the provider is doing.
+    if live_fingerprint is not None and live_fingerprint != (
+        reply.conversation_fingerprint
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=STALE_DRAFT_CONFLICT,
         )
 
     result = agent.request_action(

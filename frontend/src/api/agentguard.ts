@@ -136,15 +136,25 @@ export function getConversation(conversationRef: string): Promise<ConversationDe
  * Submits a composed reply for approval. **This sends nothing.** It creates a
  * governed run whose single pending action is `send_guest_reply`; a human still
  * has to approve it before anything reaches the guest.
+ *
+ * `conversationFingerprint` is the state this text was written against. The
+ * server compares it with the live conversation and answers 409 if the guest
+ * has written since -- so a reply that answers a question that has moved on is
+ * refused there rather than only here.
  */
 export function requestGuestReply(
   conversationRef: string,
   subject: string,
   message: string,
+  conversationFingerprint: string,
 ): Promise<AgentResponse> {
   return request<AgentResponse>(`/inbox/${conversationRef}/reply`, {
     method: 'POST',
-    body: JSON.stringify({ subject, message }),
+    body: JSON.stringify({
+      subject,
+      message,
+      conversation_fingerprint: conversationFingerprint,
+    }),
   })
 }
 

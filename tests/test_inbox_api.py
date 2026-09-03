@@ -2,8 +2,10 @@
 
 Covers the properties that only exist once the route, the registry, the approval
 store and RBAC are wired together: that submitting a reply sends nothing, that
-only an authorised approver can release it, that rejection sends nothing, and
-that the audit trail records the exact approved text and no provider identifier.
+only an authorised approver can release it, that rejection sends nothing, that
+the audit trail records the exact approved text and no provider identifier, and
+that a reply composed against a conversation state that has since moved on is
+refused by the server rather than only by the console.
 """
 
 import json
@@ -37,6 +39,17 @@ GUEST = message(
     route=None,
 )
 
+# The message that arrives *after* a draft was prepared, which is what moves the
+# conversation on and therefore changes its fingerprint.
+GUEST_AGAIN = message(
+    "m-guest-2",
+    "Renter",
+    "Actually, ignore that -- can we drop a bag off early instead?",
+    "2026-09-01T18:00:00",
+    message_status=None,
+    route=None,
+)
+
 SENT = message(
     "m-sent-1",
     "Owner",
@@ -60,15 +73,13 @@ def inbox_api(api):
 
     fake = FakeLodgify(
         bookings=[booking(1001, THREAD_A)],
-        # Submitting a reply reaches Lodgify not at all -- the tool parks for
-        # approval before its function runs. So the two scripted reads are the
-        # pre-send snapshot and the post-send verification.
-        thread_sequence={
-            THREAD_A: [
-                thread(THREAD_A, [GUEST]),
-                thread(THREAD_A, [GUEST, SENT]),
-            ]
-        },
+        # One stable pre-send state, answered to every read. Submitting a reply
+        # reaches Lodgify not at all -- the tool parks for approval before its
+        # function runs -- but the route does now re-read the thread to decide
+        # whether the submitted draft is still current, and the console reads it
+        # to learn the fingerprint in the first place. Keeping the fallback
+        # stable means a test may read as often as it likes; `arm_send` queues
+        # the one pair of reads an approved send performs.
         threads={THREAD_A: thread(THREAD_A, [GUEST])},
     )
 
@@ -144,13 +155,68 @@ def test_inbox_is_unavailable_without_a_connector(api):
     assert api.client("ADMIN").get("/inbox").status_code == 503
 
 
+# -- helpers ---------------------------------------------------------------
+
+
+def current_fingerprint(client) -> str:
+    """The fingerprint the console would be holding for this conversation.
+
+    Read through the API rather than computed here, so the value a test submits
+    is exactly the value a browser would have been given.
+    """
+    response = client.get(f"/inbox/{REF}")
+
+    assert response.status_code == 200, response.text
+
+    fingerprint = response.json()["fingerprint"]
+
+    assert fingerprint
+
+    return fingerprint
+
+
+def reply_payload(
+    fingerprint: str | None,
+    subject: str = SUBJECT,
+    body: str = BODY,
+) -> dict:
+    """A reply submission. `None` omits the fingerprint entirely."""
+    payload = {"subject": subject, "message": body}
+
+    if fingerprint is not None:
+        payload["conversation_fingerprint"] = fingerprint
+
+    return payload
+
+
+def guest_writes_again(api) -> None:
+    """The conversation moves on under a prepared draft."""
+    api.fake.threads[THREAD_A] = thread(THREAD_A, [GUEST, GUEST_AGAIN])
+
+
+def arm_send(api) -> None:
+    """Script the two thread reads one approved send performs.
+
+    `send_reply` snapshots the thread, POSTs once, then re-reads to attribute
+    the new row by difference. Queuing that pair here, immediately before the
+    approval, keeps every earlier read -- the console's detail read, the
+    staleness guard's -- on the stable pre-send state.
+    """
+    api.fake.thread_sequence[THREAD_A] = [
+        thread(THREAD_A, [GUEST]),
+        thread(THREAD_A, [GUEST, SENT]),
+    ]
+
+
 # -- submitting a reply sends nothing --------------------------------------
 
 
 def test_submitting_a_reply_parks_for_approval_and_sends_nothing(inbox_api):
-    response = inbox_api.client("ADMIN").post(
+    client = inbox_api.client("ADMIN")
+
+    response = client.post(
         f"/inbox/{REF}/reply",
-        json={"subject": SUBJECT, "message": BODY},
+        json=reply_payload(current_fingerprint(client)),
     )
 
     assert response.status_code == 200, response.text
@@ -176,9 +242,11 @@ def test_submitting_a_reply_parks_for_approval_and_sends_nothing(inbox_api):
 
 
 def test_submitting_a_reply_requires_run_agent(inbox_api):
+    fingerprint = current_fingerprint(inbox_api.client("ADMIN"))
+
     response = inbox_api.client("VIEWER").post(
         f"/inbox/{REF}/reply",
-        json={"subject": SUBJECT, "message": BODY},
+        json=reply_payload(fingerprint),
     )
 
     assert response.status_code == 403
@@ -186,9 +254,11 @@ def test_submitting_a_reply_requires_run_agent(inbox_api):
 
 
 def test_empty_reply_is_rejected_by_the_route(inbox_api):
-    response = inbox_api.client("ADMIN").post(
+    client = inbox_api.client("ADMIN")
+
+    response = client.post(
         f"/inbox/{REF}/reply",
-        json={"subject": "", "message": ""},
+        json=reply_payload(current_fingerprint(client), subject="", body=""),
     )
 
     assert response.status_code == 422
@@ -201,10 +271,14 @@ def test_empty_reply_is_rejected_by_the_route(inbox_api):
 def submit(client, api):
     response = client.post(
         f"/inbox/{REF}/reply",
-        json={"subject": SUBJECT, "message": BODY},
+        json=reply_payload(current_fingerprint(client)),
     )
 
     assert response.status_code == 200, response.text
+
+    # Queue the pre-send snapshot and the post-send re-read only now, so the
+    # reads the submission itself performed did not consume them.
+    arm_send(api)
 
     return response.json()["approval_required"]["approval_id"]
 
@@ -341,6 +415,254 @@ def test_unauthorized_approval_is_audited_and_leaves_the_approval_pending(inbox_
     approvals = inbox_api.client("ADMIN").get("/approvals").json()
 
     assert approvals[0]["status"] == "PENDING"
+
+
+# -- the stale-draft guard --------------------------------------------------
+#
+# The console refuses to submit a STALE draft, but a UI check is convenience,
+# not security. These cover the server-side guard: the route compares the
+# fingerprint the submitter was looking at against the live conversation and
+# refuses a submission composed against a state that has moved on.
+
+
+def test_a_current_fingerprint_is_accepted_and_creates_one_approval(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    response = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(current_fingerprint(client)),
+    )
+
+    assert response.status_code == 200, response.text
+
+    approvals = inbox_api.module.approval_store.list_approvals()
+
+    assert len(approvals) == 1
+    assert approvals[0]["tool"] == "send_guest_reply"
+    assert approvals[0]["risk"] == "DANGEROUS"
+    assert approvals[0]["status"] == "PENDING"
+    assert inbox_api.fake.posts == []
+
+
+def test_a_stale_draft_is_refused_with_409(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    fingerprint = current_fingerprint(client)
+
+    guest_writes_again(inbox_api)
+
+    response = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(fingerprint),
+    )
+
+    assert response.status_code == 409, response.text
+
+    detail = response.json()["detail"]
+
+    assert "Regenerate" in detail
+    assert "prepared" in detail
+
+
+def test_a_stale_submission_creates_no_approval_and_no_run(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    fingerprint = current_fingerprint(client)
+
+    guest_writes_again(inbox_api)
+
+    client.post(f"/inbox/{REF}/reply", json=reply_payload(fingerprint))
+
+    assert inbox_api.module.approval_store.list_approvals() == []
+    assert inbox_api.module.run_store.list_runs() == []
+
+
+def test_a_stale_submission_executes_nothing_and_sends_nothing(inbox_api):
+    client = inbox_api.client("ADMIN")
+
+    fingerprint = current_fingerprint(client)
+
+    guest_writes_again(inbox_api)
+
+    client.post(f"/inbox/{REF}/reply", json=reply_payload(fingerprint))
+
+    # No POST reached the provider...
+    assert inbox_api.fake.posts == []
+
+    # ...and no tool ran at all, which the audit trail is the authority on.
+    events = client.get("/audit/events?limit=100").json()
+
+    assert [event for event in events if event["event_type"] == "TOOL_EXECUTED"] == []
+    assert [event for event in events if event["event_type"] == "TOOL_REQUESTED"] == []
+
+
+def test_identical_text_does_not_make_a_stale_draft_current(inbox_api):
+    """The guard is tied to the fingerprint, never to the wording.
+
+    A draft written before the guest's latest message is stale even if the words
+    it carries happen to be exactly the words a fresh draft would carry. The
+    same text submitted with the refreshed fingerprint is accepted, so it is
+    demonstrably the fingerprint -- not the text -- that decided.
+    """
+    client = inbox_api.client("ADMIN")
+
+    stale_fingerprint = current_fingerprint(client)
+
+    guest_writes_again(inbox_api)
+
+    refused = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(stale_fingerprint),
+    )
+
+    assert refused.status_code == 409, refused.text
+
+    accepted = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(current_fingerprint(client)),
+    )
+
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_a_refreshed_fingerprint_is_accepted_after_the_conversation_moves_on(
+    inbox_api,
+):
+    """Regenerating clears the block, because it re-reads the conversation.
+
+    Regenerating a draft ends with the console reloading the conversation --
+    that reload is what hands it the new fingerprint. Driving the model is not
+    needed to prove the guard reopens; holding the *current* fingerprint is the
+    whole of the condition.
+    """
+    client = inbox_api.client("ADMIN")
+
+    stale_fingerprint = current_fingerprint(client)
+
+    guest_writes_again(inbox_api)
+
+    assert (
+        client.post(
+            f"/inbox/{REF}/reply",
+            json=reply_payload(stale_fingerprint),
+        ).status_code
+        == 409
+    )
+
+    response = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(current_fingerprint(client), body="Sure -- bags are fine."),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["approval_required"]["arguments"]["message"] == (
+        "Sure -- bags are fine."
+    )
+
+
+def test_an_edited_but_current_draft_is_accepted(inbox_api):
+    """Editing does not make a draft stale; only the conversation moving does."""
+    client = inbox_api.client("ADMIN")
+
+    response = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(
+            current_fingerprint(client),
+            subject="Re: parking",
+            body="There is one off-street space, reserved for you.",
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+
+    approval = response.json()["approval_required"]
+
+    assert approval["risk"] == "DANGEROUS"
+    assert approval["arguments"]["message"] == (
+        "There is one off-street space, reserved for you."
+    )
+    assert inbox_api.fake.posts == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        reply_payload(None),
+        reply_payload(""),
+        reply_payload("   "),
+    ],
+    ids=["missing", "blank", "whitespace"],
+)
+def test_a_submission_without_a_fingerprint_is_refused(inbox_api, payload):
+    """Arbitrary text must still carry a current fingerprint.
+
+    Rejected at the schema boundary rather than by the comparison, so a client
+    that never looked at the conversation is refused whatever the provider is
+    doing -- including during the fail-open window below.
+    """
+    response = inbox_api.client("ADMIN").post(f"/inbox/{REF}/reply", json=payload)
+
+    assert response.status_code == 422, response.text
+    assert inbox_api.module.approval_store.list_approvals() == []
+    assert inbox_api.fake.posts == []
+
+
+def test_an_unreadable_conversation_allows_the_submission_and_still_gates_it(
+    inbox_api,
+):
+    """The documented fail-open: unknown currency is not treated as stale.
+
+    A provider hiccup must not make every prepared reply unsendable. What the
+    submission buys is a PENDING DANGEROUS approval, not a send -- the human
+    gate is untouched, so the fail-open is bounded by it.
+    """
+    client = inbox_api.client("ADMIN")
+
+    fingerprint = current_fingerprint(client)
+
+    # Every subsequent thread read fails, so the live fingerprint is unknowable.
+    inbox_api.fake.thread_failures[THREAD_A] = 503
+
+    response = client.post(
+        f"/inbox/{REF}/reply",
+        json=reply_payload(fingerprint),
+    )
+
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+
+    assert payload["status"] == "WAITING_FOR_APPROVAL"
+    assert payload["approval_required"]["risk"] == "DANGEROUS"
+
+    approvals = inbox_api.module.approval_store.list_approvals()
+
+    assert [approval["status"] for approval in approvals] == ["PENDING"]
+
+    # Nothing was sent by allowing it.
+    assert inbox_api.fake.posts == []
+
+
+def test_submission_never_executes_the_send_tool(inbox_api):
+    """The pre-existing protection, restated against the guard.
+
+    Adding a rejection path must not have turned the accepted path into an
+    execution: a successful submission still runs no tool and sends nothing.
+    """
+    client = inbox_api.client("ADMIN")
+
+    client.post(f"/inbox/{REF}/reply", json=reply_payload(current_fingerprint(client)))
+
+    events = client.get("/audit/events?limit=100").json()
+
+    types = [event["event_type"] for event in events]
+
+    assert "APPROVAL_REQUIRED" in types
+    assert "TOOL_EXECUTED" not in types
+    assert inbox_api.fake.posts == []
+    assert inbox_api.module.tool_registry.get("send_guest_reply").risk.value == (
+        "DANGEROUS"
+    )
 
 
 # -- tools listing ---------------------------------------------------------

@@ -1,3 +1,4 @@
+import { ApiError } from '../api/client'
 import type {
   AgentResponse,
   DraftSummary,
@@ -543,6 +544,9 @@ export const inboxPage: InboxPage = {
   ],
 }
 
+/** The conversation state the console is looking at when it composes a reply. */
+export const CONVERSATION_FINGERPRINT = 'fp-needs-reply'
+
 export const conversationDetail: ConversationDetail = {
   conversation_ref: CONVERSATION_REF,
   property_slug: 'renovated-2nd-floor-home',
@@ -552,7 +556,7 @@ export const conversationDetail: ConversationDetail = {
   subject: 'Booking enquiry',
   is_read: true,
   status: 'needs_attention',
-  fingerprint: 'fp-needs-reply',
+  fingerprint: CONVERSATION_FINGERPRINT,
   draft: readyDraft,
   messages: [
     {
@@ -573,6 +577,16 @@ export const conversationDetail: ConversationDetail = {
     },
   ],
 }
+
+/**
+ * What the API answers when a reply was composed against a conversation state
+ * that has since moved on: a 409 whose detail is the operator-facing message.
+ */
+export const STALE_REPLY_MESSAGE =
+  'New activity arrived in this conversation after this draft was prepared. ' +
+  'Regenerate the draft before sending.'
+
+export const staleReplyConflict = new ApiError(STALE_REPLY_MESSAGE, 409)
 
 export const GUEST_REPLY_SUBJECT = 'Thank you'
 

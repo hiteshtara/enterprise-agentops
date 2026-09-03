@@ -303,10 +303,29 @@ class GuestReplyRequest(BaseModel):
 
     The text is carried verbatim into the approval record, so what the approver
     reads is what the guest receives.
+
+    `conversation_fingerprint` is the state the submitter was looking at when
+    they composed this. It is required, and required of *every* submission --
+    not only of a prepared draft -- because otherwise composing arbitrary text
+    would be the way around the staleness check. The route refuses the
+    submission when it no longer matches the live conversation: a reply written
+    before the guest's latest message answers a question that has moved on, and
+    that is decided on this token rather than on the wording, since a stale
+    draft whose words happen to match a fresh one is still stale.
+
+    The value is opaque here on purpose -- the route compares it, nothing parses
+    it -- so the constraint is only that it is present and not blank. Rejecting
+    blank at the schema boundary keeps a client that never read the conversation
+    out even while the provider is unreadable and the comparison itself cannot
+    judge.
     """
 
     subject: str = Field(min_length=1)
     message: str = Field(min_length=1)
+    conversation_fingerprint: str = Field(
+        min_length=1,
+        pattern=r"^\S+$",
+    )
 
 
 class KnowledgeItemSummary(BaseModel):

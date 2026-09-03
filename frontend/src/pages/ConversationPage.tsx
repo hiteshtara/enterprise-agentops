@@ -126,14 +126,25 @@ export function ConversationPage() {
   }
 
   async function submitForApproval() {
-    if (!subject.trim() || !message.trim() || isStale) return
+    // The fingerprint is the conversation state this text was written against.
+    // Submitting without one is refused by the server, so there is nothing to
+    // gain by trying -- and the refusal to send here is convenience anyway: the
+    // server re-checks currency and answers 409 if the guest has written since.
+    const fingerprint = detail?.fingerprint
+
+    if (!subject.trim() || !message.trim() || isStale || !fingerprint) return
 
     setBusy('submit')
     setError(null)
     setOutcome(null)
 
     try {
-      const response = await requestGuestReply(conversationRef, subject, message)
+      const response = await requestGuestReply(
+        conversationRef,
+        subject,
+        message,
+        fingerprint,
+      )
 
       setApproval(response.approval_required)
     } catch (caught) {
