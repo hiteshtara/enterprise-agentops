@@ -89,8 +89,14 @@ class LodgifyMessagingTools:
             )
 
         # House rules travel with the conversation so drafting never depends on
-        # the model remembering to look them up.
-        return {"ok": True, **conversation, "reply_guidance": reply_guidance()}
+        # the model remembering to look them up. The guidance is computed *from*
+        # the messages, so it reports what is still open rather than every topic
+        # the thread has ever mentioned.
+        return {
+            "ok": True,
+            **conversation,
+            "reply_guidance": reply_guidance(conversation.get("messages")),
+        }
 
     def send_guest_reply(
         self,

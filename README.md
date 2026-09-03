@@ -853,6 +853,22 @@ uv run python -m app.seed_data          # demo data: 24 batches + 4 demo users
 uv run uvicorn app.main:app --reload    # http://127.0.0.1:8000
 ```
 
+### The Lodgify credential
+
+The app reads `LODGIFY_API_KEY` from the process environment and nothing else —
+there is no dotenv dependency and no fallback value, by design. For local work,
+put the key in a gitignored `.env` and let `uv` inject it:
+
+```bash
+printf 'LODGIFY_API_KEY=...\n' > .env && chmod 600 .env   # never committed
+uv run --env-file .env uvicorn app.main:app --reload
+```
+
+`--env-file` keeps the secret out of source, out of shell history, and out of any
+process that does not opt in. Without it the connector is simply absent: no
+Lodgify tools are registered and `/inbox` returns 503, which is the intended
+behaviour rather than a broken state.
+
 Schema and seed data are separate steps on purpose: **migrations never insert
 application data**, so the same migration chain is safe to run in an environment
 that must not receive demo users.

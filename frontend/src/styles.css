@@ -876,3 +876,19 @@ a.card.conversation-row:hover {
   max-height: none;
   overflow: visible;
 }
+
+.no-reply-needed {
+  border: 1px solid rgba(63, 185, 80, 0.4);
+  background: var(--ok-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.no-reply-needed strong {
+  display: block;
+  color: var(--ok);
+  margin-bottom: 4px;
+}

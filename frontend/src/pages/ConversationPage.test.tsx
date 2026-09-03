@@ -257,4 +257,92 @@ describe('ConversationPage', () => {
     expect(api.requestGuestReply).not.toHaveBeenCalled()
     expect(api.resolveApproval).not.toHaveBeenCalled()
   })
+
+  describe('NO_REPLY_NEEDED', () => {
+    function draftAnswering(answer: string) {
+      vi.mocked(api.runAgent).mockResolvedValue({
+        run_id: 'run-draft',
+        status: 'COMPLETED',
+        answer,
+        trace: [],
+        approval_required: null,
+      })
+    }
+
+    async function generateDraft() {
+      const user = userEvent.setup()
+
+      await screen.findByText('Is there parking at the house?')
+      await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+
+      return user
+    }
+
+    it('shows "No reply needed" instead of inventing text', async () => {
+      draftAnswering('NO_REPLY_NEEDED')
+
+      renderConversation()
+
+      await generateDraft()
+
+      expect(await screen.findByText('No reply needed')).toBeInTheDocument()
+
+      // Nothing was written into the box for a person to accidentally send.
+      expect(screen.getByLabelText('Message')).toHaveValue('')
+    })
+
+    it('sends nothing and creates no approval', async () => {
+      draftAnswering('NO_REPLY_NEEDED')
+
+      renderConversation()
+
+      await generateDraft()
+
+      await screen.findByText('No reply needed')
+
+      expect(api.requestGuestReply).not.toHaveBeenCalled()
+      expect(api.resolveApproval).not.toHaveBeenCalled()
+
+      // And the action that would send stays unavailable while the box is empty.
+      expect(screen.getByRole('button', { name: 'Send for approval' })).toBeDisabled()
+    })
+
+    it('tolerates a trailing full stop on the sentinel', async () => {
+      draftAnswering('NO_REPLY_NEEDED.')
+
+      renderConversation()
+
+      await generateDraft()
+
+      expect(await screen.findByText('No reply needed')).toBeInTheDocument()
+    })
+
+    it('treats a real draft as a draft, not as the sentinel', async () => {
+      draftAnswering("You're very welcome!")
+
+      renderConversation()
+
+      await generateDraft()
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Message')).toHaveValue("You're very welcome!"),
+      )
+
+      expect(screen.queryByText('No reply needed')).not.toBeInTheDocument()
+    })
+
+    it('clears the notice once the host writes something', async () => {
+      draftAnswering('NO_REPLY_NEEDED')
+
+      renderConversation()
+
+      const user = await generateDraft()
+
+      await screen.findByText('No reply needed')
+
+      await user.type(screen.getByLabelText('Message'), 'Actually, one thing…')
+
+      expect(screen.queryByText('No reply needed')).not.toBeInTheDocument()
+    })
+  })
 })

@@ -16,19 +16,39 @@ import { StatusBadge } from './InboxPage'
 const DEFAULT_SUBJECT = 'Re: your message'
 
 /**
+ * The exact token a draft uses to say that no message is worth sending.
+ * Mirrors `NO_REPLY_NEEDED` in app/hospitality.py by hand, like the rest of the
+ * API contract in src/api/types.ts.
+ */
+const NO_REPLY_NEEDED = 'NO_REPLY_NEEDED'
+
+/**
  * Drafting goes through the ordinary agent run, so it is recorded, audited and
  * measured like any other model call. The instruction is explicit that this is
  * a draft: the model has no path to send from here anyway -- `send_guest_reply`
  * would park for approval -- but asking for a draft is clearer than relying on
  * the guard to catch it.
+ *
+ * The prompt stays deliberately thin. How to read a conversation, when to stay
+ * quiet, and what may be claimed about a property are durable business rules,
+ * so they live in the hospitality knowledge layer and arrive with the
+ * conversation itself -- not in a string in the browser.
  */
 function draftPrompt(conversationRef: string): string {
   return (
     `Read guest conversation ${conversationRef} with get_guest_conversation, ` +
-    `then write a reply for the host to review. Follow the reply guidance the ` +
-    `tool returns. Do NOT send anything. Respond with the message text only -- ` +
-    `no preamble, no subject line, no quotes.`
+    `then follow the reply_guidance it returns exactly -- especially ` +
+    `conversation_state and how_to_read_the_conversation. Reply only to what is ` +
+    `still open; never re-answer something already answered. Do NOT send ` +
+    `anything. Respond with the message text only -- no preamble, no subject ` +
+    `line, no quotes -- or exactly ${NO_REPLY_NEEDED} if no message is worth ` +
+    `sending.`
   )
+}
+
+/** Whether the model concluded that sending anything would add no value. */
+function isNoReplyNeeded(answer: string): boolean {
+  return answer.trim().replace(/[.\s]+$/, '') === NO_REPLY_NEEDED
 }
 
 function outcomeTone(status: SendOutcome['status']): string {
@@ -50,6 +70,7 @@ export function ConversationPage() {
   const [message, setMessage] = useState('')
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [outcome, setOutcome] = useState<SendOutcome | null>(null)
+  const [noReplyNeeded, setNoReplyNeeded] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState<'draft' | 'submit' | 'decide' | null>(null)
 
@@ -58,13 +79,26 @@ export function ConversationPage() {
   async function generateDraft() {
     setBusy('draft')
     setError(null)
+    setNoReplyNeeded(false)
 
     try {
       const response = await runAgent(draftPrompt(conversationRef))
+      const answer = response.answer ?? ''
 
-      // The agent's answer is a suggestion. It lands in the textarea for a
-      // person to edit; nothing is sent, and nothing is auto-filled beyond it.
-      if (response.answer) setMessage(response.answer)
+      if (isNoReplyNeeded(answer)) {
+        // Concluding that nothing needs saying is a real outcome, not an empty
+        // draft. Show it, leave the box empty, and touch nothing: no message is
+        // composed, no approval is created, and the Lodgify thread is not
+        // marked replied.
+        setNoReplyNeeded(true)
+        setMessage('')
+
+        return
+      }
+
+      // Otherwise the agent's answer is a suggestion. It lands in the textarea
+      // for a person to edit; nothing is sent.
+      if (answer) setMessage(answer)
     } catch (caught) {
       setError(caught)
     } finally {
@@ -195,6 +229,17 @@ export function ConversationPage() {
                 Suggested reply
               </div>
 
+              {noReplyNeeded ? (
+                <div className="no-reply-needed" role="status">
+                  <strong>No reply needed</strong>
+                  <div>
+                    Everything the guest asked has been answered, and their last message
+                    was a closing courtesy. Nothing has been sent and the conversation
+                    has not been marked replied — write something below if you disagree.
+                  </div>
+                </div>
+              ) : null}
+
               <label className="field-label" htmlFor="reply-subject">
                 Subject
               </label>
@@ -216,7 +261,10 @@ export function ConversationPage() {
                 id="reply-message"
                 value={message}
                 placeholder="Write the reply, or generate a draft to edit."
-                onChange={(event) => setMessage(event.target.value)}
+                onChange={(event) => {
+                  setMessage(event.target.value)
+                  setNoReplyNeeded(false)
+                }}
                 disabled={busy !== null}
               />
 
