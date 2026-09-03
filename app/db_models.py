@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, String, Text
+from sqlalchemy import Boolean, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -302,3 +302,116 @@ class UserRecord(Base):
         String(40),
         nullable=False,
     )
+
+
+class ModelExecutionRecord(Base):
+    """One model invocation, with measured duration and reported usage.
+
+    A dedicated table rather than a RunStep JSON blob because these columns are
+    summed and averaged per run and per day; aggregating over JSON would mean
+    scanning and parsing every row.
+    """
+
+    __tablename__ = "model_executions"
+
+    model_execution_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        nullable=False,
+        index=True,
+    )
+
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    provider: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    model: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+
+    provider_request_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        index=True,
+    )
+
+    started_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+    completed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Null means the provider did not report the figure -- never zero.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ToolExecutionRecord(Base):
+    """One execution of a deterministic tool callable.
+
+    Timing covers the callable only. A run parked waiting for a human is not
+    tool latency, so an approval wait is never included here.
+    """
+
+    __tablename__ = "tool_executions"
+
+    tool_execution_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        nullable=False,
+        index=True,
+    )
+
+    tool_call_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    tool_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        index=True,
+    )
+
+    started_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+    completed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # How many executions of this tool in this run already failed.
+    retry_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    arguments_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)

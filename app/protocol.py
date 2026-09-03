@@ -69,11 +69,43 @@ class ToolCall:
 
 
 @dataclass
+class ModelUsage:
+    """Token accounting for one model call, normalised across providers.
+
+    Every field is optional. A provider that does not report a figure leaves it
+    None, which stays None all the way to the console -- an unknown count is
+    never rendered as zero.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+        }
+
+
+@dataclass
 class ModelResponse:
-    """One model turn: free text, tool calls, or both."""
+    """One model turn: free text, tool calls, or both.
+
+    `usage`, `model_name` and `provider_request_id` are observability metadata
+    normalised by the provider. No vendor SDK object reaches the runtime.
+    """
 
     text: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: ModelUsage | None = None
+    model_name: str | None = None
+    provider_request_id: str | None = None
 
     def first_tool_call(self) -> ToolCall | None:
         """The runtime executes one tool per iteration; this is that one."""

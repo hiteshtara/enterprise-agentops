@@ -8,6 +8,7 @@ from app.protocol import (
     MessageRole,
     ModelMessage,
     ModelResponse,
+    ModelUsage,
     ToolCall,
     ToolDefinition,
 )
@@ -165,7 +166,63 @@ class OpenAIModelProvider(ModelProvider):
 
         text = response.output_text or None
 
-        return ModelResponse(text=text, tool_calls=tool_calls)
+        return ModelResponse(
+            text=text,
+            tool_calls=tool_calls,
+            usage=self.to_usage(response),
+            model_name=getattr(response, "model", None) or self.model,
+            provider_request_id=getattr(response, "id", None),
+        )
+
+    def to_usage(self, response: Any) -> ModelUsage | None:
+        """Normalise the Responses API usage block into ModelUsage.
+
+        Every field is read defensively: a provider that omits a figure, or an
+        SDK version that renames one, yields None rather than a wrong number.
+        This is the only place OpenAI's usage field names appear.
+        """
+        usage = getattr(response, "usage", None)
+
+        if usage is None:
+            return None
+
+        input_tokens = self.count(usage, "input_tokens")
+        output_tokens = self.count(usage, "output_tokens")
+        total_tokens = self.count(usage, "total_tokens")
+
+        if total_tokens is None and (
+            input_tokens is not None or output_tokens is not None
+        ):
+            total_tokens = (input_tokens or 0) + (output_tokens or 0)
+
+        return ModelUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cached_input_tokens=self.count(
+                getattr(usage, "input_tokens_details", None),
+                "cached_tokens",
+            ),
+            reasoning_tokens=self.count(
+                getattr(usage, "output_tokens_details", None),
+                "reasoning_tokens",
+            ),
+        )
+
+    def count(self, source: Any, name: str) -> int | None:
+        """Read an integer counter, or None if it is absent or not a number."""
+        if source is None:
+            return None
+
+        value = getattr(source, name, None)
+
+        if value is None and isinstance(source, dict):
+            value = source.get(name)
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+
+        return value
 
     def to_tool_call(self, item: Any) -> ToolCall:
         try:

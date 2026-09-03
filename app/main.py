@@ -31,8 +31,14 @@ from app.models import (
     Overview,
     ReconcileResponse,
     RunDetail,
+    RunMetrics,
     RunSummary,
     ToolSummary,
+)
+from app.observability_store import (
+    ModelExecutionStore,
+    RunMetricsService,
+    ToolExecutionStore,
 )
 from app.overview import OverviewService
 from app.reconciliation import (
@@ -74,6 +80,9 @@ model_provider = OpenAIModelProvider()
 approval_store = ApprovalStore(database=database)
 audit_store = AuditStore(database=database)
 run_store = RunStore(database=database)
+model_execution_store = ModelExecutionStore(database=database)
+tool_execution_store = ToolExecutionStore(database=database)
+run_metrics = RunMetricsService(database=database)
 migration_store = MigrationBatchStore(database=database)
 user_store = UserStore(database=database)
 
@@ -100,6 +109,8 @@ agent = AgentService(
     approval_store=approval_store,
     audit_store=audit_store,
     run_store=run_store,
+    model_executions=model_execution_store,
+    tool_executions=tool_execution_store,
 )
 
 
@@ -320,6 +331,24 @@ def get_run(
         updated_at=record.updated_at,
         steps=run_store.list_steps(run_id),
     )
+
+
+@app.get(
+    "/runs/{run_id}/metrics",
+    response_model=RunMetrics,
+)
+def get_run_metrics(
+    run_id: str,
+    user: User = Depends(require_view_runs),
+) -> RunMetrics:
+    """Measured execution metrics for a run. Follows VIEW_RUNS."""
+    if run_store.get_run(run_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown run ID: {run_id}",
+        )
+
+    return RunMetrics(**run_metrics.build(run_id))
 
 
 @app.get(

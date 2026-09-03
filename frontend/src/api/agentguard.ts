@@ -14,6 +14,7 @@ import type {
   Overview,
   ReconcileResponse,
   RunDetail,
+  RunMetrics,
   RunStatus,
   RunSummary,
   ToolSummary,
@@ -76,6 +77,10 @@ export function listRuns(options?: {
 
 export function getRun(runId: string): Promise<RunDetail> {
   return request<RunDetail>(`/runs/${runId}`)
+}
+
+export function getRunMetrics(runId: string): Promise<RunMetrics> {
+  return request<RunMetrics>(`/runs/${runId}/metrics`)
 }
 
 export function listAuditEvents(options?: {

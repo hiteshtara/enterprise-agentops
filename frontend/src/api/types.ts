@@ -174,3 +174,54 @@ export interface ReconcileResponse {
   reconciled: ReconciledRun[]
   count: number
 }
+
+export interface ModelExecutionSummary {
+  sequence: number
+  provider: string
+  model: string | null
+  status: 'COMPLETED' | 'FAILED'
+  started_at: string
+  completed_at: string | null
+  duration_ms: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  cached_input_tokens: number | null
+  reasoning_tokens: number | null
+  estimated_cost_usd: number | null
+  error_type: string | null
+}
+
+export interface ToolExecutionSummary {
+  tool_name: string
+  status: 'COMPLETED' | 'FAILED'
+  started_at: string
+  completed_at: string | null
+  duration_ms: number | null
+  retry_number: number
+  arguments: Record<string, Json> | null
+  error: Record<string, Json> | null
+}
+
+/**
+ * Measured execution metrics. A null field means the figure is genuinely
+ * unknown -- never render it as zero.
+ */
+export interface RunMetrics {
+  run_id: string
+  elapsed_ms: number | null
+  active_execution_ms: number | null
+  approval_wait_ms: number | null
+  model_calls: number
+  model_duration_ms: number | null
+  tool_calls: number
+  tool_duration_ms: number | null
+  tool_failures: number
+  tool_retries: number
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  estimated_cost_usd: number | null
+  models: ModelExecutionSummary[]
+  tools: ToolExecutionSummary[]
+}

@@ -581,6 +581,61 @@ Audit shows the whole chain: the operator's read, their approval request, the
 denied attempt, the approver's grant, and the write they authorised.
 ```
 
+## Observability
+
+Run detail answers *how did this perform*, next to the timeline that answers *what
+happened*. Every figure is measured or derived from persisted data — nothing is
+estimated except cost, which says so.
+
+```
+Model              gpt-5.4-mini-2026-03-17
+Elapsed            6.7 s      wall clock, start to last update
+Active execution   2.4 s      measured inside model calls and tool callables
+Approval wait      4.2 s      summed from approval created_at -> resolved_at
+Model calls        3          Tool calls  2      Tool failures  0
+Input tokens       1,146      Output      63     Total  1,209
+Estimated cost     $0.000412  estimate, not billing
+```
+
+**Unknown is never zero.** A provider that reports no token count, or a model with no
+configured price, shows *Unavailable* / `$—`. A `$0.00` would claim the call was free,
+which is a different and false statement from "we do not know".
+
+**What is measured, and how**
+
+- *Latency* uses a **monotonic** clock around the provider call and around the tool
+  callable. Durations are never computed by subtracting wall-clock timestamps, which
+  can jump. Timestamps are still stored, for ordering and display.
+- *Tokens and model name* are normalised into `ModelUsage` inside `ModelProvider`.
+  No OpenAI object or field name reaches the runtime, so a second provider reports
+  the same shape.
+- *Cost* is looked up in `app/pricing.py` — one module, explicit list prices with an
+  "as of" date, nothing fetched at runtime. Dated model snapshots are listed
+  individually: pricing a snapshot as its alias is a recorded decision, never a
+  prefix match, so an unlisted model yields no cost rather than someone else's.
+- *Approval wait* is the sum over resolved approvals of `resolved_at - created_at`.
+  A still-pending approval contributes nothing — its wait has not finished, so the
+  figure is unknown rather than understated.
+- *Active execution* is model time plus tool time. **It deliberately excludes the
+  approval wait**: a run parked for a human is not executing. That is why elapsed and
+  active execution differ so widely in the example above.
+- *Tool retries*: an execution is a retry when the same tool already failed in the
+  same run. Where correlation would be guesswork, the count is simply `tool_failures`.
+
+Metrics live in `model_executions` and `tool_executions` — real indexed columns, not
+JSON, because the console aggregates them.
+
+### Observability is not the audit log
+
+| | Audit | Observability |
+|---|---|---|
+| Question | who did what, when | how did it perform |
+| Record type | compliance | measurement |
+| Rows | `audit_events` | `model_executions`, `tool_executions` |
+
+Neither is derived from the other, and a metric never becomes an audit event for
+convenience. `GET /runs/{run_id}/metrics` follows `VIEW_RUNS`.
+
 ## Web console
 
 `frontend/` is the AgentGuard console: React 19 + TypeScript on Vite, plain CSS, no

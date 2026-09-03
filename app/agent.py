@@ -4,12 +4,19 @@ from typing import Any
 from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
 from app.model_provider import ModelProvider
+from app.observability_store import (
+    ExecutionStatus,
+    ModelExecutionStore,
+    ToolExecutionStore,
+)
+from app.pricing import PricingRegistry, default_pricing_registry
 from app.protocol import (
     ModelMessage,
     ToolCall,
     serialise_conversation,
 )
 from app.run_store import RunStatus, RunStore, StepType
+from app.timing import MonotonicNs, Stopwatch
 from app.tool_registry import (
     ApprovalRequired,
     ToolRegistry,
@@ -93,6 +100,11 @@ class AgentService:
         audit_store: AuditStore,
         run_store: RunStore,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        model_executions: ModelExecutionStore | None = None,
+        tool_executions: ToolExecutionStore | None = None,
+        pricing: PricingRegistry | None = None,
+        provider_name: str = "openai",
+        monotonic_ns: MonotonicNs | None = None,
     ) -> None:
         if max_iterations < 1:
             raise ValueError(
@@ -105,6 +117,13 @@ class AgentService:
         self.audit_store = audit_store
         self.run_store = run_store
         self.max_iterations = max_iterations
+
+        # Metric persistence is optional so the runtime still works without it.
+        self.model_executions = model_executions
+        self.tool_executions = tool_executions
+        self.pricing = pricing or default_pricing_registry
+        self.provider_name = provider_name
+        self.monotonic_ns = monotonic_ns
 
     # -- entry points ------------------------------------------------------
 
@@ -250,14 +269,19 @@ class AgentService:
             arguments=arguments,
         )
 
+        watch = Stopwatch(self.monotonic_ns)
+
         try:
-            result = self.tool_registry.execute(
-                pending.tool,
-                arguments,
-                approved=True,
-            )
+            with watch:
+                result = self.tool_registry.execute(
+                    pending.tool,
+                    arguments,
+                    approved=True,
+                )
 
         except RECOVERABLE_TOOL_ERRORS as exc:
+            self.record_tool_execution(run_id, call, watch, exc=exc)
+
             conversation.append(
                 ModelMessage.tool_result(
                     call.id,
@@ -271,6 +295,8 @@ class AgentService:
             return self.approval_outcome(approval_id, pending.tool, None, outcome)
 
         except Exception as exc:  # noqa: BLE001 -- deliberate safety net
+            self.record_tool_execution(run_id, call, watch, exc=exc)
+
             return self.approval_outcome(
                 approval_id,
                 pending.tool,
@@ -278,6 +304,7 @@ class AgentService:
                 self.abort(run_id, call, exc, [], actor_user_id),
             )
 
+        self.record_tool_execution(run_id, call, watch, result=result)
         self.record_execution(run_id, call, result, actor_user_id)
 
         conversation.append(
@@ -329,10 +356,7 @@ class AgentService:
         actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         for _ in range(self.max_iterations):
-            response = self.model.generate_with_tools(
-                conversation,
-                self.tool_registry.definitions(),
-            )
+            response = self.call_model(run_id, conversation)
 
             self.run_store.add_step(
                 run_id,
@@ -392,15 +416,22 @@ class AgentService:
                 arguments=call.arguments,
             )
 
+            watch = Stopwatch(self.monotonic_ns)
+
             try:
-                result = self.tool_registry.execute(call.name, call.arguments)
+                with watch:
+                    result = self.tool_registry.execute(call.name, call.arguments)
 
             except ApprovalRequired as approval:
+                # Parking for a human is not tool execution: nothing ran, so
+                # nothing is timed.
                 return self.park(
                     run_id, conversation, call, approval, trace, actor_user_id
                 )
 
             except RECOVERABLE_TOOL_ERRORS as exc:
+                self.record_tool_execution(run_id, call, watch, exc=exc)
+
                 conversation.append(
                     ModelMessage.tool_result(
                         call.id,
@@ -420,8 +451,11 @@ class AgentService:
                 continue
 
             except Exception as exc:  # noqa: BLE001 -- deliberate safety net
+                self.record_tool_execution(run_id, call, watch, exc=exc)
+
                 return self.abort(run_id, call, exc, trace, actor_user_id)
 
+            self.record_tool_execution(run_id, call, watch, result=result)
             self.record_execution(run_id, call, result, actor_user_id)
 
             trace.append(
@@ -558,6 +592,112 @@ class AgentService:
             "trace": trace,
             "approval_required": None,
         }
+
+    # -- measurement -------------------------------------------------------
+
+    def call_model(
+        self,
+        run_id: str,
+        conversation: list[ModelMessage],
+    ):
+        """Invoke the model, measuring and persisting what the call cost.
+
+        Timing is monotonic and wraps only the provider call. Usage and model
+        name arrive already normalised by the provider -- the runtime never
+        sees a vendor field name.
+        """
+        watch = Stopwatch(self.monotonic_ns)
+
+        try:
+            with watch:
+                response = self.model.generate_with_tools(
+                    conversation,
+                    self.tool_registry.definitions(),
+                )
+
+        except Exception as exc:
+            self.record_model_execution(
+                run_id,
+                watch,
+                status=ExecutionStatus.FAILED,
+                model=None,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+
+            raise
+
+        self.record_model_execution(
+            run_id,
+            watch,
+            status=ExecutionStatus.COMPLETED,
+            model=response.model_name,
+            usage=response.usage,
+            provider_request_id=response.provider_request_id,
+        )
+
+        return response
+
+    def record_model_execution(
+        self,
+        run_id: str,
+        watch: Stopwatch,
+        status: ExecutionStatus,
+        model: str | None,
+        usage: Any = None,
+        provider_request_id: str | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if self.model_executions is None:
+            return
+
+        self.model_executions.record(
+            run_id=run_id,
+            provider=self.provider_name,
+            model=model,
+            status=status,
+            started_at=watch.started_at or "",
+            completed_at=watch.completed_at,
+            duration_ms=watch.duration_ms,
+            usage=usage,
+            # An unpriced model yields None, never a zero cost.
+            estimated_cost_usd=self.pricing.estimate(self.provider_name, model, usage),
+            provider_request_id=provider_request_id,
+            error_type=error_type,
+            error_message=error_message,
+        )
+
+    def record_tool_execution(
+        self,
+        run_id: str,
+        call: ToolCall,
+        watch: Stopwatch,
+        result: Any = None,
+        exc: Exception | None = None,
+    ) -> None:
+        """Persist one tool execution. Approval waits are never recorded here."""
+        if self.tool_executions is None:
+            return
+
+        failed = exc is not None
+
+        self.tool_executions.record(
+            run_id=run_id,
+            tool_name=call.name,
+            tool_call_id=call.id,
+            status=ExecutionStatus.FAILED if failed else ExecutionStatus.COMPLETED,
+            started_at=watch.started_at or "",
+            completed_at=watch.completed_at,
+            duration_ms=watch.duration_ms,
+            arguments=call.arguments,
+            result=None if failed else result,
+            error=(
+                {"error_type": type(exc).__name__, "error": str(exc)}
+                if exc is not None
+                else None
+            ),
+        )
 
     # -- shared recording --------------------------------------------------
 

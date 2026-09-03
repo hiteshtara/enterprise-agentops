@@ -276,6 +276,26 @@ The pattern to follow instead (see `app/migration_store.py` + `app/tool_setup.py
 generically: it rejects any free-text string argument on the tool. New database tools
 should be covered by a similar assertion.
 
+### Observability invariants
+
+- **Provider usage is normalised inside `ModelProvider`.** `ModelUsage` /
+  `model_name` / `provider_request_id` come out already neutral; no vendor field
+  name or SDK object may reach `AgentService`.
+- **Durations use a monotonic clock** (`app/timing.Stopwatch`), never wall-clock
+  subtraction. The clock is injectable so tests never sleep. Timestamps are stored
+  for display and ordering only.
+- **Unknown never becomes zero.** An unreported token count or an unpriced model
+  stays `None` through the store, the API and the UI. `$0.00` claims a call was
+  free; `$—` says we do not know.
+- **Pricing lives only in `app/pricing.py`**, as explicit entries with an "as of"
+  date. Never infer a price by prefix or family, and never fetch pricing at runtime.
+- **Approval wait is not execution time.** Tool timing wraps the callable only; a
+  run parked for a human records no tool execution.
+- **Audit and observability stay separate stores.** A metric never becomes an audit
+  event, and audit is not a time-series store.
+- **Metric schema changes go through Alembic** like any other, and metric columns
+  are nullable so an unknown can be stored as one.
+
 ### Schema migration invariants
 
 - **Alembic is authoritative for persistent schema evolution.** Never evolve a

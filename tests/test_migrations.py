@@ -27,8 +27,10 @@ EXPECTED_TABLES = {
     "approvals",
     "audit_events",
     "migration_batches",
+    "model_executions",
     "run_steps",
     "runs",
+    "tool_executions",
     "users",
 }
 
@@ -47,6 +49,17 @@ EXPECTED_INDEXES = {
     "run_steps": {"ix_run_steps_run_id"},
     "runs": {"ix_runs_status", "ix_runs_requested_by_user_id"},
     "users": {"ix_users_email", "ix_users_role"},
+    "model_executions": {
+        "ix_model_executions_run_id",
+        "ix_model_executions_provider",
+        "ix_model_executions_model",
+        "ix_model_executions_status",
+    },
+    "tool_executions": {
+        "ix_tool_executions_run_id",
+        "ix_tool_executions_tool_name",
+        "ix_tool_executions_status",
+    },
 }
 
 
@@ -292,3 +305,48 @@ def test_the_development_database_is_untouched(migrated, development_database_pa
             after.st_size,
             after.st_mtime_ns,
         )
+
+
+def test_metric_columns_are_nullable_so_unknown_never_becomes_zero(migrated):
+    """A token count or cost the provider never reported must stay NULL."""
+    inspector = inspect(migrated.engine)
+
+    columns = {c["name"]: c for c in inspector.get_columns("model_executions")}
+
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+        "estimated_cost_usd",
+        "duration_ms",
+    ):
+        assert columns[name]["nullable"], f"{name} must be nullable"
+
+
+def test_upgrading_a_populated_baseline_database_preserves_data(tmp_path):
+    """The path a real deployment takes: baseline with rows, then upgrade."""
+    from sqlalchemy import text
+
+    database = Database(url=f"sqlite:///{tmp_path / 'populated.db'}")
+
+    config = alembic_config(database)
+
+    command.upgrade(config, "baa1819ad1d6")
+
+    run_store = RunStore(database=database)
+
+    run_id = run_store.create_run("Investigate batch 43.")
+    run_store.complete(run_id, "Done.")
+
+    command.upgrade(config, "head")
+
+    # Existing rows survive, and the new tables are present and empty.
+    assert run_store.get_run(run_id).final_answer == "Done."
+
+    with database.session() as session:
+        for table in ("model_executions", "tool_executions"):
+            assert session.execute(text(f"select count(*) from {table}")).scalar() == 0
+
+    database.dispose()

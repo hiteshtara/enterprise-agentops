@@ -22,6 +22,7 @@ import {
   completedRunDetail,
   operatorUser,
   runDetail,
+  runMetrics,
   runSummaries,
   waitingRunDetail,
 } from '../test/factories'
@@ -485,38 +486,35 @@ describe('run detail statistics and sharing', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     vi.mocked(api.getRun).mockResolvedValue(completedRunDetail)
+    vi.mocked(api.getRunMetrics).mockResolvedValue(runMetrics)
   })
 
-  it('renders counts derived from the run steps', async () => {
+  it('counts the run timeline without duplicating measured metrics', async () => {
     renderWithRouter(detailRoute(), `/runs/${RUN_ID}`)
 
-    const panel = within(await screen.findByRole('region', { name: 'Run statistics' }))
+    const panel = within(await screen.findByRole('group', { name: 'Timeline metrics' }))
 
     const stat = (label: string) =>
       panel.getByText(label).parentElement?.querySelector('dd')?.textContent
 
     expect(stat('Steps')).toBe('6')
-    expect(stat('Model turns')).toBe('1')
+    expect(stat('Model responses')).toBe('1')
     expect(stat('Tools requested')).toBe('1')
-    expect(stat('Tools executed')).toBe('2')
-    expect(stat('Tool failures')).toBe('0')
     expect(stat('Approvals requested')).toBe('1')
     expect(stat('Approvals resolved')).toBe('1')
+
+    // Elapsed and approval wait are measured, so they belong to Observability.
+    expect(panel.queryByText('Elapsed')).not.toBeInTheDocument()
+    expect(panel.queryByText('Approval wait')).not.toBeInTheDocument()
   })
 
-  it('shows elapsed time and approval wait derived from timestamps', async () => {
+  it('shows measured metrics alongside the timeline counts', async () => {
     renderWithRouter(detailRoute(), `/runs/${RUN_ID}`)
 
-    const panel = within(await screen.findByRole('region', { name: 'Run statistics' }))
-
-    expect(panel.getByText('Elapsed')).toBeInTheDocument()
-    expect(panel.getByText('Approval wait')).toBeInTheDocument()
-  })
-
-  it('marks the panel as derived rather than measured', async () => {
-    renderWithRouter(detailRoute(), `/runs/${RUN_ID}`)
-
-    expect(await screen.findByText(/Derived statistics/)).toBeInTheDocument()
+    expect(
+      await screen.findByRole('region', { name: 'Observability' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Timeline counts' })).toBeInTheDocument()
   })
 
   it('copies the run link and confirms it accessibly', async () => {

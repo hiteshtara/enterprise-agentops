@@ -10,9 +10,21 @@ from app.model_provider import ModelProvider
 from app.protocol import (
     ModelMessage,
     ModelResponse,
+    ModelUsage,
     ToolCall,
     ToolDefinition,
 )
+
+DEMO_MODEL = "gpt-5.4-mini"
+
+
+def fake_usage(input_tokens: int = 100, output_tokens: int = 20) -> ModelUsage:
+    """Deterministic token counts. No test ever calls a real provider."""
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+    )
 
 
 def tool_response(
@@ -21,6 +33,8 @@ def tool_response(
     call_id: str = "call-1",
     argument_error: str | None = None,
     text: str | None = None,
+    usage: ModelUsage | None = None,
+    model_name: str | None = DEMO_MODEL,
 ) -> ModelResponse:
     return ModelResponse(
         text=text,
@@ -32,11 +46,22 @@ def tool_response(
                 argument_error=argument_error,
             )
         ],
+        usage=usage,
+        model_name=model_name,
     )
 
 
-def final_response(text: str) -> ModelResponse:
-    return ModelResponse(text=text, tool_calls=[])
+def final_response(
+    text: str,
+    usage: ModelUsage | None = None,
+    model_name: str | None = DEMO_MODEL,
+) -> ModelResponse:
+    return ModelResponse(
+        text=text,
+        tool_calls=[],
+        usage=usage,
+        model_name=model_name,
+    )
 
 
 class RecordingModelProvider(ModelProvider):

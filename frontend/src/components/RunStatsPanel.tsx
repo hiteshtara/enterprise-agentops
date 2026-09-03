@@ -1,73 +1,42 @@
-import type { RunStep, RunSummary } from '../api/types'
-import { formatDuration, runStats } from '../lib/runStats'
+import type { RunStep } from '../api/types'
 
 /**
- * Counts and elapsed time derived from the run's own steps and timestamps.
+ * Counts read off the run's timeline.
  *
- * Everything here is read off durable data that already exists. There is no
- * token, cost or per-call latency measurement -- the backend does not record
- * those yet, and inventing them would make the panel a lie.
+ * Deliberately narrow: anything Observability *measures* (elapsed, approval
+ * wait, tool durations, failures) lives there instead. This panel only reports
+ * what the step history alone can say, so no figure appears twice with two
+ * different provenances.
  */
-export function RunStatsPanel({
-  run,
-  steps,
-}: {
-  run: Pick<RunSummary, 'created_at' | 'updated_at'>
-  steps: RunStep[]
-}) {
-  const stats = runStats(run, steps)
+export function RunStatsPanel({ steps }: { steps: RunStep[] }) {
+  const count = (type: RunStep['step_type']) =>
+    steps.filter((step) => step.step_type === type).length
 
-  const approvalsRequested = steps.filter(
-    (step) => step.step_type === 'APPROVAL_REQUIRED',
-  ).length
-
-  const approvalsResolved = steps.filter(
-    (step) =>
-      step.step_type === 'APPROVAL_GRANTED' || step.step_type === 'APPROVAL_DENIED',
-  ).length
-
-  const toolRequests = steps.filter(
-    (step) => step.step_type === 'TOOL_REQUESTED',
-  ).length
-
-  const items: Array<{ label: string; value: string; tone?: 'danger' }> = [
-    { label: 'Steps', value: String(steps.length) },
-    { label: 'Model turns', value: String(stats.modelTurns) },
-    { label: 'Tools requested', value: String(toolRequests) },
-    { label: 'Tools executed', value: String(stats.toolExecutions) },
+  const items = [
+    { label: 'Steps', value: steps.length },
+    { label: 'Model responses', value: count('MODEL_RESPONSE') },
+    { label: 'Tools requested', value: count('TOOL_REQUESTED') },
+    { label: 'Approvals requested', value: count('APPROVAL_REQUIRED') },
     {
-      label: 'Tool failures',
-      value: String(stats.toolFailures),
-      ...(stats.toolFailures > 0 ? { tone: 'danger' as const } : {}),
+      label: 'Approvals resolved',
+      value: count('APPROVAL_GRANTED') + count('APPROVAL_DENIED'),
     },
-    { label: 'Approvals requested', value: String(approvalsRequested) },
-    { label: 'Approvals resolved', value: String(approvalsResolved) },
-    { label: 'Elapsed', value: formatDuration(stats.durationMs) },
   ]
 
-  if (stats.approvalWaitMs !== null) {
-    items.push({
-      label: 'Approval wait',
-      value: formatDuration(stats.approvalWaitMs),
-    })
-  }
-
   return (
-    <section className="card" aria-label="Run statistics">
+    <section className="card" aria-label="Timeline counts">
       <h2 className="card-title">
-        Derived statistics
+        Timeline counts
         <span className="faint" style={{ fontWeight: 400, marginLeft: 8 }}>
-          — counted from this run&rsquo;s steps
+          — counted from this run&rsquo;s recorded steps
         </span>
       </h2>
 
-      <dl className="stat-strip">
+      <dl className="stat-strip" role="group" aria-label="Timeline metrics">
         {items.map((item) => (
           <div key={item.label}>
             <dt>{item.label}</dt>
-            <dd className={item.tone ? `tone-text-${item.tone}` : undefined}>
-              {item.value}
-            </dd>
+            <dd>{item.value}</dd>
           </div>
         ))}
       </dl>

@@ -5,6 +5,7 @@ import { useAsync } from '../hooks/useAsync'
 import { RunStatusBadge } from '../components/Badges'
 import { CopyLinkButton } from '../components/CopyLinkButton'
 import { PageHeader } from '../components/Layout'
+import { ObservabilityPanel } from '../components/ObservabilityPanel'
 import { RunStatsPanel } from '../components/RunStatsPanel'
 import { Empty, ErrorState, Loading } from '../components/States'
 import { Timeline } from '../components/Timeline'
@@ -93,7 +94,9 @@ export function RunDetailPage() {
             ) : null}
           </div>
 
-          <RunStatsPanel run={data} steps={data.steps} />
+          <ObservabilityPanel runId={data.run_id} />
+
+          <RunStatsPanel steps={data.steps} />
 
           <div>
             <div className="approval-term" style={{ marginBottom: 10 }}>

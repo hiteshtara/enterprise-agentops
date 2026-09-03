@@ -789,3 +789,11 @@ pre.json-body {
   color: var(--ok);
   min-width: 92px;
 }
+
+/* ---- observability ---- */
+
+.metric-hint {
+  font-size: 10.5px;
+  margin-top: 2px;
+  line-height: 1.3;
+}

@@ -66,11 +66,13 @@ def agent_factory(database: Database, registry: ToolRegistry):
     from app.agent import DEFAULT_MAX_ITERATIONS, AgentService
     from app.approval_store import ApprovalStore
     from app.audit_store import AuditStore
+    from app.observability_store import ModelExecutionStore, ToolExecutionStore
 
     def build(
         model,
         tool_registry: ToolRegistry | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        monotonic_ns=None,
     ) -> AgentService:
         return AgentService(
             model=model,
@@ -79,6 +81,9 @@ def agent_factory(database: Database, registry: ToolRegistry):
             audit_store=AuditStore(database=database),
             run_store=RunStore(database=database),
             max_iterations=max_iterations,
+            model_executions=ModelExecutionStore(database=database),
+            tool_executions=ToolExecutionStore(database=database),
+            monotonic_ns=monotonic_ns,
         )
 
     return build

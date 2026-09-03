@@ -149,3 +149,56 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: CurrentUser
+
+
+class ModelExecutionSummary(BaseModel):
+    sequence: int
+    provider: str
+    model: str | None = None
+    status: str
+    started_at: str
+    completed_at: str | None = None
+    duration_ms: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    error_type: str | None = None
+
+
+class ToolExecutionSummary(BaseModel):
+    tool_name: str
+    status: str
+    started_at: str
+    completed_at: str | None = None
+    duration_ms: int | None = None
+    retry_number: int = 0
+    arguments: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
+class RunMetrics(BaseModel):
+    """Measured execution metrics for one run.
+
+    Every optional field is None when the figure is genuinely unknown -- an
+    unreported token count or an unpriced model is never rendered as zero.
+    """
+
+    run_id: str
+    elapsed_ms: int | None = None
+    active_execution_ms: int | None = None
+    approval_wait_ms: int | None = None
+    model_calls: int
+    model_duration_ms: int | None = None
+    tool_calls: int
+    tool_duration_ms: int | None = None
+    tool_failures: int
+    tool_retries: int
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    models: list[ModelExecutionSummary] = []
+    tools: list[ToolExecutionSummary] = []
