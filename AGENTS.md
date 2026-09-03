@@ -296,6 +296,40 @@ should be covered by a similar assertion.
   instance, logged, audited, or returned. Importing the app must not read one.
 - **Read-only connectors have no write method**, not merely an unused one. Absence is
   the safety property.
+- **Supported provider APIs only.** A connector talks to the vendor's documented,
+  credentialed API. Never a private application endpoint, a browser cookie, a human
+  session token, or a scraped dashboard API — those authenticate as a person, have no
+  contract, and turn the audit trail into a record of something that can silently
+  change shape. Browser inspection is legitimate for *discovery*; it is never the
+  production authentication model. Reversing this is an explicit architecture and
+  security decision, recorded in the connector's reference doc.
+
+### Irreversible-action invariants
+
+Outbound actions that a third party can see cannot be un-sent. These hold for any
+such action, not only Lodgify messaging — see `docs/LODGIFY_API.md` for the evidence
+that produced them.
+
+- **Never auto-retry an externally-visible write.** Without a provider idempotency
+  key, a timeout is ambiguous: the action may already have happened. Retrying risks
+  doing it twice, to a real person. No retry middleware, no "transient error" retry.
+- **Three outcomes, not two.** `CONFIRMED_SENT`, `CONFIRMED_FAILED`, and
+  `UNKNOWN_SEND_STATE` for the ambiguous case. Unknown is not failure and is **not
+  safe to retry** — it requires human review, and the result must tell the model so
+  in words, not merely by status.
+- **Verify by re-reading, not by trusting the response.** A provider that returns no
+  identifier cannot be correlated from its own response. Snapshot before, act once,
+  re-read after, diff. Never assume one action produced one row, and when correlation
+  is ambiguous return unknown rather than guessing.
+- **A field that looks like a delivery signal usually is not.** Confirm what a status
+  field means against independent evidence before any code branches on it. Interpret
+  delivery only from a field proven to carry it.
+- **Fields that decide who an action appears to come from, or whether anyone is
+  notified, are pinned server-side.** The model never supplies a sender type, a
+  notification flag, or anything else that changes an action's visibility or
+  attribution.
+- **The approved text is the sent text.** Whatever a human approved is transmitted
+  byte-for-byte. Validation rejects; it never silently rewrites after approval.
 
 ### Observability invariants
 

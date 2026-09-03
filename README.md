@@ -586,6 +586,12 @@ denied attempt, the approver's grant, and the write they authorised.
 AgentGuard's first external business connector. **Read-only, with no write method
 in the codebase to call.**
 
+> **[`docs/LODGIFY_API.md`](docs/LODGIFY_API.md) is the authoritative engineering
+> reference for this integration** — endpoints, verified parameter spellings,
+> messaging findings, and the safety invariants that govern outbound guest
+> messaging. Every claim there carries an evidence level. Read it before changing
+> connector behaviour.
+
 ```bash
 export LODGIFY_API_KEY=...     # unset -> the connector's tools are simply absent
 ```
