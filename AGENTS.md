@@ -304,6 +304,28 @@ should be covered by a similar assertion.
   production authentication model. Reversing this is an explicit architecture and
   security decision, recorded in the connector's reference doc.
 
+### Retrieved-context invariants
+
+Retrieval puts past data in front of a model. These hold wherever that happens.
+
+- **Retrieved history is example, never fact.** State the authority order
+  explicitly — current authoritative data, then the current conversation, then
+  retrieved history, then the model's own knowledge — and carry it with the
+  content, not only in a prompt somewhere upstream. A retrieved answer may never
+  override a current rule, a live tool result, or something said in this thread.
+- **Sanitize before persistence, patterns before identities.** Structural
+  patterns take whole values; known identities then remove the bare names no
+  pattern can see. The reverse order breaks the patterns — redacting a name
+  inside an address leaves the domain behind. The schema itself should have no
+  column that could hold an identifier or a raw payload.
+- **Retrieval is enrichment, never a dependency.** An absent, empty or failing
+  index leaves the feature working exactly as it did without it.
+- **Personal history is not a model-browsable tool.** The application decides
+  what is relevant and supplies it. A tool that lets a model search other
+  people's conversations is a different product with a different risk profile.
+- **Retrieved content is not an audit event.** Audit records what was done, not
+  everything that was read.
+
 ### Irreversible-action invariants
 
 Outbound actions that a third party can see cannot be un-sent. These hold for any

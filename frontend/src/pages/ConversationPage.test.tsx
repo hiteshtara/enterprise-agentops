@@ -346,3 +346,97 @@ describe('ConversationPage', () => {
     })
   })
 })
+
+describe('historical retrieval indicator', () => {
+  it('reports how many past replies informed the draft', async () => {
+    vi.mocked(api.runAgent).mockResolvedValue({
+      run_id: 'run-draft',
+      status: 'COMPLETED',
+      answer: 'Parking is shared, no extra charge.',
+      trace: [
+        {
+          tool: 'get_guest_conversation',
+          arguments: { conversation_ref: CONVERSATION_REF },
+          result: {
+            historical_examples: {
+              examples: [{ guest_example: 'a' }, { guest_example: 'b' }],
+            },
+          },
+        },
+      ],
+      approval_required: null,
+    })
+
+    renderConversation()
+
+    const user = userEvent.setup()
+
+    await screen.findByText('Is there parking at the house?')
+    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+
+    expect(
+      await screen.findByText(/Draft informed by 2 similar past replies/),
+    ).toBeInTheDocument()
+  })
+
+  it('says nothing when no precedent was found', async () => {
+    vi.mocked(api.runAgent).mockResolvedValue({
+      run_id: 'run-draft',
+      status: 'COMPLETED',
+      answer: 'Parking is shared.',
+      trace: [],
+      approval_required: null,
+    })
+
+    renderConversation()
+
+    const user = userEvent.setup()
+
+    await screen.findByText('Is there parking at the house?')
+    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Message')).toHaveValue('Parking is shared.'),
+    )
+
+    expect(screen.queryByText(/Draft informed by/)).not.toBeInTheDocument()
+  })
+
+  it('never renders the historical examples themselves', async () => {
+    vi.mocked(api.runAgent).mockResolvedValue({
+      run_id: 'run-draft',
+      status: 'COMPLETED',
+      answer: 'Parking is shared.',
+      trace: [
+        {
+          tool: 'get_guest_conversation',
+          arguments: {},
+          result: {
+            historical_examples: {
+              examples: [
+                {
+                  guest_example: 'SECRET PAST GUEST QUESTION',
+                  owner_example: 'SECRET PAST OWNER REPLY',
+                },
+              ],
+            },
+          },
+        },
+      ],
+      approval_required: null,
+    })
+
+    const { container } = renderConversation()
+
+    const user = userEvent.setup()
+
+    await screen.findByText('Is there parking at the house?')
+    await user.click(screen.getByRole('button', { name: 'Generate draft' }))
+
+    await screen.findByText(/Draft informed by 1 similar past reply/)
+
+    // Another guest's conversation must not appear while writing to this one.
+    expect(container.textContent).not.toContain('SECRET PAST GUEST QUESTION')
+    expect(container.textContent).not.toContain('SECRET PAST OWNER REPLY')
+  })
+})

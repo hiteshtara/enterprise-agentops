@@ -119,16 +119,23 @@ class LodgifyMessagingClient:
                 "The provider returned a response that could not be read."
             ) from exc
 
-    def list_bookings(self, size: int = BOOKINGS_PAGE_SIZE) -> list[dict[str, Any]]:
+    def list_bookings(
+        self,
+        size: int = BOOKINGS_PAGE_SIZE,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
         """Raw booking rows, one page, newest-updated first.
 
         The caller sanitizes. Every row carries guest contact details and
         financial fields, so nothing from here may be returned unfiltered.
+
+        `page` exists for the history index, which walks the whole archive. The
+        Inbox only ever reads page one.
         """
         payload = self.get(
             "/v2/reservations/bookings",
             {
-                "page": "1",
+                "page": str(max(page, 1)),
                 "size": str(min(max(size, 1), MAX_BOOKINGS_PAGE_SIZE)),
                 "includeCount": "false",
             },

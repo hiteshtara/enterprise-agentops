@@ -576,6 +576,44 @@ def analyse_conversation(messages: Any) -> dict[str, Any]:
     }
 
 
+# -- authority ------------------------------------------------------------
+#
+# Once historical replies became drafting context, "what wins when sources
+# disagree" stopped being obvious. A real reply from March saying parking is
+# free is genuinely how the owner writes, and genuinely wrong today. The order
+# below is what keeps the first fact from becoming the second.
+
+AUTHORITY_ORDER: tuple[str, ...] = (
+    (
+        "1. CURRENT AUTHORITATIVE DATA -- tool results, live availability and "
+        "pricing, and the Priyanka Homes rules in this guidance. These win over "
+        "everything else, always."
+    ),
+    (
+        "2. THE CURRENT CONVERSATION -- what this guest and this host have "
+        "actually said in this thread."
+    ),
+    (
+        "3. HISTORICAL EXAMPLES -- how the owner has answered similar questions "
+        "before. Style and precedent only, never facts."
+    ),
+    "4. YOUR OWN GENERAL KNOWLEDGE -- last, and never about this property.",
+)
+
+HISTORICAL_EXAMPLE_CAVEAT = (
+    "These are real past replies from this owner, retrieved because the guest's "
+    "question resembles them. They show you how this host writes: short, direct, "
+    "practical. Copy the VOICE. "
+    "Do not copy anything else. They may be months old, about a different "
+    "property, or superseded by a rule in this guidance -- a past reply saying "
+    "parking is free does not make parking free today. "
+    "Never carry over a name, a date, a price, an access code, a property-"
+    "specific detail, or a promise from an example. Never reproduce one "
+    "verbatim just because it is similar. Write a fresh reply for this guest, "
+    "in this conversation, using current facts only."
+)
+
+
 def reply_guidance(messages: Any = ()) -> dict[str, Any]:
     """The knowledge a model needs to draft a Priyanka Homes reply.
 
@@ -588,9 +626,11 @@ def reply_guidance(messages: Any = ()) -> dict[str, Any]:
     block is what makes a reply about the subject still open.
     """
     return {
+        "authority_order": list(AUTHORITY_ORDER),
         "conversation_state": analyse_conversation(messages),
         "how_to_read_the_conversation": list(CONVERSATION_STATE_RULES),
         "no_reply_needed": NO_REPLY_GUIDANCE,
+        "historical_examples_caveat": HISTORICAL_EXAMPLE_CAVEAT,
         "voice": DRAFTING_GUIDANCE,
         "avoid_phrases": list(AVOID_PHRASES),
         "acknowledgement": ACKNOWLEDGEMENT,

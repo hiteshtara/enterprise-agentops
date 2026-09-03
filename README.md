@@ -728,6 +728,70 @@ needs an ADMIN approver. That is left as-is deliberately: weakening it would wea
 approval for every dangerous action in the system. A dedicated hospitality permission
 is the likely fix, decided on its own merits.
 
+## Historical Reply Retrieval — V1
+
+The owner has years of real replies in Lodgify. They describe how this business
+actually talks to guests better than any list of adjectives a prompt could carry.
+This layer turns that archive into short, sanitized Guest → Owner exchange pairs
+and puts a few relevant ones in front of the model when it drafts.
+
+```bash
+uv run --env-file .env python -m app.index_lodgify_history
+```
+
+**Historical replies are examples, never facts.** A reply from March saying
+parking is free is genuinely how the owner writes, and genuinely wrong today.
+The authority order is explicit and travels with every conversation:
+
+```
+1. CURRENT AUTHORITATIVE DATA   tool results, live availability and pricing, the rules below
+2. THE CURRENT CONVERSATION     what this guest and this host actually said
+3. HISTORICAL EXAMPLES          style and precedent only
+4. MODEL GENERAL KNOWLEDGE      last, and never about this property
+```
+
+Examples arrive labelled with that rank and a caveat that names the failure mode
+directly — do not carry over a name, a date, a price, an access code, a
+property-specific detail or an old promise, and never reproduce a past reply
+verbatim just because it is similar.
+
+**Privacy.** Only the two message bodies survive extraction. Emails, URLs, phone
+numbers, confirmation codes and digit runs are removed by pattern *first*, then
+the guest's own name and email — known from the thread — are removed by value.
+Order matters: redacting a name inside an address first would leave
+`[redacted]@example.com` and leak the domain. The table has no column that could
+hold a booking id, thread uid, guest name or raw payload. The index is private
+operational data, lives in the gitignored dev database, and no test fixture is
+built from real guest text.
+
+**Extraction** walks a thread once: a contiguous run of guest messages becomes
+one question, the contiguous owner run that follows becomes one answer, and that
+pair is one example. A question with no answer after it produces nothing.
+Lodgify's own transactional mail is skipped — it is a template, not the owner's
+voice. Re-running the index creates no duplicates: a content fingerprint is the
+row identity.
+
+**Retrieval is lexical, not embeddings.** TF-IDF over the guest question plus
+deterministic topic tags, which is what closes the paraphrase gap ("can we get
+in before 3?" and "is early check-in possible?" share almost no vocabulary but
+both tag `early_check_in`). At a few hundred short exchanges about a dozen
+recurring subjects, that is enough, and it avoids an API dependency, a cost per
+build, a cache to invalidate and a fake in every test. `score_example` is the
+only place similarity is decided if that changes.
+
+Same-property examples get a small bonus, not a veto — a clearly better example
+from another property still wins.
+
+**Retrieval only runs when a reply is actually needed.** A thread the guest has
+closed retrieves nothing, and costs nothing.
+
+**It is enrichment, never a dependency.** No retriever, an empty index, or a
+failing one all leave drafting exactly as it was. There is no historical-search
+tool: a guest's past conversation is not something a model should be able to
+browse, so the application retrieves and the model receives. The console shows
+only a count — "Draft informed by 3 similar past replies" — and never renders
+another guest's conversation.
+
 Priyanka Homes reply rules live in [`app/hospitality.py`](app/hospitality.py),
 separate from transport, and travel with `get_guest_conversation` so drafting never
 depends on the model remembering to look them up. It names the topics it *cannot*

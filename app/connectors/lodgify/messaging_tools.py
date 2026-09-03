@@ -31,14 +31,62 @@ from app.connectors.lodgify.inbox import (
     LodgifyInbox,
 )
 from app.connectors.lodgify.models import unknown
-from app.hospitality import reply_guidance
+from app.hospitality import HISTORICAL_EXAMPLE_CAVEAT, reply_guidance
+from app.reply_retrieval import HistoricalReplyRetriever
 
 
 class LodgifyMessagingTools:
-    """Adapter between the tool registry and the inbox service."""
+    """Adapter between the tool registry and the inbox service.
 
-    def __init__(self, inbox: LodgifyInbox) -> None:
+    The retriever is optional and deliberately *not* a tool. Historical guest
+    conversations are not something a model should be able to browse; the
+    application decides when a precedent is relevant and attaches it. If the
+    retriever is absent or fails, drafting continues exactly as it did before --
+    this is enrichment, never a dependency.
+    """
+
+    def __init__(
+        self,
+        inbox: LodgifyInbox,
+        retriever: HistoricalReplyRetriever | None = None,
+    ) -> None:
         self._inbox = inbox
+        self._retriever = retriever
+
+    def historical_examples(
+        self,
+        conversation: dict[str, Any],
+        guidance: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Precedents for the open guest message, or nothing.
+
+        Retrieval is skipped entirely unless the conversation actually needs a
+        reply. A thread the guest has closed does not need examples, and
+        fetching them would be noise the model has to read past.
+        """
+        if self._retriever is None:
+            return []
+
+        state = guidance.get("conversation_state") or {}
+
+        if state.get("suggested_outcome") != "reply_needed":
+            return []
+
+        open_messages = state.get("unanswered_guest_messages") or []
+
+        if not open_messages:
+            return []
+
+        try:
+            found = self._retriever.find(
+                guest_message=" ".join(open_messages),
+                property_slug=conversation.get("property_slug"),
+            )
+
+        except Exception:  # noqa: BLE001 -- enrichment must never break drafting
+            return []
+
+        return [example.to_dict() for example in found]
 
     def list_recent_guest_conversations(
         self,
@@ -92,11 +140,25 @@ class LodgifyMessagingTools:
         # the model remembering to look them up. The guidance is computed *from*
         # the messages, so it reports what is still open rather than every topic
         # the thread has ever mentioned.
-        return {
-            "ok": True,
-            **conversation,
-            "reply_guidance": reply_guidance(conversation.get("messages")),
-        }
+        guidance = reply_guidance(conversation.get("messages"))
+
+        examples = self.historical_examples(conversation, guidance)
+
+        result = {"ok": True, **conversation, "reply_guidance": guidance}
+
+        if examples:
+            # Labelled at the point of delivery as well as in the guidance, so
+            # the caveat cannot be separated from the examples it governs.
+            result["historical_examples"] = {
+                "how_to_use": HISTORICAL_EXAMPLE_CAVEAT,
+                "authority": (
+                    "Rank 3 of 4 -- see reply_guidance.authority_order. Current "
+                    "rules and this conversation both outrank these."
+                ),
+                "examples": examples,
+            }
+
+        return result
 
     def send_guest_reply(
         self,

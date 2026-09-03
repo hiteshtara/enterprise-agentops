@@ -6,7 +6,7 @@ import {
   resolveApproval,
   runAgent,
 } from '../api/agentguard'
-import type { ApprovalRequest, SendOutcome } from '../api/types'
+import type { AgentResponse, ApprovalRequest, SendOutcome } from '../api/types'
 import { useAsync } from '../hooks/useAsync'
 import { ApprovalCard } from '../components/ApprovalCard'
 import { PageHeader } from '../components/Layout'
@@ -51,6 +51,27 @@ function isNoReplyNeeded(answer: string): boolean {
   return answer.trim().replace(/[.\s]+$/, '') === NO_REPLY_NEEDED
 }
 
+/**
+ * How many past replies informed this draft, read from the run's own trace.
+ *
+ * The examples themselves stay in model context and are never rendered: a
+ * historical guest conversation is not something the console should surface
+ * while someone writes to a different guest. The count is the useful part --
+ * it tells the operator whether the draft had precedent behind it.
+ */
+function historicalExampleCount(trace: AgentResponse['trace']): number {
+  for (const step of trace) {
+    if (step.tool !== 'get_guest_conversation') continue
+
+    const block = (step.result as { historical_examples?: { examples?: unknown[] } })
+      ?.historical_examples
+
+    if (Array.isArray(block?.examples)) return block.examples.length
+  }
+
+  return 0
+}
+
 function outcomeTone(status: SendOutcome['status']): string {
   if (status === 'confirmed_sent') return 'state-ok'
   if (status === 'confirmed_failed') return 'state-error'
@@ -71,6 +92,7 @@ export function ConversationPage() {
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [outcome, setOutcome] = useState<SendOutcome | null>(null)
   const [noReplyNeeded, setNoReplyNeeded] = useState(false)
+  const [informedBy, setInformedBy] = useState(0)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState<'draft' | 'submit' | 'decide' | null>(null)
 
@@ -80,10 +102,13 @@ export function ConversationPage() {
     setBusy('draft')
     setError(null)
     setNoReplyNeeded(false)
+    setInformedBy(0)
 
     try {
       const response = await runAgent(draftPrompt(conversationRef))
       const answer = response.answer ?? ''
+
+      setInformedBy(historicalExampleCount(response.trace))
 
       if (isNoReplyNeeded(answer)) {
         // Concluding that nothing needs saying is a real outcome, not an empty
@@ -273,7 +298,11 @@ export function ConversationPage() {
                 style={{ marginTop: 12, justifyContent: 'space-between' }}
               >
                 <span className="faint" style={{ fontSize: 12 }}>
-                  Nothing is sent until a human approves it.
+                  {informedBy > 0
+                    ? `Draft informed by ${informedBy} similar past ${
+                        informedBy === 1 ? 'reply' : 'replies'
+                      }. Nothing is sent until a human approves it.`
+                    : 'Nothing is sent until a human approves it.'}
                 </span>
                 <div className="row">
                   <button

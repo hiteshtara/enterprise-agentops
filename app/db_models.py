@@ -415,3 +415,87 @@ class ToolExecutionRecord(Base):
     arguments_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class HistoricalReplyExampleRecord(Base):
+    """One sanitized Guest -> Owner exchange, kept as a style precedent.
+
+    Deliberately *not* a copy of a conversation. Only the two message bodies
+    survive extraction, with contact details, identifiers and access codes
+    stripped -- see app/historical_replies.py. There is no column here that
+    could hold a booking id, a thread uid, a guest name or a raw payload,
+    which is the point: the schema itself is the guarantee.
+
+    These rows are examples, never facts. Nothing that reads them may treat a
+    historical answer as current policy.
+    """
+
+    __tablename__ = "historical_reply_examples"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    # Content fingerprint. Re-indexing the same exchange finds this row rather
+    # than inserting a second copy.
+    example_ref: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    property_slug: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+        index=True,
+    )
+
+    source: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    guest_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    owner_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    # Deterministically derived topic tags, JSON-encoded. Used for ranking, so
+    # a paraphrased question still reaches the right precedent.
+    topics_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+    )
+
+    # When the guest wrote, not when we indexed. Both are kept: the first says
+    # how stale the precedent is, the second when we last saw it.
+    created_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )
+
+    indexed_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )
+
+    @property
+    def topics(self) -> list[str]:
+        try:
+            value = json.loads(self.topics_json)
+
+        except (TypeError, ValueError):
+            return []
+
+        return value if isinstance(value, list) else []

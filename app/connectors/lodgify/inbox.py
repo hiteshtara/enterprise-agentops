@@ -184,6 +184,18 @@ def validate_limit(value: object) -> int:
 
 
 @dataclass(frozen=True)
+class ThreadForIndexing:
+    """One thread reduced to what the history indexer needs.
+
+    `identities` exists to be removed from the message bodies, never to be
+    stored. See `LodgifyInbox.thread_for_indexing`.
+    """
+
+    messages: tuple["ConversationMessage", ...]
+    identities: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ResolvedConversation:
     """A conversation_ref resolved to what the provider needs.
 
@@ -361,6 +373,48 @@ class LodgifyInbox:
 
     def __init__(self, client: LodgifyMessagingClient) -> None:
         self._client = client
+
+    # -- archive access ----------------------------------------------------
+    #
+    # Public seams for the history indexer, which walks the whole archive
+    # rather than the first page. They expose the same sanitization the Inbox
+    # uses; nothing here hands out a raw payload.
+
+    @property
+    def client(self) -> LodgifyMessagingClient:
+        return self._client
+
+    def booking_page(self, page: int, size: int) -> list[ResolvedConversation]:
+        """One page of bookings, already reduced to the five fields we read."""
+        return [
+            resolved
+            for row in self._client.list_bookings(size=size, page=page)
+            for resolved in [read_booking(row)]
+            if resolved is not None
+        ]
+
+    def thread_for_indexing(self, thread_uid: str) -> "ThreadForIndexing":
+        """Messages plus the guest identity strings, for redaction only.
+
+        This is the single place `guest_name` and `guest_email` leave the raw
+        payload, and they leave it for one purpose: so the indexer can remove
+        those exact values from message bodies before anything is stored.
+        Redacting by known value beats pattern-matching a name. Neither string
+        is persisted, returned to a caller, or logged.
+        """
+        thread = self._client.get_thread(thread_uid)
+
+        identities = tuple(
+            value.strip()
+            for key in ("guest_name", "guest_email")
+            for value in [thread.get(key)]
+            if isinstance(value, str) and value.strip()
+        )
+
+        return ThreadForIndexing(
+            messages=read_messages(thread),
+            identities=identities,
+        )
 
     # -- resolution --------------------------------------------------------
 

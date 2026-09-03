@@ -25,6 +25,7 @@ from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
 from app.connectors.lodgify.tools import LodgifyTools
 from app.database import Database
+from app.historical_replies import HistoricalReplyStore
 from app.identity import PermissionDenied, User
 from app.migration_store import MigrationBatchStore
 from app.model_provider import OpenAIModelProvider
@@ -60,6 +61,7 @@ from app.reconciliation import (
     MIN_STALE_AFTER_SECONDS,
     ReconciliationService,
 )
+from app.reply_retrieval import HistoricalReplyRetriever
 from app.run_store import RunStore
 from app.security import issue_token
 from app.tool_setup import build_tool_registry
@@ -118,11 +120,21 @@ lodgify_inbox = (
     else None
 )
 
+# Drafting enrichment, not a dependency. If the index is empty -- which it is
+# until someone runs `python -m app.index_lodgify_history` -- retrieval simply
+# returns nothing and drafting works exactly as it did before.
+historical_replies = HistoricalReplyStore(database=database)
+
 tool_registry = build_tool_registry(
     migration_store=migration_store,
     lodgify=lodgify_tools,
     lodgify_messaging=(
-        LodgifyMessagingTools(lodgify_inbox) if lodgify_inbox is not None else None
+        LodgifyMessagingTools(
+            lodgify_inbox,
+            retriever=HistoricalReplyRetriever(historical_replies),
+        )
+        if lodgify_inbox is not None
+        else None
     ),
 )
 
