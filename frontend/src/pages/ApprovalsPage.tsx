@@ -4,6 +4,7 @@ import { listApprovals, resolveApproval } from '../api/agentguard'
 import { useAuth } from '../auth/context'
 import type { ApprovalStatus, Permission, ToolRisk } from '../api/types'
 import { useAsync } from '../hooks/useAsync'
+import { useUrlFilter } from '../hooks/useUrlFilter'
 import { ApprovalStatusBadge, RiskBadge } from '../components/Badges'
 import { ArgumentList } from '../components/Json'
 import { PageHeader } from '../components/Layout'
@@ -30,9 +31,13 @@ const RISK_PERMISSION: Record<ToolRisk, Permission> = {
   DANGEROUS: 'APPROVE_DANGEROUS',
 }
 
+const STATUSES: readonly ApprovalStatus[] = ['PENDING', 'APPROVED', 'REJECTED']
+
 export function ApprovalsPage() {
   const { can } = useAuth()
-  const [status, setStatus] = useState<ApprovalStatus | ''>('')
+
+  const [status, setStatus] = useUrlFilter<ApprovalStatus>('status', STATUSES)
+
   const [acting, setActing] = useState<string | null>(null)
   const [actionError, setActionError] = useState<unknown>(null)
 

@@ -21,8 +21,8 @@ governance boundaries are explicit and inspectable.
 | **Agent** — a WRITE action is blocked and surfaced for a human decision. | **Agent** — the same run resumed and completed after approval. |
 | ![Run detail timeline](docs/screenshots/rundetail.png) | ![Audit page](docs/screenshots/audit.png) |
 | **Run detail** — the full execution timeline across the approval pause. | **Audit** — the governed action chain, filterable by run and event. |
-| ![Overview dashboard](docs/screenshots/overview.png) | ![Tools page](docs/screenshots/tools.png) |
-| **Overview** — activity and governance posture. | **Tools** — every capability and how it is governed. |
+| ![Overview dashboard](docs/screenshots/overview.png) | ![Reconcile stale runs](docs/screenshots/reconcile.png) |
+| **Overview** — activity and governance posture. | **Runs** — admin-only recovery for runs a crash left in flight. |
 
 ## The AgentGuard demo
 
@@ -594,6 +594,18 @@ frontend/src
   pages/        Overview, Agent, Runs, RunDetail, Approvals, Audit, Tools
   hooks/        useAsync — loading / error / reload for every page
 ```
+
+The console keeps live state current without WebSockets: a run that is `RUNNING`
+or `WAITING_FOR_APPROVAL` is polled every few seconds, and polling stops by itself
+once the run reaches a terminal status. It pauses while the browser tab is hidden.
+
+Views are deep-linkable. The Agent page carries its run in the URL
+(`/agent?run=<id>`), and filters live in the query string — `/runs?status=FAILED`,
+`/approvals?status=PENDING`, `/audit?event_type=TOOL_FAILED`,
+`/audit?run_id=<id>` — so a refresh keeps the view, browser back/forward step
+through it, and a link opens exactly what a colleague was looking at. Nothing about
+the run is stored in the browser beyond its id: the page is rebuilt from
+`GET /runs/{id}`.
 
 Two rules the console holds to:
 

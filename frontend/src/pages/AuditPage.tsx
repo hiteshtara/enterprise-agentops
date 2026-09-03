@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { listAuditEvents } from '../api/agentguard'
 import type { EventType } from '../api/types'
 import { useAsync } from '../hooks/useAsync'
+import { useUrlFilter } from '../hooks/useUrlFilter'
 import { EventBadge } from '../components/Badges'
 import { JsonDetails } from '../components/Json'
 import { PageHeader } from '../components/Layout'
@@ -29,23 +30,35 @@ function stamp(iso: string): string {
 }
 
 export function AuditPage() {
-  const [params] = useSearchParams()
+  // Both filters live in the URL, so a filtered view is refreshable, linkable,
+  // and steps back and forward with the browser.
+  const [runId, setRunId] = useUrlFilter('run_id')
+  const [eventType, setEventType] = useUrlFilter<EventType>(
+    'event_type',
+    EVENT_TYPES.filter(Boolean) as EventType[],
+  )
 
-  const [runId, setRunId] = useState(params.get('run_id') ?? '')
-  const [eventType, setEventType] = useState<EventType | ''>('')
-  const [applied, setApplied] = useState({
-    runId: params.get('run_id') ?? '',
-    eventType: '' as EventType | '',
-  })
+  // The run field is free text, so it is edited locally and applied on submit
+  // rather than rewriting history on every keystroke.
+  const [runDraft, setRunDraft] = useState(runId)
+
+  // Adjust during render (not in an effect) when the URL changes underneath us,
+  // e.g. arriving from a "View audit for this run" link or a back navigation.
+  const [syncedRunId, setSyncedRunId] = useState(runId)
+
+  if (syncedRunId !== runId) {
+    setSyncedRunId(runId)
+    setRunDraft(runId)
+  }
 
   const { data, error, loading } = useAsync(
     () =>
       listAuditEvents({
-        runId: applied.runId || undefined,
-        eventType: applied.eventType || undefined,
+        runId: runId || undefined,
+        eventType: eventType || undefined,
         limit: 200,
       }),
-    [applied.runId, applied.eventType],
+    [runId, eventType],
   )
 
   return (
@@ -59,7 +72,7 @@ export function AuditPage() {
         className="field-row"
         onSubmit={(event) => {
           event.preventDefault()
-          setApplied({ runId, eventType })
+          setRunId(runDraft.trim())
         }}
       >
         <div className="field" style={{ minWidth: 280 }}>
@@ -68,9 +81,9 @@ export function AuditPage() {
           </label>
           <input
             id="run"
-            value={runId}
+            value={runDraft}
             placeholder="All runs"
-            onChange={(event) => setRunId(event.target.value)}
+            onChange={(event) => setRunDraft(event.target.value)}
           />
         </div>
 
@@ -92,6 +105,19 @@ export function AuditPage() {
         </div>
 
         <button type="submit">Apply filters</button>
+
+        {runId || eventType ? (
+          <button
+            type="button"
+            onClick={() => {
+              setRunDraft('')
+              setRunId('')
+              setEventType('')
+            }}
+          >
+            Clear
+          </button>
+        ) : null}
       </form>
 
       {loading ? <Loading label="Loading audit events" /> : null}

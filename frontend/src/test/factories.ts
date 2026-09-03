@@ -317,3 +317,27 @@ export const adminUser: CurrentUser = {
     'ADMINISTER',
   ],
 }
+
+/** What GET /runs/{id} returns after the approval is granted and the run resumes. */
+export const completedRunDetail: RunDetail = {
+  ...runDetail,
+  status: 'COMPLETED',
+  final_answer:
+    'Batch 43 failed because of an Oracle connection timeout. The approved restart was executed successfully.',
+}
+
+/** What GET /runs/{id} returns after the approval is rejected. */
+export const cancelledRunDetail: RunDetail = {
+  ...runDetail,
+  status: 'CANCELLED',
+  final_answer: 'The requested action was not approved, so nothing was executed.',
+  steps: runDetail.steps.slice(0, 4),
+}
+
+/** A run parked awaiting a decision, used for restore-from-URL tests. */
+export const waitingRunDetail: RunDetail = {
+  ...runDetail,
+  status: 'WAITING_FOR_APPROVAL',
+  final_answer: null,
+  steps: runDetail.steps.slice(0, 4),
+}

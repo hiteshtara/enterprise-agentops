@@ -274,3 +274,39 @@ def test_runs_endpoint_rejects_an_invalid_status(client):
 
     assert response.status_code == 400
     assert "Unsupported run status" in response.json()["detail"]
+
+
+def test_cors_preflight_allows_the_authorization_header(client):
+    """The console sends a bearer token, so every request is preflighted."""
+    http, _ = client
+
+    response = http.options(
+        "/runs",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 200
+
+    allowed = response.headers["access-control-allow-headers"].lower()
+
+    assert "authorization" in allowed
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_cors_preflight_rejects_an_unknown_origin(client):
+    http, _ = client
+
+    response = http.options(
+        "/runs",
+        headers={
+            "Origin": "https://evil.example.com",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+
+    assert "access-control-allow-origin" not in response.headers

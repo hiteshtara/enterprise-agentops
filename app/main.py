@@ -60,8 +60,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=LOCAL_CONSOLE_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    # Authorization is required: the console sends a bearer token, which makes
+    # every request preflighted. Omitting it fails the preflight in a browser
+    # while leaving TestClient (which does not preflight) passing.
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 database = Database()
@@ -310,6 +313,7 @@ def get_run(
     return RunDetail(
         run_id=record.run_id,
         status=record.status,
+        requested_by_user_id=record.requested_by_user_id,
         user_message=record.user_message,
         final_answer=record.final_answer,
         created_at=record.created_at,

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import { RunsPage } from './RunsPage'
 import { renderWithRouter } from '../test/render'
 import * as api from '../api/agentguard'
@@ -16,14 +16,15 @@ describe('RunsPage', () => {
 
     renderWithRouter(<RunsPage />)
 
+    // Scoped to the table: the status filter lists the same status names.
+    const table = within(await screen.findByRole('table'))
+
     expect(
-      await screen.findByText(
-        'Investigate migration batch 43 and restart it if needed.',
-      ),
+      table.getByText('Investigate migration batch 43 and restart it if needed.'),
     ).toBeInTheDocument()
-    expect(screen.getByText('COMPLETED')).toBeInTheDocument()
-    expect(screen.getByText('WAITING FOR APPROVAL')).toBeInTheDocument()
-    expect(screen.getByText('Restart batch 51.')).toBeInTheDocument()
+    expect(table.getByText('COMPLETED')).toBeInTheDocument()
+    expect(table.getByText('WAITING FOR APPROVAL')).toBeInTheDocument()
+    expect(table.getByText('Restart batch 51.')).toBeInTheDocument()
   })
 
   it('shows an empty state when there are no runs', async () => {

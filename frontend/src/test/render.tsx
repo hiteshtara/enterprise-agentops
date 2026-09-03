@@ -1,5 +1,6 @@
 import { render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { LocationProbe } from './LocationProbe'
 import type { ReactElement } from 'react'
 import { AuthContext, authValueFor } from '../auth/context'
 import type { AuthValue } from '../auth/context'
@@ -27,7 +28,10 @@ export function renderWithRouter(
 
   return render(
     <AuthContext.Provider value={authValueFor(user, auth)}>
-      <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={[route]}>
+        {ui}
+        <LocationProbe />
+      </MemoryRouter>
     </AuthContext.Provider>,
   )
 }

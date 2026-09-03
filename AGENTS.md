@@ -342,6 +342,16 @@ global state library — don't add either without a concrete reason.
   told how a tool is governed. Keep those two methods distinct.
 - **CORS is an explicit local-dev origin list**, never a wildcard. Production serves
   console and API from one origin.
+- **The URL is the console's state store for anything shareable** — the active run
+  on the Agent page and every filter. Never mirror that into component state that
+  can drift; read it with `useUrlFilter` / `useSearchParams`. The browser stores no
+  run content, only its id: the view is rebuilt from `GET /runs/{id}`.
+- **Polling belongs to `useAsync({intervalMs, pollWhile})`**, which stops on
+  terminal status, skips hidden tabs, and cleans up on unmount. Don't hand-roll a
+  `setInterval` in a component, and don't poll a page with nothing active.
+- **Derived run statistics are counted from persisted steps only.** There is no
+  token, cost or per-call latency data in the backend yet; never display a number
+  the database cannot support.
 - **Tone classes are shared** between badges and other elements; a badge tone carries
   a pill background, so bare-text usages must clear it (see `.stat-value.tone-*`).
 

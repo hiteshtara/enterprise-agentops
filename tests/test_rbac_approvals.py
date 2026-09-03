@@ -327,3 +327,25 @@ def test_an_unknown_approval_is_a_404_not_a_403(api):
     )
 
     assert response.status_code == 404
+
+
+def test_run_detail_reports_the_requesting_user(api):
+    """Regression: the detail endpoint once dropped requested_by_user_id."""
+    body = start_waiting_run(api)
+
+    detail = api.client("OPERATOR").get(f"/runs/{body['run_id']}").json()
+
+    assert detail["requested_by_user_id"] == user_id(api, "OPERATOR")
+
+
+def test_run_list_and_detail_agree_on_the_requester(api):
+    body = start_waiting_run(api)
+
+    http = api.client("OPERATOR")
+
+    listed = next(
+        run for run in http.get("/runs").json() if run["run_id"] == body["run_id"]
+    )
+    detail = http.get(f"/runs/{body['run_id']}").json()
+
+    assert listed["requested_by_user_id"] == detail["requested_by_user_id"]

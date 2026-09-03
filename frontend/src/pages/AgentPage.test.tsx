@@ -9,6 +9,8 @@ import {
   APPROVAL_ID,
   completedResponse,
   rejectedResponse,
+  cancelledRunDetail,
+  completedRunDetail,
   resumedResponse,
   waitingResponse,
 } from '../test/factories'
@@ -85,6 +87,10 @@ describe('AgentPage', () => {
   it('resumes the same run on approve and shows the final answer', async () => {
     vi.mocked(api.runAgent).mockResolvedValue(waitingResponse)
     vi.mocked(api.resolveApproval).mockResolvedValue(resumedResponse)
+    // Resolving re-reads the run, so the page shows what was persisted rather
+    // than splicing the decision response.
+    vi.mocked(api.getRun).mockResolvedValue(completedRunDetail)
+    vi.mocked(api.listApprovals).mockResolvedValue([])
 
     renderWithRouter(<AgentPage />)
     const user = await submit()
@@ -111,6 +117,8 @@ describe('AgentPage', () => {
   it('cancels the run on reject without executing the tool', async () => {
     vi.mocked(api.runAgent).mockResolvedValue(waitingResponse)
     vi.mocked(api.resolveApproval).mockResolvedValue(rejectedResponse)
+    vi.mocked(api.getRun).mockResolvedValue(cancelledRunDetail)
+    vi.mocked(api.listApprovals).mockResolvedValue([])
 
     renderWithRouter(<AgentPage />)
     const user = await submit()
@@ -123,6 +131,8 @@ describe('AgentPage', () => {
 
     expect(await screen.findByText('CANCELLED')).toBeInTheDocument()
     expect(screen.getByText(/was not approved/)).toBeInTheDocument()
+
+    // The write tool never executed, so it is absent from the persisted trace.
     expect(screen.queryByText('restart_migration')).not.toBeInTheDocument()
   })
 

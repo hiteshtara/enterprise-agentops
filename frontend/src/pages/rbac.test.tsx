@@ -13,6 +13,7 @@ import {
   approvals,
   approverUser,
   operatorUser,
+  completedRunDetail,
   resumedResponse,
   viewerUser,
   waitingResponse,
@@ -65,6 +66,8 @@ describe('approval card permissions', () => {
 
   it('lets an approver resume the run', async () => {
     vi.mocked(api.resolveApproval).mockResolvedValue(resumedResponse)
+    vi.mocked(api.getRun).mockResolvedValue(completedRunDetail)
+    vi.mocked(api.listApprovals).mockResolvedValue([])
 
     renderWithRouter(<AgentPage />, { user: approverUser })
 

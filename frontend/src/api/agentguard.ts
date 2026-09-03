@@ -14,6 +14,7 @@ import type {
   Overview,
   ReconcileResponse,
   RunDetail,
+  RunStatus,
   RunSummary,
   ToolSummary,
 } from './types'
@@ -64,8 +65,13 @@ export function listApprovals(options?: {
   )
 }
 
-export function listRuns(limit = 50): Promise<RunSummary[]> {
-  return request<RunSummary[]>(`/runs${query({ limit })}`)
+export function listRuns(options?: {
+  status?: RunStatus
+  limit?: number
+}): Promise<RunSummary[]> {
+  return request<RunSummary[]>(
+    `/runs${query({ status: options?.status, limit: options?.limit ?? 50 })}`,
+  )
 }
 
 export function getRun(runId: string): Promise<RunDetail> {
