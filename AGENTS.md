@@ -276,6 +276,27 @@ The pattern to follow instead (see `app/migration_store.py` + `app/tool_setup.py
 generically: it rejects any free-text string argument on the tool. New database tools
 should be covered by a similar assertion.
 
+### Connector invariants
+
+- **A connector never lets the model name a provider identifier.** The model chooses
+  a slug from a closed enum; the connector resolves ids server-side. Never add a
+  `property_id`-style argument to a tool schema.
+- **Connector results are constructed, never forwarded.** Build the response object
+  field by field from named upstream fields. No passthrough, no `**rest`, no
+  `dict(response)` — an upstream payload that grows a guest name must not be able to
+  reach the trace, audit, metrics or browser.
+- **Fail closed, structurally.** A provider failure returns a result that omits the
+  answer key entirely (no `available`), rather than a default value. Argument
+  validation raises (recoverable, the model corrects); provider failure returns
+  unknown (not an argument error).
+- **A connector is optional.** Missing credentials omit its tools from the registry
+  rather than registering them broken — the registry is what the model is told it can
+  do. AgentGuard's own demo must keep working with no connector configured.
+- **Credentials come from one resolver function** and are never stored on an
+  instance, logged, audited, or returned. Importing the app must not read one.
+- **Read-only connectors have no write method**, not merely an unused one. Absence is
+  the safety property.
+
 ### Observability invariants
 
 - **Provider usage is normalised inside `ModelProvider`.** `ModelUsage` /

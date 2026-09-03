@@ -14,6 +14,9 @@ from app.auth import (
     require_view_tools,
 )
 from app.authorization import ensure_can_resolve_approval
+from app.connectors.lodgify.client import LodgifyClient
+from app.connectors.lodgify.config import is_configured, resolve_api_key
+from app.connectors.lodgify.tools import LodgifyTools
 from app.database import Database
 from app.identity import PermissionDenied, User
 from app.migration_store import MigrationBatchStore
@@ -86,7 +89,18 @@ run_metrics = RunMetricsService(database=database)
 migration_store = MigrationBatchStore(database=database)
 user_store = UserStore(database=database)
 
-tool_registry = build_tool_registry(migration_store=migration_store)
+# The connector is wired only when a credential is configured. Importing the
+# app never reads the key, and its absence is not a startup failure.
+lodgify_tools = (
+    LodgifyTools(LodgifyClient(api_key_provider=resolve_api_key))
+    if is_configured()
+    else None
+)
+
+tool_registry = build_tool_registry(
+    migration_store=migration_store,
+    lodgify=lodgify_tools,
+)
 
 # Auth dependencies resolve the store from app state so tests can swap the
 # database without patching module globals.

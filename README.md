@@ -581,6 +581,71 @@ Audit shows the whole chain: the operator's read, their approval request, the
 denied attempt, the approver's grant, and the write they authorised.
 ```
 
+## Connector: Priyanka Homes (Lodgify) — V1
+
+AgentGuard's first external business connector. **Read-only, with no write method
+in the codebase to call.**
+
+```bash
+export LODGIFY_API_KEY=...     # unset -> the connector's tools are simply absent
+```
+
+| Tool | Risk | Calls the provider? |
+|---|---|---|
+| `list_properties` | READ | no — configuration only |
+| `get_property_availability` | READ | `GET /v2/availability/{id}` |
+| `get_property_quote` | READ | `GET /v2/quote/{id}` |
+
+### The property-slug boundary
+
+**The model never supplies a provider identifier.** It picks a `property_slug` from a
+closed enum of seven configured properties; the connector resolves the Lodgify
+property and room-type ids server-side. A hallucinated or hand-crafted numeric id has
+no way to reach the API.
+
+The portfolio's eighth property — South Boston Seaside Residence — is deliberately
+*not* on Lodgify. It appears in `list_properties` as `lodgify_connected: false`, is
+absent from the slug enum, and carries no provider identifiers at all, so it cannot
+be queried through Lodgify even by mistake.
+
+### Fail-closed availability
+
+A timeout, transport error, non-2xx status, unreadable body or unexpected shape
+returns a structured *unknown*:
+
+```json
+{"ok": false, "status": "unknown", "reason": "provider_unavailable",
+ "message": "Availability could not be confirmed: ..."}
+```
+
+That object contains **no `available` key anywhere**. A provider failure therefore
+cannot be misread — by the model or by a person — as an open calendar. A test asserts
+this structurally rather than by string matching.
+
+Three outcomes are kept distinct: `ok: true` (an answer), `status: "declined"` (the
+provider applied a booking rule, e.g. minimum stay — a known "no"), and
+`status: "unknown"` (no answer was obtained).
+
+### Sanitization
+
+The upstream responses carry booking ids, guest names, channel/source calendars,
+cancellation-policy text and scheduled payments. The connector **constructs** its
+result objects field by field from named inputs — there is no passthrough, no
+`**rest`, no `dict(response)`. Tests assert that a payload seeded with guest and
+booking data reaches neither the tool result, the run trace, the audit log, nor the
+observability tables.
+
+### What it deliberately cannot do
+
+No reservation creation, no tentative bookings, no calendar or rate writes, no
+messages, payments, cancellations, guest records, webhooks or hosted checkout. The
+Lodgify client exposes exactly two GET methods.
+
+Argument validation (unknown slug, malformed date, inverted range, window over 31
+days, guest count outside 1–32) raises, which the runtime treats as recoverable — the
+model is told what was wrong and corrects itself. Provider failure is not an argument
+error and never surfaces that way.
+
 ## Observability
 
 Run detail answers *how did this perform*, next to the timeline that answers *what

@@ -4,6 +4,12 @@ Kept out of main.py so that tool wiring can be constructed and inspected in
 tests without importing the FastAPI app or a model provider.
 """
 
+from app.connectors.lodgify.tools import (
+    AVAILABILITY_SCHEMA,
+    LIST_PROPERTIES_SCHEMA,
+    QUOTE_SCHEMA,
+    LodgifyTools,
+)
 from app.migration_store import (
     ALLOWED_STATUSES,
     DEFAULT_LIMIT,
@@ -126,13 +132,67 @@ def query_migration_batches_tool(
     )
 
 
+def lodgify_tools(tools: LodgifyTools) -> list[Tool]:
+    """The Lodgify connector's read-only capabilities.
+
+    All three are READ: none of them creates, changes or cancels anything, and
+    the connector has no write method to call even if one were registered.
+    """
+    return [
+        Tool(
+            name="list_properties",
+            description=(
+                "List the rental properties under management, and whether each "
+                "one is bookable through Lodgify. Use this to discover the "
+                "property slugs that the availability and quote tools accept."
+            ),
+            function=tools.list_properties,
+            risk=ToolRisk.READ,
+            parameters=LIST_PROPERTIES_SCHEMA,
+        ),
+        Tool(
+            name="get_property_availability",
+            description=(
+                "Check live availability for one property over a date range, "
+                "from the booking provider. Returns periods that are each "
+                "available or not. If availability cannot be confirmed the "
+                "result says so explicitly -- never assume a property is "
+                "available when the result is unknown."
+            ),
+            function=tools.get_property_availability,
+            risk=ToolRisk.READ,
+            parameters=AVAILABILITY_SCHEMA,
+        ),
+        Tool(
+            name="get_property_quote",
+            description=(
+                "Get authoritative pricing for one property, date range and "
+                "guest count from the booking provider: accommodation, cleaning "
+                "fee, taxes and total. Never calculate or estimate a price "
+                "yourself; every figure quoted to a guest must come from this "
+                "tool."
+            ),
+            function=tools.get_property_quote,
+            risk=ToolRisk.READ,
+            parameters=QUOTE_SCHEMA,
+        ),
+    ]
+
+
 def build_tool_registry(
     migration_store: MigrationBatchStore,
+    lodgify: LodgifyTools | None = None,
 ) -> ToolRegistry:
     """Assemble every tool the agent may call.
 
     Dependencies are passed in rather than constructed here, so callers control
     which database the tools read from.
+
+    The Lodgify connector is optional. When it is not configured its tools are
+    omitted entirely rather than registered in a broken state: the registry is
+    what the model is told it can do, so advertising a capability that always
+    fails wastes a reasoning iteration and invites the model to promise
+    something it cannot deliver. AgentGuard runs fully without it.
     """
     registry = ToolRegistry()
 
@@ -140,5 +200,9 @@ def build_tool_registry(
     registry.register(get_migration_status_tool())
     registry.register(restart_migration_tool())
     registry.register(query_migration_batches_tool(migration_store))
+
+    if lodgify is not None:
+        for tool in lodgify_tools(lodgify):
+            registry.register(tool)
 
     return registry
