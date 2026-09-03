@@ -5,9 +5,11 @@ No test reaches Lodgify. Everything runs through httpx.MockTransport.
 
 import json
 
+import httpx
 import pytest
 
 from app.connectors.lodgify.inbox import (
+    BOOKING_SCAN_SIZE,
     DEFAULT_LIMIT,
     MAX_LIMIT,
     LodgifyInbox,
@@ -15,7 +17,11 @@ from app.connectors.lodgify.inbox import (
     plain_text,
     read_messages,
 )
-from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
+from app.connectors.lodgify.messaging_client import (
+    INBOX_STAY_FILTERS,
+    STAY_FILTER_ALL,
+    LodgifyMessagingClient,
+)
 from app.connectors.lodgify.messaging_models import ConversationStatus
 from app.connectors.lodgify.refs import conversation_ref_for, is_well_formed
 from tests.lodgify_fakes import (
@@ -238,7 +244,14 @@ def test_limit_rejects_non_integers():
         fake.inbox().list_conversations(limit="20")
 
 
-def test_limit_bounds_how_many_threads_are_read():
+def test_limit_bounds_the_response_not_the_scan():
+    """`limit` bounds what is returned, not what is examined.
+
+    This assertion was inverted until 2026-09-03: the Inbox read only `limit`
+    threads, which meant it chose what to show before it knew what was recent.
+    Deciding recency requires reading every candidate thread, because a booking
+    row carries no last-message timestamp. The cost is real and deliberate.
+    """
     fake = FakeLodgify(
         bookings=[booking(1000 + n, f"thread-{n}") for n in range(10)],
         threads={
@@ -249,8 +262,8 @@ def test_limit_bounds_how_many_threads_are_read():
     rows = fake.inbox().list_conversations(limit=3)
 
     assert len(rows) == 3
-    # One thread read per returned row, and no more.
-    assert len(fake.thread_reads) == 3
+    # Every candidate is read; only the response is cut to the limit.
+    assert len(fake.thread_reads) == 10
 
 
 def test_default_limit_is_applied():
@@ -516,3 +529,343 @@ def test_the_connector_never_issues_a_write_during_reads():
 def test_inbox_requires_a_messaging_client():
     with pytest.raises(TypeError):
         LodgifyInbox()  # type: ignore[call-arg]
+
+
+# -- 12. discovery: the Inbox is an activity view, not a booking view -------
+#
+# The bug these cover: the Inbox listed the first page of bookings, cut it to
+# `limit`, and only then read threads. Lodgify's booking list is not ordered by
+# message activity -- verified live, it is ordered by neither `created_at` nor
+# `updated_at` -- so a new message on an older or lower-listed booking was
+# never read at all and could not appear. Discovery must scan the archive and
+# order by the newest message in each thread, with the limit applied last.
+
+
+def activity_fake(entries, **kwargs):
+    """Bookings whose threads each end at a chosen time.
+
+    `entries` is (booking_id, thread_uid, last_message_at, sender). All text is
+    invented; none of it is real guest data.
+    """
+    bookings = []
+    threads = {}
+
+    for booking_id, uid, created_at, sender in entries:
+        bookings.append(booking(booking_id, uid))
+        threads[uid] = thread(
+            uid,
+            [message(f"m-{uid}", sender, "Invented fixture text.", created_at)],
+        )
+
+    return FakeLodgify(bookings=bookings, threads=threads, **kwargs)
+
+
+def filler(count, start=2000, at="2026-01-01T09:00:00"):
+    """Quiet older conversations, used to push a booking onto a later page."""
+    return [(start + n, f"quiet-{n}", at, "Owner") for n in range(count)]
+
+
+def refs(rows):
+    return [row["conversation_ref"] for row in rows]
+
+
+def test_a_recent_message_on_page_one_is_listed():
+    fake = activity_fake(
+        [
+            (1001, "thread-new", "2026-09-03T14:00:00", "Renter"),
+            (1002, "thread-old", "2026-01-04T09:00:00", "Owner"),
+        ]
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows)[0] == conversation_ref_for(1001)
+
+
+def test_a_new_message_on_an_old_booking_beyond_page_one_reaches_the_top():
+    """The live failure, reproduced with invented data.
+
+    The booking sits past the first scanned page and is listed last, so booking
+    order gives it no chance of being read. Its thread is the newest in the
+    account, so it must come first.
+    """
+    entries = filler(BOOKING_SCAN_SIZE + 40) + [
+        (9001, "thread-today", "2026-09-03T14:27:00", "Renter"),
+    ]
+
+    fake = activity_fake(entries)
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows)[0] == conversation_ref_for(9001)
+    assert rows[0]["status"] == ConversationStatus.NEEDS_ATTENTION.value
+
+
+def test_every_booking_page_is_scanned():
+    fake = activity_fake(filler(BOOKING_SCAN_SIZE + 40))
+
+    fake.inbox().list_conversations()
+
+    # One page sequence per stay filter the Inbox enumerates.
+    pages = [request.url.params.get("page") for request in fake.booking_reads]
+
+    assert pages == ["1", "2"] * len(INBOX_STAY_FILTERS)
+
+
+def test_ordering_is_by_the_newest_message_in_each_thread():
+    fake = activity_fake(
+        [
+            (1001, "thread-a", "2026-09-01T10:00:00", "Owner"),
+            (1002, "thread-b", "2026-09-03T10:00:00", "Renter"),
+            (1003, "thread-c", "2026-09-02T10:00:00", "Owner"),
+        ]
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows) == [
+        conversation_ref_for(1002),
+        conversation_ref_for(1003),
+        conversation_ref_for(1001),
+    ]
+
+
+def test_booking_list_order_does_not_decide_inbox_order():
+    """Live evidence: the booking list is ordered by neither created nor
+    updated time, so its order carries no information about message activity."""
+    fake = activity_fake(
+        [
+            (1001, "thread-a", "2026-05-01T10:00:00", "Owner"),
+            (1002, "thread-b", "2026-09-03T10:00:00", "Renter"),
+        ]
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows) != [conversation_ref_for(1001), conversation_ref_for(1002)]
+
+
+def test_the_limit_is_applied_after_activity_ordering():
+    """The newest conversation is listed last by the provider. A limit applied
+    to booking order would drop it; applied after ordering, it survives."""
+    entries = filler(BOOKING_SCAN_SIZE + 40) + [
+        (9001, "thread-today", "2026-09-03T14:27:00", "Renter"),
+    ]
+
+    rows = activity_fake(entries).inbox().list_conversations(limit=3)
+
+    assert len(rows) == 3
+    assert refs(rows)[0] == conversation_ref_for(9001)
+
+
+def test_a_conversation_is_never_listed_twice():
+    """A booking repeated across pages must not become two inbox rows."""
+    repeated = booking(1001, "thread-a")
+
+    fake = FakeLodgify(
+        bookings=[repeated, booking(1002, "thread-b"), repeated],
+        threads={
+            "thread-a": thread("thread-a", [GUEST_QUESTION]),
+            "thread-b": thread("thread-b", [OWNER_ANSWER]),
+        },
+    )
+
+    listed = refs(fake.inbox().list_conversations())
+
+    assert len(listed) == len(set(listed))
+    assert listed.count(conversation_ref_for(1001)) == 1
+
+
+def test_pagination_stops_on_an_empty_page():
+    """A page exactly filling the scan size must not spin the scan forever."""
+    fake = activity_fake(filler(BOOKING_SCAN_SIZE))
+
+    rows = fake.inbox().list_conversations(limit=MAX_LIMIT)
+
+    # Page one is full, so page two is requested and comes back empty; that
+    # terminates the scan for each filter rather than spinning to the cap.
+    assert len(fake.booking_reads) == 2 * len(INBOX_STAY_FILTERS)
+    assert len(rows) == MAX_LIMIT
+
+
+def test_responded_and_needs_attention_are_ordered_together_by_activity():
+    fake = activity_fake(
+        [
+            (1001, "thread-guest-old", "2026-09-01T10:00:00", "Renter"),
+            (1002, "thread-owner-new", "2026-09-03T10:00:00", "Owner"),
+        ]
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows) == [conversation_ref_for(1002), conversation_ref_for(1001)]
+    assert rows[0]["status"] == ConversationStatus.RESPONDED.value
+    assert rows[1]["status"] == ConversationStatus.NEEDS_ATTENTION.value
+
+
+def test_refresh_re_reads_the_provider_every_time():
+    """Nothing caches. A second call must issue a second set of live reads."""
+    fake = activity_fake(
+        [
+            (1001, "thread-a", "2026-09-01T10:00:00", "Owner"),
+            (1002, "thread-b", "2026-09-02T10:00:00", "Renter"),
+        ]
+    )
+
+    inbox = fake.inbox()
+
+    inbox.list_conversations()
+    first_bookings = len(fake.booking_reads)
+    first_threads = len(fake.thread_reads)
+
+    inbox.list_conversations()
+
+    assert len(fake.booking_reads) == first_bookings * 2
+    assert len(fake.thread_reads) == first_threads * 2
+
+
+def test_one_unreadable_thread_does_not_corrupt_the_inbox():
+    """Partial results are the existing contract: an unreadable thread becomes
+    UNKNOWN rather than taking the whole Inbox down with it."""
+    fake = activity_fake(
+        [
+            (1001, "thread-a", "2026-09-01T10:00:00", "Owner"),
+            (1002, "thread-b", "2026-09-03T10:00:00", "Renter"),
+        ]
+    )
+
+    # thread-c has no scripted payload and answers 404 -> unavailable.
+    fake.bookings.append(booking(1003, "thread-missing"))
+
+    def handler(request):
+        if request.url.path == "/v2/messaging/thread-missing":
+            fake.requests.append(request)
+            return httpx.Response(503, json={})
+
+        return fake.handler(request)
+
+    inbox = LodgifyInbox(
+        LodgifyMessagingClient(
+            api_key_provider=lambda: FAKE_KEY,
+            transport=httpx.MockTransport(handler),
+        )
+    )
+
+    rows = inbox.list_conversations()
+
+    listed = refs(rows)
+
+    assert conversation_ref_for(1002) in listed
+    assert conversation_ref_for(1001) in listed
+    assert conversation_ref_for(1003) in listed
+
+    unreadable = next(
+        row for row in rows if row["conversation_ref"] == conversation_ref_for(1003)
+    )
+
+    assert unreadable["status"] == ConversationStatus.UNKNOWN.value
+    # Unknown sorts to the bottom; it never displaces real activity.
+    assert listed[0] == conversation_ref_for(1002)
+
+
+# -- 13. discovery must ask for every stay ---------------------------------
+#
+# The second live failure, and a different bug from the ordering one. Lodgify's
+# booking list defaults to `stayFilter=Upcoming`. Measured live 2026-09-03:
+# Upcoming 145, Current 12, Historic 908, All 1062. AgentGuard sent no filter,
+# so it saw only upcoming reservations -- and a guest asking to check out late
+# is a *current* stay, in the property right now. No amount of ordering can
+# surface a conversation whose booking is never enumerated.
+
+
+def test_booking_discovery_names_its_stay_filters_explicitly():
+    """Never send this endpoint an unfiltered request: it defaults to
+    `Upcoming`, which hid every current and past stay."""
+    fake = activity_fake([(1001, "thread-a", "2026-09-03T12:06:00", "Renter")])
+
+    fake.inbox().list_conversations()
+
+    sent = [request.url.params.get("stayFilter") for request in fake.booking_reads]
+
+    assert sent
+    assert set(sent) == set(INBOX_STAY_FILTERS)
+    assert "Current" in sent
+
+
+def test_a_single_booking_lookup_searches_every_stay():
+    """Resolution is a different question from the Inbox listing: a webhook or
+    a stored ref can name a booking from any period, so it searches them all."""
+    fake = activity_fake([(1001, "thread-a", "2026-09-03T12:06:00", "Renter")])
+
+    fake.inbox().resolve(conversation_ref_for(1001))
+
+    sent = [request.url.params.get("stayFilter") for request in fake.booking_reads]
+
+    assert sent and all(value == STAY_FILTER_ALL for value in sent)
+
+
+def test_a_current_stay_is_discoverable():
+    """A guest mid-stay messaging today must reach the Inbox.
+
+    The provider only returns this row when asked for every stay, so the fake
+    withholds it under the default filter exactly as Lodgify does.
+    """
+    upcoming = booking(1001, "thread-upcoming")
+    current = booking(9001, "thread-current")
+
+    class StayFilterFake(FakeLodgify):
+        def handler(self, request):
+            if request.url.path == "/v2/reservations/bookings":
+                asked = request.url.params.get("stayFilter")
+                # The provider only yields the in-progress stay when asked
+                # for it by name, exactly as Lodgify does.
+                self.bookings = [current] if asked == "Current" else [upcoming]
+
+            return super().handler(request)
+
+    fake = StayFilterFake(
+        bookings=[upcoming],
+        threads={
+            "thread-upcoming": thread(
+                "thread-upcoming",
+                [message("m-up", "Owner", "Invented.", "2026-08-01T09:00:00")],
+            ),
+            "thread-current": thread(
+                "thread-current",
+                [message("m-cur", "Renter", "Invented.", "2026-09-03T12:06:33")],
+            ),
+        },
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert refs(rows)[0] == conversation_ref_for(9001)
+    assert rows[0]["status"] == ConversationStatus.NEEDS_ATTENTION.value
+
+
+def test_two_bookings_sharing_a_thread_produce_one_row():
+    """12 bookings in the live account share a thread with another booking.
+
+    The Inbox lists conversations, so one thread is one row however many
+    reservations point at it.
+    """
+    fake = FakeLodgify(
+        bookings=[booking(1001, "thread-shared"), booking(1002, "thread-shared")],
+        threads={"thread-shared": thread("thread-shared", [GUEST_QUESTION])},
+    )
+
+    rows = fake.inbox().list_conversations()
+
+    assert len(rows) == 1
+    assert len(fake.thread_reads) == 1
+
+
+def test_a_conversation_on_a_deep_page_is_still_discovered():
+    """The live conversation sat at index 1044, on page 11."""
+    entries = filler(BOOKING_SCAN_SIZE * 10 + 44) + [
+        (9001, "thread-deep", "2026-09-03T12:06:33", "Renter"),
+    ]
+
+    rows = activity_fake(entries).inbox().list_conversations(limit=5)
+
+    assert refs(rows)[0] == conversation_ref_for(9001)

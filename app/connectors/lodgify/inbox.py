@@ -17,6 +17,7 @@ docs/LODGIFY_API.md sections 12, 14, 16 and 17.
 
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -27,7 +28,12 @@ from app.connectors.lodgify.errors import (
     LodgifySendRefused,
     LodgifyUnavailable,
 )
-from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
+from app.connectors.lodgify.messaging_client import (
+    INBOX_STAY_FILTERS,
+    STAY_FILTER_ALL,
+    LodgifyMessagingClient,
+)
+
 from app.connectors.lodgify.messaging_models import (
     SENDER_OWNER,
     SENDER_RENTER,
@@ -51,15 +57,29 @@ MAX_LIMIT = 100
 
 DEFAULT_LIMIT = 20
 
-# How many booking rows to pull before filtering. One page is enough for an
-# inbox view; a property filter can thin the page out, so it is deliberately
-# larger than the default limit.
+# How many booking rows to pull per page. The provider's maximum, because every
+# page costs a round trip and the whole archive has to be walked -- see
+# `all_bookings` for why one page is not enough.
 BOOKING_SCAN_SIZE = 100
 
-# How far back a single-booking lookup will page. 20 pages of 100 covers an
-# archive far larger than this account's, and the search stops at the first
-# match, so a recent conversation still costs one request.
-MAX_LOOKUP_PAGES = 20
+# The only booking status that occupies the calendar. Verified live against the
+# account: the vocabulary is Booked / Declined / Open, and only Booked is a stay.
+
+# A safety cap on paging, not a working limit. It was 20 while the account was
+# believed to hold ~145 bookings; asking the provider for every stay rather than
+# only upcoming ones revealed 1062, which is 11 pages -- so 20 was close to
+# being a silent truncation. Sized well clear of the real archive, and reviewed
+# whenever the account grows.
+MAX_LOOKUP_PAGES = 60
+
+# How many thread reads run at once during an Inbox scan. Modest on purpose:
+# this is someone else's API, and the goal is an Inbox that returns before the
+# next poll, not maximum throughput.
+
+# How many thread reads run at once during an Inbox scan. Modest on purpose:
+# this is someone else's API, and the goal is an Inbox that returns before the
+# next poll, not maximum throughput.
+THREAD_READ_WORKERS = 8
 
 MAX_SUBJECT_LENGTH = 200
 
@@ -389,11 +409,20 @@ class LodgifyInbox:
     def client(self) -> LodgifyMessagingClient:
         return self._client
 
-    def booking_page(self, page: int, size: int) -> list[ResolvedConversation]:
-        """One page of bookings, already reduced to the five fields we read."""
+    def booking_page(
+        self,
+        page: int,
+        size: int,
+        stay_filter: str = STAY_FILTER_ALL,
+    ) -> list[ResolvedConversation]:
+        """One page of bookings, already reduced to the fields we read."""
         return [
             resolved
-            for row in self._client.list_bookings(size=size, page=page)
+            for row in self._client.list_bookings(
+                size=size,
+                page=page,
+                stay_filter=stay_filter,
+            )
             for resolved in [read_booking(row)]
             if resolved is not None
         ]
@@ -457,15 +486,57 @@ class LodgifyInbox:
 
     # -- resolution --------------------------------------------------------
 
-    def bookings(self) -> list[ResolvedConversation]:
-        rows = self._client.list_bookings(size=BOOKING_SCAN_SIZE)
+    def all_bookings(
+        self,
+        stay_filters: tuple[str, ...] = (STAY_FILTER_ALL,),
+    ) -> list[ResolvedConversation]:
+        """Every booking in the archive, deduplicated, in provider order.
 
-        return [
-            resolved
-            for row in rows
-            for resolved in [read_booking(row)]
-            if resolved is not None
-        ]
+        The Inbox needs all of them, not a first page. A booking carries no
+        message content and no last-message timestamp -- verified live, the only
+        messaging field on a booking row is `thread_uid` -- and the booking list
+        is ordered by neither `created_at` nor `updated_at`. So its order says
+        nothing about conversation activity, and any booking in the archive may
+        be the one with today's message. Reading a subset means reading the
+        wrong subset.
+
+        Deduplicated twice over. By `conversation_ref`, because paging a live
+        list is not atomic: a booking can shift between pages while the scan
+        runs and be seen twice. And by `thread_uid`, because two bookings can
+        share one thread -- 12 do in this account, verified live -- and the
+        Inbox lists conversations, so one thread must produce one row however
+        many reservations point at it.
+        """
+        seen: set[str] = set()
+        seen_threads: set[str] = set()
+        found: list[ResolvedConversation] = []
+
+        for stay_filter in stay_filters:
+            for page in range(1, MAX_LOOKUP_PAGES + 1):
+                bookings = self.booking_page(
+                    page=page,
+                    size=BOOKING_SCAN_SIZE,
+                    stay_filter=stay_filter,
+                )
+
+                if not bookings:
+                    break
+
+                for booking in bookings:
+                    if booking.conversation_ref in seen:
+                        continue
+
+                    if booking.thread_uid in seen_threads:
+                        continue
+
+                    seen.add(booking.conversation_ref)
+                    seen_threads.add(booking.thread_uid)
+                    found.append(booking)
+
+                if len(bookings) < BOOKING_SCAN_SIZE:
+                    break
+
+        return found
 
     def resolve(self, conversation_ref: object) -> ResolvedConversation:
         """Turn a safe ref into provider identifiers, or refuse.
@@ -503,11 +574,29 @@ class LodgifyInbox:
     ) -> list[dict[str, Any]]:
         """Recent conversations, most recently active first.
 
-        Costs one booking-list call plus one thread read per row returned. The
-        thread read is unavoidable: the booking object carries no message
-        content, no last-message timestamp and no proven reply state, so the
-        only way to say anything true about a conversation is to read it.
-        `limit` is what bounds that cost.
+        *Recently active*, not recently booked. A new message routinely arrives
+        on an old reservation, so the Inbox is a view of conversation activity
+        and the booking list is only how conversations are enumerated.
+
+        The algorithm is scan -> read -> order -> limit, in that order, and the
+        order is the correctness property:
+
+          * **scan** the whole archive, because the booking list's order carries
+            no activity signal (`all_bookings`);
+          * **read** every candidate thread, because the last-message timestamp
+            exists nowhere else;
+          * **order** by that timestamp;
+          * **limit** last.
+
+        Limiting any earlier would decide what to show before knowing what is
+        recent, which is exactly how a new message on an old booking went
+        missing. `limit` bounds the *response*, not the work.
+
+        Costs one booking-list call per page plus one thread read per candidate.
+        There is no cheaper correct version: Lodgify exposes no thread-list
+        endpoint and no last-message field on a booking, so recency cannot be
+        known without reading the thread. Thread reads run concurrently to keep
+        that affordable -- see `summarise_all`.
         """
         count = validate_limit(limit)
 
@@ -519,20 +608,48 @@ class LodgifyInbox:
 
         candidates = [
             booking
-            for booking in self.bookings()
+            for booking in self.all_bookings(stay_filters=INBOX_STAY_FILTERS)
             if property_slug is None or booking.property_slug == property_slug
-        ][:count]
-
-        summaries = [self.summarise(booking) for booking in candidates]
-
-        return [
-            summary.to_dict()
-            for summary in sorted(
-                summaries,
-                key=lambda summary: summary.last_message_at or "",
-                reverse=True,
-            )
         ]
+
+        summaries = self.summarise_all(candidates)
+
+        # Two stable passes rather than one composite key: the reference breaks
+        # ties ascending while the timestamp sorts descending, so the order is
+        # deterministic even when several threads share a timestamp. A single
+        # reversed sort would reverse the tie-break too.
+        summaries.sort(key=lambda summary: summary.conversation_ref)
+        summaries.sort(
+            key=lambda summary: summary.last_message_at or "",
+            reverse=True,
+        )
+
+        return [summary.to_dict() for summary in summaries[:count]]
+
+    def summarise_all(
+        self,
+        bookings: list[ResolvedConversation],
+    ) -> list[ConversationSummary]:
+        """Summarise every candidate conversation, reading threads concurrently.
+
+        Measured against the live account: 145 threads read sequentially take
+        ~27s, which is longer than the console's poll interval, so requests
+        would stack. The reads are independent bounded GETs and the client
+        builds a fresh `httpx.Client` per call, so there is no shared state to
+        protect.
+
+        `map` preserves input order and re-raises, so behaviour is identical to
+        the sequential version -- concurrency changes the latency and nothing
+        else. The caller sorts regardless, so no ordering depends on completion
+        order.
+        """
+        if not bookings:
+            return []
+
+        workers = min(THREAD_READ_WORKERS, len(bookings))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(self.summarise, bookings))
 
     def summarise(self, booking: ResolvedConversation) -> ConversationSummary:
         """One inbox row. A thread we cannot read becomes UNKNOWN, not empty."""

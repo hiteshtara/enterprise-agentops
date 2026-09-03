@@ -148,6 +148,15 @@ class FakeLodgify:
         return [request for request in self.requests if request.method == "POST"]
 
     @property
+    def booking_reads(self) -> list[httpx.Request]:
+        return [
+            request
+            for request in self.requests
+            if request.method == "GET"
+            and request.url.path == "/v2/reservations/bookings"
+        ]
+
+    @property
     def thread_reads(self) -> list[httpx.Request]:
         return [
             request
@@ -173,7 +182,17 @@ class FakeLodgify:
             if self.bookings_status != 200:
                 return httpx.Response(self.bookings_status, json={})
 
-            return httpx.Response(200, json={"items": self.bookings})
+            # Paginate the way upstream does, so a test can put a booking on
+            # page two and prove the scan reaches it. A fixture shorter than one
+            # page still comes back whole on page one, exactly as before.
+            page = int(request.url.params.get("page", "1"))
+            size = int(request.url.params.get("size", "50"))
+            start = (page - 1) * size
+
+            return httpx.Response(
+                200,
+                json={"items": self.bookings[start : start + size]},
+            )
 
         if path.startswith("/v2/messaging/"):
             if self.thread_status != 200:

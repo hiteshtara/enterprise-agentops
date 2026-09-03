@@ -48,11 +48,47 @@ OWNER_MESSAGE_TYPE = "Owner"
 
 SEND_NOTIFICATION = True
 
-# One page is enough for an inbox: the caller asks for the most recent N
-# conversations, and the provider returns bookings newest-first by update.
+# Default page size only. Callers that need the archive pass the maximum and
+# page explicitly.
+#
+# This constant used to carry the claim that the provider returns bookings
+# "newest-first by update", and the Inbox was built on it. That claim is false:
+# checked live against the whole account on 2026-09-03, the list is ordered by
+# neither `created_at` nor `updated_at`, and no documented parameter sorts or
+# filters it by message activity. Nothing may assume an order here again.
 BOOKINGS_PAGE_SIZE = 50
 
 MAX_BOOKINGS_PAGE_SIZE = 100
+
+# The booking list is AgentGuard's only index of conversations, so it has to
+# enumerate every booking that has a thread -- not a subset.
+#
+# `stayFilter` defaults to `Upcoming` upstream, and that default silently hid
+# most of the account. Verified live 2026-09-03 against the real account:
+#
+#     default (unset)  145      <- what AgentGuard used to see
+#     Upcoming         145
+#     Current           12      <- guests in the property right now
+#     Historic         908
+#     All             1062
+#
+# A guest asking for a late checkout is, by definition, a `Current` stay. The
+# most actionable conversations in the account were the ones the default
+# excluded. Never send this endpoint an unfiltered request again.
+STAY_FILTER_ALL = "All"
+
+# What the Inbox actually enumerates. `All` is correct but not affordable: the
+# archive is 1062 bookings, and reading a thread each -- the only way to learn a
+# last-message time -- earns HTTP 429 from the provider. Verified live
+# 2026-09-03: ~1050 thread reads rate-limit and fail closed to UNKNOWN, which
+# silently *empties* the top of the Inbox rather than erroring. That is worse
+# than the bug it was meant to fix.
+#
+# Current + Upcoming is 152 threads, reads clean in ~7s, and covers every guest
+# who is in a property now or arriving later -- which is every conversation that
+# can still need an answer. Historic stays are deliberately out; see
+# `list_conversations` for what that costs.
+INBOX_STAY_FILTERS = ("Current", "Upcoming")
 
 
 class LodgifyMessagingClient:
@@ -123,14 +159,20 @@ class LodgifyMessagingClient:
         self,
         size: int = BOOKINGS_PAGE_SIZE,
         page: int = 1,
+        stay_filter: str = STAY_FILTER_ALL,
     ) -> list[dict[str, Any]]:
-        """Raw booking rows, one page, newest-updated first.
+        """Raw booking rows, one page, in whatever order the provider gives.
 
         The caller sanitizes. Every row carries guest contact details and
         financial fields, so nothing from here may be returned unfiltered.
 
-        `page` exists for the history index, which walks the whole archive. The
-        Inbox only ever reads page one.
+        `stay_filter` is sent explicitly and defaults to every stay, because the
+        provider's own default hides current and past ones -- see
+        `STAY_FILTER_ALL`. Callers wanting a narrower slice must ask for it.
+
+        The order is not specified and must not be relied on. Callers that care
+        about recency page through everything and sort on a signal they have
+        actually read.
         """
         payload = self.get(
             "/v2/reservations/bookings",
@@ -138,6 +180,7 @@ class LodgifyMessagingClient:
                 "page": str(max(page, 1)),
                 "size": str(min(max(size, 1), MAX_BOOKINGS_PAGE_SIZE)),
                 "includeCount": "false",
+                "stayFilter": stay_filter,
             },
         )
 
