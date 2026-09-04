@@ -482,3 +482,234 @@ class EnquiryReplyDraft(BaseModel):
     subject: str | None = None
     message: str | None = None
     detail: str
+
+
+# -- vacancy ---------------------------------------------------------------
+
+
+class VacancyNight(BaseModel):
+    """One night on one property's calendar.
+
+    `state` is `BOOKED` / `OPEN` / `UNBOOKABLE` / `BLOCKED` / `UNKNOWN`. An
+    unknown night is never rendered as open, and `price` is null rather than
+    zero when the source carried no usable figure.
+    """
+
+    stay_date: str
+    state: str
+    price: float | None = None
+    minimum_stay: int | None = None
+    is_weekend: bool
+
+
+class VacancyWindow(BaseModel):
+    """A run of consecutive nights in one state, priced where possible."""
+
+    listing_id: str
+    display_name: str
+    start: str
+    end: str
+    nights: int
+    weekend_nights: int
+    priced_nights: int
+    gross_value: float | None = None
+    adr: float | None = None
+    high_value_nights: int
+    minimum_stays: list[int] = []
+    truncated: bool
+    complete_pricing: bool
+    reason: str | None = None
+    orphan_class: str | None = None
+    high_value: bool | None = None
+    prices: list[float | None] | None = None
+    rank: int | None = None
+    score: float | None = None
+    reasons: list[str] = []
+    lead_days: int | None = None
+
+
+class VacancyHighValueNight(BaseModel):
+    listing_id: str
+    display_name: str
+    stay_date: str
+    price: float
+    threshold: float
+    pct_above_median: float | None = None
+    is_weekend: bool
+
+
+class VacancyAttention(BaseModel):
+    listing_id: str
+    display_name: str
+    reasons: list[str]
+    #: True only when the property trails its market by the material margin.
+    #: A property ahead of its market has a negative gap and is False here.
+    below_market: bool = False
+    occupancy_gap_points: float | None = None
+    listing_occupancy_pct: float | None = None
+    market_occupancy_pct: float | None = None
+    month_label: str | None = None
+    provider_recommendations: list[str] = []
+
+
+class VacancyProperty(BaseModel):
+    listing_id: str
+    display_name: str
+    currency: str
+    last_refreshed_at: str | None = None
+    nights_counted: int
+    nights_missing: int
+    booked_nights: int
+    open_sellable_nights: int
+    unbookable_nights: int
+    blocked_nights: int
+    unknown_nights: int
+    occupancy_pct: float | None = None
+    sellable_gross_value: float
+    sellable_priced_nights: int
+    unbookable_gross_value: float
+    high_value_threshold: float | None = None
+    median_price: float | None = None
+    market_occupancy_pct: float | None = None
+    listing_occupancy_pct: float | None = None
+    booking_window_min_days: int | None = None
+    booking_window_max_days: int | None = None
+    provider_flag: str | None = None
+    provider_recommendations: list[str] = []
+    calendar: list[VacancyNight]
+
+
+class VacancySummary(BaseModel):
+    properties: int
+    nights_counted: int
+    nights_missing: int
+    booked_nights: int
+    open_sellable_nights: int
+    unbookable_nights: int
+    blocked_nights: int
+    unknown_nights: int
+    occupancy_pct: float | None = None
+    sellable_gross_value: float
+    unbookable_gross_value: float
+
+
+class VacancyBoard(BaseModel):
+    """The whole Vacancy board for one horizon.
+
+    Only ever built from a live provider's calendars. `source_is_live` records
+    which provider produced it so a non-live board can never be mistaken for
+    the account's own inventory.
+    """
+
+    horizon_days: int
+    start_date: str
+    end_date: str
+    source: str
+    source_is_live: bool
+    generated_from_nights: int
+    summary: VacancySummary
+    properties: list[VacancyProperty]
+    unbookable_windows: list[VacancyWindow]
+    open_windows: list[VacancyWindow]
+    high_value_nights: list[VacancyHighValueNight]
+    needs_attention: list[VacancyAttention]
+    opportunities: list[VacancyWindow]
+
+
+class VacancyResponse(BaseModel):
+    """The Vacancy endpoint's reply.
+
+    Two states, never blurred: either PriceLabs is connected and `board` holds
+    real inventory, or it is not and `board` is absent. There is no third state
+    in which invented properties stand in for an unconfigured connector -- a
+    demo portfolio shown in the runtime is indistinguishable from a real one to
+    the person reading it, which makes it a lie rather than a placeholder.
+    """
+
+    configured: bool
+    message: str | None = None
+    board: VacancyBoard | None = None
+
+
+# -- pricing actions -------------------------------------------------------
+
+
+class PricingRecommendation(BaseModel):
+    """One proposed pricing action, with the whole case for it.
+
+    `actionable` is the only field a caller should branch on to decide whether
+    a change can be submitted. HOLD and KEEP_PIN are informational and are
+    never actionable.
+    """
+
+    id: str
+    listing_id: str
+    slug: str
+    display_name: str
+    stay_date: str
+    days_out: int
+    action: str
+    current_price: float | None = None
+    proposed_price: float | None = None
+    pct_change: float | None = None
+    confidence: str
+    reason: str
+    refused: str | None = None
+    requires_human: bool = False
+    notes: list[str] = []
+    fingerprint: str
+    actionable: bool
+    #: Why this action cannot execute yet despite being actionable, or null.
+    #: Set while a write path's provider behaviour is still unverified.
+    blocked_reason: str | None = None
+    pricelabs_minimum: float | None = None
+    hard_floor: float | None = None
+    normal_floor: float | None = None
+    auto_raise_ceiling: float | None = None
+    absolute_ceiling: float | None = None
+    market_p25: float | None = None
+    market_booked_median: float | None = None
+    market_occupancy: float | None = None
+    listing_occupancy: float | None = None
+    demand: str | None = None
+    pickup_7_days: float | None = None
+    pinned_price: float | None = None
+    last_refreshed_at: str | None = None
+
+
+class PricingBandsOut(BaseModel):
+    listing_id: str
+    slug: str
+    display_name: str
+    hard_floor: float
+    normal_floor: float
+    auto_raise_ceiling: float
+    absolute_ceiling: float
+    automation_enabled: bool
+    raise_requires_human: bool
+
+
+class PricingRecommendationPage(BaseModel):
+    """Today's recommendations plus the switches that govern them."""
+
+    generated_at: str
+    horizon_days: int
+    writes_enabled: bool
+    max_change_per_run: float
+    recommendations: list[PricingRecommendation]
+    bands: list[PricingBandsOut]
+
+
+class PricingActionRequest(BaseModel):
+    """A request to submit one recommendation for human approval.
+
+    The fingerprint travels with it: the tool recomputes it from fresh
+    PriceLabs state and refuses if anything material moved.
+    """
+
+    listing_id: str = Field(min_length=1)
+    stay_date: str = Field(min_length=10)
+    action: str = Field(min_length=1)
+    fingerprint: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    proposed_price: float | None = None

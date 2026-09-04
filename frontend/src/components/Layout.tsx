@@ -15,6 +15,7 @@ const NAV: NavItem[] = [
   { to: '/agent', label: 'Agent', end: false, permission: 'RUN_AGENT' },
   { to: '/inbox', label: 'Inbox', end: false, permission: 'VIEW_RUNS' },
   { to: '/enquiries', label: 'Enquiries', end: false, permission: 'VIEW_RUNS' },
+  { to: '/vacancy', label: 'Vacancy', end: false, permission: 'VIEW_RUNS' },
   { to: '/knowledge', label: 'Knowledge', end: false, permission: 'VIEW_RUNS' },
   { to: '/runs', label: 'Runs', end: false, permission: 'VIEW_RUNS' },
   { to: '/approvals', label: 'Approvals', end: false, permission: 'VIEW_APPROVALS' },

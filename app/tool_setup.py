@@ -20,6 +20,11 @@ from app.connectors.lodgify.tools import (
     QUOTE_SCHEMA,
     LodgifyTools,
 )
+from app.connectors.pricelabs.pricing_tools import (
+    APPLY_PRICING_ACTION_SCHEMA,
+    APPLY_PRICING_ACTION_TOOL,
+    PriceLabsPricingTools,
+)
 from app.migration_store import (
     ALLOWED_STATUSES,
     DEFAULT_LIMIT,
@@ -278,11 +283,32 @@ def send_enquiry_reply_tool(tools: LodgifyEnquiryTools) -> Tool:
     )
 
 
+def apply_pricing_action_tool(pricing: PriceLabsPricingTools) -> Tool:
+    """The pricing write, registered but never advertised to the model.
+
+    `model_callable=False` is the whole point: the capability stays inside
+    governance -- risk-tiered, approval-gated, audited, visible to the console
+    -- while remaining absent from what the provider is told the model can do.
+    """
+    return Tool(
+        name=APPLY_PRICING_ACTION_TOOL,
+        description=(
+            "Apply one owner-approved pricing action to PriceLabs. Refuses if "
+            "the state changed since the recommendation was made."
+        ),
+        function=pricing.apply_pricing_action,
+        risk=ToolRisk.DANGEROUS,
+        model_callable=False,
+        parameters=APPLY_PRICING_ACTION_SCHEMA,
+    )
+
+
 def build_tool_registry(
     migration_store: MigrationBatchStore,
     lodgify: LodgifyTools | None = None,
     lodgify_messaging: LodgifyMessagingTools | None = None,
     lodgify_enquiries: LodgifyEnquiryTools | None = None,
+    pricelabs_pricing: PriceLabsPricingTools | None = None,
 ) -> ToolRegistry:
     """Assemble every tool the agent may call.
 
@@ -296,6 +322,9 @@ def build_tool_registry(
     something it cannot deliver. AgentGuard runs fully without it.
     """
     registry = ToolRegistry()
+
+    if pricelabs_pricing is not None:
+        registry.register(apply_pricing_action_tool(pricelabs_pricing))
 
     registry.register(calculator_tool())
     registry.register(get_migration_status_tool())

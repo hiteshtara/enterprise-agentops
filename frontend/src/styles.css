@@ -966,3 +966,300 @@ a.card.conversation-row:hover {
   display: block;
   margin-bottom: 2px;
 }
+
+/* ---- vacancy ---- */
+
+.vac-section {
+  margin-top: 28px;
+}
+
+.vac-section > .page-subtitle {
+  margin: 4px 0 12px;
+  max-width: 76ch;
+}
+
+.vac-freshness {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.vac-horizon {
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  border-radius: var(--radius);
+  padding: 5px 11px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vac-horizon.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.vac-figure {
+  font-size: 19px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  margin-top: 2px;
+}
+
+/* The nightly strip. Cells stay legible down to a 60-night horizon on a
+   phone by scrolling their own container -- the page never scrolls sideways. */
+.vac-strip {
+  display: flex;
+  gap: 2px;
+  margin: 12px 0 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.vac-cell {
+  flex: 1 0 auto;
+  min-width: 9px;
+  height: 22px;
+  border-radius: 2px;
+  background: var(--neutral-soft);
+}
+
+.vac-booked {
+  background: var(--accent);
+}
+
+.vac-open {
+  background: var(--ok);
+}
+
+.vac-unbookable {
+  background: var(--danger);
+}
+
+.vac-blocked {
+  background: var(--neutral);
+}
+
+/* Unknown is deliberately hollow: it reads as "no answer", never as open. */
+.vac-unknown {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--bg-inset) 0 3px,
+    var(--border-strong) 3px 6px
+  );
+}
+
+.vac-weekend {
+  box-shadow: inset 0 -3px 0 rgba(230, 237, 243, 0.55);
+}
+
+.vac-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.vac-legend .vac-cell {
+  display: inline-block;
+  width: 11px;
+  min-width: 11px;
+  height: 11px;
+  vertical-align: -1px;
+  margin-right: 5px;
+}
+
+.vac-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.vac-orphan-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.vac-reason {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--warn);
+}
+
+.vac-reasons {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.vac-reasons li {
+  margin-bottom: 4px;
+}
+
+.vac-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.vac-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 720px;
+  font-size: 13px;
+}
+
+.vac-table th {
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 500;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.vac-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.vac-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.vac-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vac-why {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.vac-chip {
+  font-size: 11.5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .vac-orphan-body {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Card headers wrap rather than forcing their card wider than the viewport:
+   a flex item's default min-width is its content, which is what pushed the
+   property cards past the page edge on a phone. */
+.vac-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 14px;
+}
+
+.vac-head > * {
+  min-width: 0;
+}
+
+.vac-head-figures {
+  display: flex;
+  gap: 14px;
+}
+
+/* A grid item's default min-width is auto, so without this the 60-night strip
+   stretches its card and the page scrolls sideways instead of the strip. */
+.vac-section .grid > .card {
+  min-width: 0;
+}
+
+.vac-strip {
+  min-width: 0;
+}
+
+.vac-notconnected {
+  max-width: 68ch;
+}
+
+.vac-notconnected p {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+}
+
+.vac-notconnected code {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.vac-action-prices {
+  margin: 10px 0 6px;
+  font-size: 15px;
+}
+
+.vac-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--info);
+}
+
+.vac-evidence {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.vac-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 18px;
+  margin: 0 0 4px;
+}
+
+.vac-evidence dt {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.vac-evidence dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+}
+
+.vac-approve {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-strong);
+}
+
+.vac-approve p {
+  margin: 0 0 8px;
+  font-size: 13px;
+}

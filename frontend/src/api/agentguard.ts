@@ -4,30 +4,33 @@
 import { query, request } from './client'
 import type {
   AgentResponse,
+  ApprovalResponse,
+  ApprovalStatus,
+  ApprovalSummary,
+  AuditEvent,
   ConversationDetail,
   CurrentUser,
   DraftSummary,
   EnquiryPage,
   EnquiryReplyDraft,
-  InboxRefreshResult,
+  EventType,
   InboxPage,
+  InboxRefreshResult,
   KnowledgeCreate,
   KnowledgeItem,
   KnowledgePage,
   KnowledgeStatus,
   LoginResponse,
-  ApprovalResponse,
-  ApprovalStatus,
-  ApprovalSummary,
-  AuditEvent,
-  EventType,
   Overview,
+  PricingRecommendation,
+  PricingRecommendationPage,
   ReconcileResponse,
   RunDetail,
   RunMetrics,
   RunStatus,
   RunSummary,
   ToolSummary,
+  VacancyResponse,
 } from './types'
 
 export function login(email: string, password: string): Promise<LoginResponse> {
@@ -269,5 +272,43 @@ export function requestEnquiryReply(
   return request<AgentResponse>(`/enquiries/${enquiryRef}/reply`, {
     method: 'POST',
     body: JSON.stringify({ subject, message }),
+  })
+}
+
+/**
+ * The vacancy board for a horizon of 7, 30 or 60 days.
+ *
+ * Read-only: there is no companion call that changes a price, a restriction,
+ * availability or a reservation, and the backend exposes no such route.
+ */
+export function getVacancyBoard(days: number): Promise<VacancyResponse> {
+  return request<VacancyResponse>(`/vacancy${query({ days })}`)
+}
+
+/** Today's pricing recommendations. Read-only: this changes no price. */
+export function getPricingRecommendations(): Promise<PricingRecommendationPage> {
+  return request<PricingRecommendationPage>('/vacancy/recommendations')
+}
+
+/**
+ * Submits one pricing action for approval. **This does not change a price.**
+ *
+ * The server parks a run whose single pending action is the DANGEROUS
+ * `apply_pricing_action` tool. A human approves it, and the tool re-reads
+ * PriceLabs and refuses if anything material moved since the recommendation.
+ */
+export function submitPricingAction(
+  recommendation: PricingRecommendation,
+): Promise<AgentResponse> {
+  return request<AgentResponse>('/vacancy/recommendations/submit', {
+    method: 'POST',
+    body: JSON.stringify({
+      listing_id: recommendation.listing_id,
+      stay_date: recommendation.stay_date,
+      action: recommendation.action,
+      proposed_price: recommendation.proposed_price,
+      fingerprint: recommendation.fingerprint,
+      reason: recommendation.reason,
+    }),
   })
 }
