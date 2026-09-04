@@ -470,3 +470,226 @@ export interface EnquirySendOutcome {
   message: string
   messages: SentMessageSummary[]
 }
+
+// -- vacancy ---------------------------------------------------------------
+
+/**
+ * One night on one property's calendar.
+ *
+ * `UNKNOWN` is a state in its own right and is never rendered as open: an
+ * unestablished night is not inventory anyone may sell. `price` is null, never
+ * zero, when the source carried no usable figure.
+ */
+export type NightState = 'BOOKED' | 'OPEN' | 'UNBOOKABLE' | 'BLOCKED' | 'UNKNOWN'
+
+export interface VacancyNight {
+  stay_date: string
+  state: NightState
+  price: number | null
+  minimum_stay: number | null
+  is_weekend: boolean
+}
+
+/** A run of consecutive nights in one state. */
+export interface VacancyWindow {
+  listing_id: string
+  display_name: string
+  start: string
+  end: string
+  nights: number
+  weekend_nights: number
+  priced_nights: number
+  gross_value: number | null
+  adr: number | null
+  high_value_nights: number
+  minimum_stays: number[]
+  truncated: boolean
+  complete_pricing: boolean
+  reason?: string | null
+  orphan_class?: 'one_night' | 'two_night' | 'longer' | null
+  high_value?: boolean | null
+  prices?: (number | null)[] | null
+  rank?: number | null
+  score?: number | null
+  reasons: string[]
+  lead_days?: number | null
+}
+
+export interface VacancyHighValueNight {
+  listing_id: string
+  display_name: string
+  stay_date: string
+  price: number
+  threshold: number
+  pct_above_median: number | null
+  is_weekend: boolean
+}
+
+export interface VacancyAttention {
+  listing_id: string
+  display_name: string
+  reasons: string[]
+  /** True only when the property trails its market by the material margin. */
+  below_market: boolean
+  occupancy_gap_points: number | null
+  listing_occupancy_pct: number | null
+  market_occupancy_pct: number | null
+  month_label: string | null
+  provider_recommendations: string[]
+}
+
+export interface VacancyProperty {
+  listing_id: string
+  display_name: string
+  currency: string
+  last_refreshed_at: string | null
+  nights_counted: number
+  nights_missing: number
+  booked_nights: number
+  open_sellable_nights: number
+  unbookable_nights: number
+  blocked_nights: number
+  unknown_nights: number
+  occupancy_pct: number | null
+  sellable_gross_value: number
+  sellable_priced_nights: number
+  unbookable_gross_value: number
+  high_value_threshold: number | null
+  median_price: number | null
+  market_occupancy_pct: number | null
+  listing_occupancy_pct: number | null
+  booking_window_min_days: number | null
+  booking_window_max_days: number | null
+  provider_flag: string | null
+  provider_recommendations: string[]
+  calendar: VacancyNight[]
+}
+
+export interface VacancySummary {
+  properties: number
+  nights_counted: number
+  nights_missing: number
+  booked_nights: number
+  open_sellable_nights: number
+  unbookable_nights: number
+  blocked_nights: number
+  unknown_nights: number
+  occupancy_pct: number | null
+  sellable_gross_value: number
+  unbookable_gross_value: number
+}
+
+/**
+ * The whole board for one horizon. Only ever built from live provider data.
+ */
+export interface VacancyBoard {
+  horizon_days: number
+  start_date: string
+  end_date: string
+  source: string
+  source_is_live: boolean
+  generated_from_nights: number
+  summary: VacancySummary
+  properties: VacancyProperty[]
+  unbookable_windows: VacancyWindow[]
+  open_windows: VacancyWindow[]
+  high_value_nights: VacancyHighValueNight[]
+  needs_attention: VacancyAttention[]
+  opportunities: VacancyWindow[]
+}
+
+/**
+ * The Vacancy endpoint's reply.
+ *
+ * Two states, never blurred: PriceLabs is connected and `board` holds real
+ * inventory, or it is not and `board` is absent. Sample inventory is never
+ * substituted for a missing connection -- on screen the two are
+ * indistinguishable, which makes a stand-in a lie rather than a placeholder.
+ */
+export interface VacancyResponse {
+  configured: boolean
+  message: string | null
+  board: VacancyBoard | null
+}
+
+// -- pricing actions -------------------------------------------------------
+
+export type PriceActionKind =
+  | 'LOWER'
+  | 'RAISE'
+  | 'REMOVE_PIN'
+  | 'HOLD'
+  | 'KEEP_PIN'
+
+/**
+ * One proposed pricing action with the whole case for it.
+ *
+ * `actionable` is the only field to branch on when deciding whether a change
+ * can be submitted. HOLD and KEEP_PIN are informational and never actionable.
+ */
+export interface PricingRecommendation {
+  id: string
+  listing_id: string
+  slug: string
+  display_name: string
+  stay_date: string
+  days_out: number
+  action: PriceActionKind
+  current_price: number | null
+  proposed_price: number | null
+  pct_change: number | null
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW'
+  reason: string
+  refused: string | null
+  requires_human: boolean
+  notes: string[]
+  fingerprint: string
+  actionable: boolean
+  /** Why this cannot execute yet despite being actionable, or null. */
+  blocked_reason: string | null
+  pricelabs_minimum: number | null
+  hard_floor: number | null
+  normal_floor: number | null
+  auto_raise_ceiling: number | null
+  absolute_ceiling: number | null
+  market_p25: number | null
+  market_booked_median: number | null
+  market_occupancy: number | null
+  listing_occupancy: number | null
+  demand: string | null
+  pickup_7_days: number | null
+  pinned_price: number | null
+  last_refreshed_at: string | null
+}
+
+export interface PricingBandsOut {
+  listing_id: string
+  slug: string
+  display_name: string
+  hard_floor: number
+  normal_floor: number
+  auto_raise_ceiling: number
+  absolute_ceiling: number
+  automation_enabled: boolean
+  raise_requires_human: boolean
+}
+
+export interface PricingRecommendationPage {
+  generated_at: string
+  horizon_days: number
+  writes_enabled: boolean
+  max_change_per_run: number
+  recommendations: PricingRecommendation[]
+  bands: PricingBandsOut[]
+}
+
+/** The shape `apply_pricing_action` returns as a tool result. */
+export interface PricingOutcome {
+  outcome: 'CONFIRMED_APPLIED' | 'CONFIRMED_FAILED' | 'UNKNOWN_WRITE_STATE'
+  stay_date: string
+  old_price?: number | null
+  new_price?: number | null
+  message: string
+  needs_human: boolean
+  refusal?: string | null
+}

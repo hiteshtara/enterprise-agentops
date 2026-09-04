@@ -16,6 +16,7 @@ import { OverviewPage } from './pages/OverviewPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { RunsPage } from './pages/RunsPage'
 import { ToolsPage } from './pages/ToolsPage'
+import { VacancyPage } from './pages/VacancyPage'
 
 function Console() {
   // Drives the pending-approval count in the sidebar. A failure here must not
@@ -30,6 +31,7 @@ function Console() {
         <Route path="/inbox" element={<InboxPage />} />
         <Route path="/inbox/:conversationRef" element={<ConversationPage />} />
         <Route path="/enquiries" element={<EnquiriesPage />} />
+        <Route path="/vacancy" element={<VacancyPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:runId" element={<RunDetailPage />} />

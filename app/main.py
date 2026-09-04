@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import (
@@ -56,6 +57,24 @@ from app.connectors.lodgify.messaging_models import (
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
 from app.connectors.lodgify.refs import is_well_formed_enquiry_ref
 from app.connectors.lodgify.tools import LodgifyTools
+from app.connectors.pricelabs.client import PriceLabsClient
+from app.connectors.pricelabs.config import (
+    is_configured as pricelabs_is_configured,
+)
+from app.connectors.pricelabs.config import (
+    resolve_api_key as resolve_pricelabs_api_key,
+)
+from app.connectors.pricelabs.errors import (
+    PriceLabsConfigurationError,
+    PriceLabsUnavailable,
+)
+from app.connectors.pricelabs.models import VacancyProvider
+from app.connectors.pricelabs.pricing_tools import (
+    APPLY_PRICING_ACTION_TOOL,
+    PriceLabsPricingTools,
+)
+from app.connectors.pricelabs.provider import PriceLabsVacancyProvider
+from app.connectors.pricelabs.write_client import PriceLabsWriteClient
 from app.conversation_activity import ConversationActivityStore
 from app.conversation_refresh import ConversationRefreshService
 from app.database import Database
@@ -107,11 +126,17 @@ from app.models import (
     LoginRequest,
     LoginResponse,
     Overview,
+    PricingActionRequest,
+    PricingBandsOut,
+    PricingRecommendation,
+    PricingRecommendationPage,
     ReconcileResponse,
     RunDetail,
     RunMetrics,
     RunSummary,
     ToolSummary,
+    VacancyBoard,
+    VacancyResponse,
 )
 from app.observability_store import (
     ModelExecutionStore,
@@ -119,6 +144,20 @@ from app.observability_store import (
     ToolExecutionStore,
 )
 from app.overview import OverviewService
+from app.pricing_config import (
+    MAX_CHANGE_PER_RUN,
+    bands_for,
+)
+from app.pricing_config import (
+    writes_enabled as pricing_writes_enabled,
+)
+from app.pricing_policy import WRITE_ACTIONS, PriceAction
+from app.pricing_recommendations import payloads as pricing_payloads
+from app.pricing_service import (
+    HORIZON_DAYS,
+    PricingRecommendationService,
+    bands_payload,
+)
 from app.reconciliation import (
     DEFAULT_STALE_AFTER_SECONDS,
     MAX_STALE_AFTER_SECONDS,
@@ -130,6 +169,7 @@ from app.run_store import RunStore
 from app.security import issue_token
 from app.tool_setup import build_tool_registry
 from app.user_store import UserStore, user_to_dict
+from app.vacancy import ALLOWED_HORIZONS, DEFAULT_HORIZON, build_board
 from app.webhook_security import (
     SIGNATURE_HEADER,
     WebhookNotConfigured,
@@ -176,6 +216,49 @@ user_store = UserStore(database=database)
 # The connector is wired only when a credential is configured. Importing the
 # app never reads the key, and its absence is not a startup failure.
 lodgify_configured = is_configured()
+
+# Vacancy inventory, read live from PriceLabs' REST API.
+#
+# The connector is wired only when a credential is configured; importing the
+# app never reads the key, and its absence is a reported configuration state,
+# not a startup failure and never a fallback to sample data. A demo portfolio
+# in the runtime reads exactly like a real one to whoever opens the page, so
+# there is no such fallback -- fixtures live in tests only.
+#
+# The official PriceLabs MCP is deliberately not used here: its authorization
+# server publishes no registration endpoint, so AgentGuard cannot obtain a
+# client for it. The REST API is the supported path.
+pricelabs_client = (
+    PriceLabsClient(api_key_provider=resolve_pricelabs_api_key)
+    if pricelabs_is_configured()
+    else None
+)
+
+vacancy_provider: VacancyProvider | None = (
+    PriceLabsVacancyProvider(pricelabs_client)
+    if pricelabs_client is not None
+    else None
+)
+
+pricelabs_recommendations = (
+    PricingRecommendationService(pricelabs_client)
+    if pricelabs_client is not None
+    else None
+)
+
+# The write path. Registered as a DANGEROUS, non-model-callable tool, and
+# inert until both ENABLE_PRICING_WRITES and the listing's own switch are on.
+pricelabs_pricing_tools = (
+    PriceLabsPricingTools(
+        reader=pricelabs_client,
+        writer=PriceLabsWriteClient(
+            reader=pricelabs_client,
+            api_key_provider=resolve_pricelabs_api_key,
+        ),
+    )
+    if pricelabs_client is not None
+    else None
+)
 
 lodgify_tools = (
     LodgifyTools(LodgifyClient(api_key_provider=resolve_api_key))
@@ -240,6 +323,7 @@ enquiry_sender = (
 
 tool_registry = build_tool_registry(
     migration_store=migration_store,
+    pricelabs_pricing=pricelabs_pricing_tools,
     lodgify=lodgify_tools,
     lodgify_messaging=(
         LodgifyMessagingTools(
@@ -1634,6 +1718,193 @@ def request_enquiry_reply(
             "message": reply.message,
         },
         summary=f"Send a reply to enquiry {enquiry_ref}.",
+        actor_user_id=user.user_id,
+    )
+
+    return AgentResponse(**result)
+
+
+# -- vacancy ---------------------------------------------------------------
+
+PRICELABS_NOT_CONNECTED = "PriceLabs is not connected to AgentGuard yet."
+
+PRICELABS_CONNECTOR_PENDING = (
+    "PriceLabs credentials are configured, but the AgentGuard connector is not "
+    "enabled yet."
+)
+
+
+@app.get(
+    "/vacancy",
+    response_model=VacancyResponse,
+)
+def get_vacancy(
+    user: User = Depends(require_view_runs),
+    days: int = Query(default=DEFAULT_HORIZON),
+) -> VacancyResponse:
+    """Open inventory, what it is worth, and where to look. Read-only.
+
+    Reports a configuration state rather than a board when PriceLabs is not
+    connected. It never substitutes sample inventory for missing data: the
+    caller can tell "no connection" from "no vacancy", which is the whole point
+    of the distinction.
+
+    Every figure in a board is computed in `app.vacancy` from provider
+    calendars. Nothing here reaches a write tool, and no price, restriction,
+    availability or reservation can be changed through this route -- there is
+    no such path to reach.
+    """
+    if days not in ALLOWED_HORIZONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported horizon. Choose one of "
+                f"{', '.join(str(day) for day in ALLOWED_HORIZONS)} days."
+            ),
+        )
+
+    if vacancy_provider is None:
+        return VacancyResponse(
+            configured=False,
+            message=(
+                PRICELABS_CONNECTOR_PENDING
+                if pricelabs_is_configured()
+                else PRICELABS_NOT_CONNECTED
+            ),
+        )
+
+    try:
+        calendars = vacancy_provider.calendars(days)
+
+    except PriceLabsConfigurationError:
+        return VacancyResponse(
+            configured=False,
+            message=PRICELABS_NOT_CONNECTED,
+        )
+
+    except PriceLabsUnavailable as exc:
+        # The provider's own words never travel; only our translation does.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Vacancy data could not be loaded from the provider.",
+        ) from exc
+
+    board = build_board(
+        calendars,
+        horizon_days=days,
+        horizon_start=datetime.now(UTC).date(),
+        source_name=vacancy_provider.source_name,
+        source_is_live=vacancy_provider.is_live,
+    )
+
+    return VacancyResponse(
+        configured=True,
+        board=VacancyBoard(**board),
+    )
+
+
+# -- pricing actions -------------------------------------------------------
+
+PRICING_UNAVAILABLE = "Pricing recommendations are not available."
+
+
+@app.get(
+    "/vacancy/recommendations",
+    response_model=PricingRecommendationPage,
+)
+def get_pricing_recommendations(
+    user: User = Depends(require_view_runs),
+) -> PricingRecommendationPage:
+    """Today's recommendations. Read-only: this route changes no price.
+
+    Returns HOLD and KEEP_PIN rows too, so the console can show what was
+    considered and why it will not be offered. Only rows with `actionable` true
+    can be submitted for approval.
+    """
+    if pricelabs_recommendations is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PRICING_UNAVAILABLE,
+        )
+
+    try:
+        recommendations = pricelabs_recommendations.build()
+
+    except PriceLabsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Pricing recommendations could not be built from the provider.",
+        ) from exc
+
+    return PricingRecommendationPage(
+        generated_at=datetime.now(UTC).isoformat(),
+        horizon_days=HORIZON_DAYS,
+        writes_enabled=pricing_writes_enabled(),
+        max_change_per_run=MAX_CHANGE_PER_RUN,
+        recommendations=[
+            PricingRecommendation(**row) for row in pricing_payloads(recommendations)
+        ],
+        bands=[PricingBandsOut(**row) for row in bands_payload()],
+    )
+
+
+@app.post(
+    "/vacancy/recommendations/submit",
+    response_model=AgentResponse,
+)
+def submit_pricing_action(
+    action: PricingActionRequest,
+    user: User = Depends(require_run_agent),
+) -> AgentResponse:
+    """Submit one pricing action for approval. **This changes nothing.**
+
+    The server creates a governed run whose single pending action is the
+    DANGEROUS `apply_pricing_action` tool, and parks it. A human still has to
+    approve it before any price moves, and the tool re-reads PriceLabs and
+    refuses if the state has shifted since the recommendation was made.
+    """
+    if tool_registry.get(APPLY_PRICING_ACTION_TOOL) is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PRICING_UNAVAILABLE,
+        )
+
+    try:
+        parsed = PriceAction(action.action)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown pricing action: {action.action}",
+        ) from exc
+
+    if parsed not in WRITE_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{parsed.value} is informational and cannot change a price."
+            ),
+        )
+
+    if bands_for(action.listing_id) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This listing has no owner-approved pricing bands.",
+        )
+
+    result = agent.request_action(
+        tool=APPLY_PRICING_ACTION_TOOL,
+        arguments={
+            "listing_id": action.listing_id,
+            "stay_date": action.stay_date,
+            "action": parsed.value,
+            "proposed_price": action.proposed_price,
+            "fingerprint": action.fingerprint,
+            "reason": action.reason,
+        },
+        summary=(
+            f"{parsed.value} {action.listing_id} on {action.stay_date}"
+        ),
         actor_user_id=user.user_id,
     )
 
