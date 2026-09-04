@@ -215,8 +215,11 @@ class PriceLabsWriteClient:
             return WriteResult(
                 outcome=WriteOutcome.CONFIRMED_APPLIED,
                 message=(
-                    "PriceLabs accepted and persisted the removal (verified by "
-                    "re-reading). The date is back under dynamic pricing; the "
+                    "Pricing override cleaned up: PriceLabs accepted and "
+                    "persisted the removal (verified by re-reading), and the "
+                    "date is back under dynamic pricing. No reservation, guest "
+                    "rate or availability was touched — this changes only the "
+                    "published price for a night still for sale, and the "
                     "channel rate follows on the next PriceLabs refresh."
                 ),
                 stay_date=stay_date,
@@ -296,11 +299,18 @@ class PriceLabsWriteClient:
         stay_date: str,
         automation_enabled: bool,
     ) -> WriteResult:
-        """Return one night to PriceLabs dynamic pricing.
+        """Clean up one pricing override, returning the night to dynamic pricing.
 
         Removes the override and writes nothing in its place. Replacing a pin
         with another fixed override would leave the date exactly as stuck as it
         was, under a different number.
+
+        What this touches is the *pricing override*, and nothing else. It does
+        not alter a reservation, a guest's agreed rate, or availability: those
+        live in the PMS, and a PriceLabs override only governs what price is
+        published for a night that is still for sale. Removing one on a night
+        that is already booked is therefore housekeeping, and must be described
+        as such wherever it is reported.
         """
         self._guard(automation_enabled)
 

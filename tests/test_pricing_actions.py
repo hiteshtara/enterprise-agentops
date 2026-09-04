@@ -1079,7 +1079,13 @@ def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(monkeypatch):
     assert writer.calls == [], "no write may reach PriceLabs while this is open"
 
 
-def test_remove_pin_is_blocked_until_delete_is_live_verified(monkeypatch):
+def test_remove_pin_is_unblocked_now_that_delete_is_verified(monkeypatch):
+    """DELETE was live-verified on 2026-09-13, so REMOVE_PIN may execute.
+
+    The unlock is deliberately narrow: it says nothing about the fixed-price
+    lifecycle, which `test_a_fixed_price_write_is_blocked_while_expiry_is_
+    unverified` still holds shut.
+    """
     monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
 
@@ -1097,9 +1103,9 @@ def test_remove_pin_is_blocked_until_delete_is_live_verified(monkeypatch):
         reason="test",
     )
 
-    assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
-    assert "DELETE" in result["message"]
-    assert writer.calls == []
+    assert result.get("refusal") is None
+    assert result["outcome"] == WriteOutcome.CONFIRMED_APPLIED.value
+    assert writer.calls == [("remove", BUNKERS, "2026-09-20")]
 
 
 def test_the_gate_is_checked_before_anything_is_read(monkeypatch):
@@ -1121,11 +1127,24 @@ def test_the_gate_is_checked_before_anything_is_read(monkeypatch):
     assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
 
 
-def test_both_verification_flags_ship_false():
-    from app.pricing_config import DELETE_ENDPOINT_VERIFIED, EXPIRY_SEMANTICS_VERIFIED
+def test_only_the_verified_behaviour_is_unlocked():
+    """Each flag reflects exactly what has been proven against the provider.
 
+    DELETE was verified live on 2026-09-04. The fixed-price lifecycle was not,
+    so LOWER and RAISE stay shut until the 2026-09-18 expiry check settles it.
+    """
+    from app.pricing_config import (
+        DELETE_ENDPOINT_VERIFIED,
+        EXPIRY_SEMANTICS_VERIFIED,
+        unverified_reason,
+    )
+
+    assert DELETE_ENDPOINT_VERIFIED is True
     assert EXPIRY_SEMANTICS_VERIFIED is False
-    assert DELETE_ENDPOINT_VERIFIED is False
+
+    assert unverified_reason("REMOVE_PIN") is None
+    assert unverified_reason("LOWER") is not None
+    assert unverified_reason("RAISE") is not None
 
 
 def test_the_block_is_surfaced_on_the_recommendation(monkeypatch):
@@ -1156,3 +1175,44 @@ def test_applied_never_claims_the_channel_price_changed():
     doc = " ".join((WriteOutcome.__doc__ or "").split())
 
     assert "does *not* mean the channel price changed" in doc
+
+
+def test_removing_a_pin_is_described_as_override_cleanup_not_a_booking_change():
+    """Wording matters where it will be read by someone deciding what happened.
+
+    Removing an override on a booked night touches the published price and
+    nothing else. Describing it as a change to a reservation or a guest's rate
+    would misrepresent it in exactly the record a person would rely on.
+    """
+    from app.connectors.pricelabs.write_client import PriceLabsWriteClient
+
+    doc = " ".join((PriceLabsWriteClient.remove_override.__doc__ or "").split())
+
+    assert "does not alter a reservation" in doc
+    assert "housekeeping" in doc
+
+
+def test_the_removal_message_disclaims_touching_a_reservation(monkeypatch):
+    enable(monkeypatch)
+
+    reader = FakeReader(override={"date": "2026-09-20", "price": "109"})
+
+    client = PriceLabsWriteClient(reader=reader, api_key_provider=lambda: "k")
+
+    sent = {}
+
+    def fake_send(method, listing_id, body):
+        sent["method"] = method
+        reader.override = None  # the provider really removed it
+        return True
+
+    monkeypatch.setattr(client, "_send", fake_send)
+
+    result = client.remove_override(
+        BUNKERS, "lodgify", "2026-09-20", automation_enabled=True
+    )
+
+    assert sent["method"] == "DELETE"
+    assert result.outcome is WriteOutcome.CONFIRMED_APPLIED
+    assert "Pricing override cleaned up" in result.message
+    assert "No reservation, guest rate or availability was touched" in result.message

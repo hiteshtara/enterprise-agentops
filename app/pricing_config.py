@@ -71,9 +71,16 @@ EXPIRY_SEMANTICS_VERIFIED = False
 #: Whether `DELETE /v1/listings/{id}/overrides` has been live-verified through
 #: the same approval -> one write -> re-read path the POST went through.
 #:
-#: 2026-09-04: not attempted. Until it is, REMOVE_PIN cannot execute, because
-#: its whole purpose is a removal whose success has never been observed.
-DELETE_ENDPOINT_VERIFIED = False
+#: 2026-09-04: VERIFIED. A controlled removal ran through the approval -> one
+#: write -> re-read path on Roslindale 2026-09-13, a night that was already
+#: booked so the removal could not affect any guest. One DELETE was sent, the
+#: override was absent on re-read, the listing's override count went 18 -> 17,
+#: and the five surrounding pinned dates were untouched. The booking itself was
+#: unchanged (status Booked, ADR 93.0, booked_date 2026-08-31).
+#:
+#: This unblocks REMOVE_PIN only. It says nothing about the fixed-price
+#: lifecycle, which is what EXPIRY_SEMANTICS_VERIFIED still gates.
+DELETE_ENDPOINT_VERIFIED = True
 
 
 @dataclass(frozen=True)
