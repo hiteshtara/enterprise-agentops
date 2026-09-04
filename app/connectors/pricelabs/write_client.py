@@ -219,8 +219,9 @@ class PriceLabsWriteClient:
                     "persisted the removal (verified by re-reading), and the "
                     "date is back under dynamic pricing. No reservation, guest "
                     "rate or availability was touched — this changes only the "
-                    "published price for a night still for sale, and the "
-                    "channel rate follows on the next PriceLabs refresh."
+                    "PriceLabs pricing override for that date. If the date is "
+                    "sellable, the channel rate follows on the next PriceLabs "
+                    "refresh."
                 ),
                 stay_date=stay_date,
                 old_price=old_price,
@@ -307,10 +308,15 @@ class PriceLabsWriteClient:
 
         What this touches is the *pricing override*, and nothing else. It does
         not alter a reservation, a guest's agreed rate, or availability: those
-        live in the PMS, and a PriceLabs override only governs what price is
-        published for a night that is still for sale. Removing one on a night
-        that is already booked is therefore housekeeping, and must be described
-        as such wherever it is reported.
+        live in the PMS, while a PriceLabs override only governs the price
+        PriceLabs publishes for that date.
+
+        The removal is therefore housekeeping on a booked date and a real
+        pricing change on a sellable one, and the reported wording has to hold
+        for both. It must not describe every removed override as belonging to a
+        night still for sale -- the first live DELETE was deliberately run
+        against a *booked* night, so that phrasing would have contradicted the
+        very verification it was reporting.
         """
         self._guard(automation_enabled)
 

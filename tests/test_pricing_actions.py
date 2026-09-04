@@ -1190,6 +1190,9 @@ def test_removing_a_pin_is_described_as_override_cleanup_not_a_booking_change():
 
     assert "does not alter a reservation" in doc
     assert "housekeeping" in doc
+    # The docstring must say the wording holds for both kinds of date, not
+    # assume every override belongs to a sellable one.
+    assert "housekeeping on a booked date" in doc
 
 
 def test_the_removal_message_disclaims_touching_a_reservation(monkeypatch):
@@ -1216,3 +1219,11 @@ def test_the_removal_message_disclaims_touching_a_reservation(monkeypatch):
     assert result.outcome is WriteOutcome.CONFIRMED_APPLIED
     assert "Pricing override cleaned up" in result.message
     assert "No reservation, guest rate or availability was touched" in result.message
+
+    # The message has to hold for a booked date as well as a sellable one. The
+    # first live DELETE was deliberately run against a *booked* night, so
+    # calling every removed override a night "still for sale" would contradict
+    # the very verification it reports. The sellable case is stated
+    # conditionally instead.
+    assert "still for sale" not in result.message
+    assert "If the date is sellable" in result.message
