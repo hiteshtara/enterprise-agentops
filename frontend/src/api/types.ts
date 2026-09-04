@@ -412,3 +412,46 @@ export interface InboxRefreshResult {
   no_reply: number
   failed: number
 }
+
+/**
+ * One open enquiry, as the console is allowed to see it.
+ *
+ * Safe metadata only -- `enquiry_ref` is the only handle, and it resolves
+ * server-side. There is deliberately no guest name, email or phone, no numeric
+ * id and no thread identifier, so nothing here can address a provider record.
+ */
+export interface EnquirySummary {
+  enquiry_ref: string
+  property_slug: string | null
+  property_name: string | null
+  source: string | null
+  arrival: string | null
+  departure: string | null
+  is_replied: boolean | null
+}
+
+/**
+ * A bounded page of open enquiries.
+ *
+ * `count` is how many rows arrived; `total` is how many open enquiries exist.
+ * They differ whenever the queue is longer than the limit, which is why the
+ * page shows both rather than the row count alone.
+ */
+export interface EnquiryPage {
+  enquiries: EnquirySummary[]
+  count: number
+  total: number
+}
+
+/**
+ * A generated enquiry reply, for an operator to read and copy.
+ *
+ * Nothing here is stored and nothing is queued to send. `message` is null
+ * whenever a draft could not be produced, and `detail` says why.
+ */
+export interface EnquiryReplyDraft {
+  enquiry_ref: string
+  subject: string | null
+  message: string | null
+  detail: string
+}

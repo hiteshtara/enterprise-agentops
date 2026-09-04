@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from app.connectors.lodgify.client import LodgifyClient
+from app.connectors.lodgify.enquiries import LodgifyEnquiries
 from app.connectors.lodgify.inbox import LodgifyInbox
 from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
@@ -147,6 +148,67 @@ def thread(
     }
 
 
+def reservation_row(
+    identifier: int,
+    row_type: str,
+    thread_uid: str | None = None,
+    property_id: int = ROSLINDALE_ID,
+    source: str = "Airbnb",
+    status: str = "Open",
+    arrival: str = "2026-12-04",
+    departure: str = "2026-12-08",
+    is_replied: bool = False,
+    created_at: str = "2026-09-01T09:00:00",
+) -> dict[str, Any]:
+    """One `GET /v1/reservation` row, shaped like the real one.
+
+    `type` is the field the connector filters on, and the guest block, totals,
+    `source_text` and `upgraded_enquiry_id` are present precisely so a
+    sanitization test asserts against a payload shaped like the live one. All
+    invented; none is real enquiry data.
+    """
+    return {
+        "id": identifier,
+        "type": row_type,
+        "status": status,
+        "thread_uid": thread_uid,
+        "property_id": property_id,
+        "property_name": "Upstream Property Title",
+        "arrival": arrival,
+        "departure": departure,
+        "source": source,
+        "source_text": json.dumps({"listingId": "9999999999"}),
+        "is_replied": is_replied,
+        "created_at": created_at,
+        "updated_at": "2026-09-02T09:00:00",
+        "upgraded_enquiry_id": 555001,
+        "guest": {
+            "name": "Fixture Enquirer",
+            "email": "fixture.enquirer@example.invalid",
+            "phone": "+15550000001",
+        },
+        "total_amount": 987.65,
+        "currency_code": "USD",
+    }
+
+
+def enquiry_row(
+    identifier: int,
+    thread_uid: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    return reservation_row(identifier, "Enquiry", thread_uid, **overrides)
+
+
+def booking_row(identifier: int, thread_uid: str, **overrides: Any) -> dict[str, Any]:
+    return reservation_row(identifier, "Booking", thread_uid, **overrides)
+
+
+def closed_period_row(identifier: int, **overrides: Any) -> dict[str, Any]:
+    """A calendar block. Carries no thread and is never a conversation."""
+    return reservation_row(identifier, "ClosedPeriod", None, **overrides)
+
+
 class FakeLodgify:
     """Routes MockTransport requests and records what was sent.
 
@@ -168,6 +230,8 @@ class FakeLodgify:
         availability: list[dict[str, Any]] | None = None,
         availability_status: int = 200,
         booking_page_failures: dict[int, int | Exception] | None = None,
+        reservations: list[dict[str, Any]] | None = None,
+        reservations_status: int = 200,
     ) -> None:
         self.bookings = bookings if bookings is not None else []
         self.threads = threads or {}
@@ -190,6 +254,11 @@ class FakeLodgify:
         # 1-6, and `bookings_status` cannot express that: it breaks every page
         # at once, which is only the "nothing was gathered" case.
         self.booking_page_failures = booking_page_failures or {}
+        # `GET /v1/reservation`: a separate provider surface from the booking
+        # archive, paged by offset/limit rather than page/size, and mixing
+        # Booking, Enquiry and ClosedPeriod rows in one list.
+        self.reservations = reservations if reservations is not None else []
+        self.reservations_status = reservations_status
 
         self.requests: list[httpx.Request] = []
 
@@ -212,6 +281,14 @@ class FakeLodgify:
             request
             for request in self.requests
             if request.method == "GET" and "/v2/availability/" in request.url.path
+        ]
+
+    @property
+    def reservation_reads(self) -> list[httpx.Request]:
+        return [
+            request
+            for request in self.requests
+            if request.method == "GET" and request.url.path == "/v1/reservation"
         ]
 
     @property
@@ -258,6 +335,31 @@ class FakeLodgify:
             return httpx.Response(
                 200,
                 json={"items": self.bookings[start : start + size]},
+            )
+
+        if path == "/v1/reservation":
+            if self.reservations_status != 200:
+                return httpx.Response(self.reservations_status, json={})
+
+            # Offset/limit only, deliberately. `page` and `size` are ignored
+            # here exactly as the live provider ignores them, so a connector
+            # that sent them would read page one forever and the test would
+            # notice.
+            offset = int(request.url.params.get("offset", "0"))
+            limit = int(request.url.params.get("limit", "50"))
+            window = self.reservations[offset : offset + limit]
+            more = offset + limit < len(self.reservations)
+
+            return httpx.Response(
+                200,
+                json={
+                    "items": window,
+                    "next": f"/v1/reservation?offset={offset + limit}"
+                    if more
+                    else None,
+                    "previous": None,
+                    "total": len(self.reservations),
+                },
             )
 
         if path.startswith("/v2/availability/"):
@@ -312,3 +414,16 @@ class FakeLodgify:
 
     def tools(self, key_provider=None) -> LodgifyMessagingTools:
         return LodgifyMessagingTools(self.inbox(key_provider))
+
+    def enquiries(self, key_provider=None) -> LodgifyEnquiries:
+        """The enquiry reader, on the same scripted transport.
+
+        A separate object from `inbox()` on purpose: it has no send method, so
+        no test on this path can reach a provider write even by accident.
+        """
+        return LodgifyEnquiries(
+            LodgifyMessagingClient(
+                api_key_provider=key_provider or (lambda: FAKE_KEY),
+                transport=self.transport(),
+            )
+        )

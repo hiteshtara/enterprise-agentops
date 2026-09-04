@@ -416,3 +416,48 @@ class KnowledgeEdit(BaseModel):
     content: str | None = Field(default=None, min_length=1)
     property_slug: str | None = None
     scope_to_global: bool = False
+
+
+class EnquirySummary(BaseModel):
+    """One open enquiry, as the console is allowed to see it.
+
+    Safe metadata only. There is deliberately no guest name, email or phone,
+    no numeric enquiry id and no `thread_uid`: `enquiry_ref` is the only
+    handle, and it resolves server-side.
+    """
+
+    enquiry_ref: str
+    property_slug: str | None = None
+    property_name: str | None = None
+    source: str | None = None
+    arrival: str | None = None
+    departure: str | None = None
+    is_replied: bool | None = None
+
+
+class EnquiryPage(BaseModel):
+    """A bounded page of open enquiries, and how many there are in total.
+
+    `count` is how many rows this response carries; `total` is how many open
+    enquiries exist. They differ whenever the queue is longer than `limit`, and
+    the console shows both -- a page that silently displayed twenty of
+    forty-seven would read as the whole queue.
+    """
+
+    enquiries: list[EnquirySummary] = []
+    count: int
+    total: int
+
+
+class EnquiryReplyDraft(BaseModel):
+    """A generated enquiry reply, for an operator to read and copy.
+
+    Nothing here is stored and nothing is queued to send. `message` is None
+    whenever a draft could not be produced, and `detail` says why in words an
+    operator can act on -- there is no fallback text.
+    """
+
+    enquiry_ref: str
+    subject: str | None = None
+    message: str | None = None
+    detail: str

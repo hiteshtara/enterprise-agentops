@@ -1696,3 +1696,129 @@ def reply_guidance(
         guidance["owner_approval_required"] = state.get("owner_approval_reason")
 
     return guidance
+
+
+# -- enquiries -------------------------------------------------------------
+#
+# An owner-approved divergence, and the only one in this file. Everything above
+# was written for a booked guest on a path that can *send*, where "this is
+# business-sensitive and no approved rule covers it" correctly ends in an
+# acknowledgement and a person. An enquiry is almost by definition
+# business-sensitive -- dates, the rate, the unit, whether it is free at all is
+# what the stranger is writing to ask -- so reusing that stance unchanged
+# declined nearly every enquiry, which is the one thing the enquiry helper
+# exists to do.
+#
+# What makes the divergence safe is the path, not the content: nothing on the
+# enquiry path is sent, no draft is stored, and the operator reads every word
+# before it goes anywhere. The human is the gate, so the model's job there is
+# to be useful and honest rather than silent.
+#
+# What does NOT diverge is `never_invent`. It binds in full and is restated
+# here rather than relaxed. The divergence is about what may be *withheld* --
+# never about what may be asserted. A holding reply is the shape that lets both
+# be true at once: it answers the person without claiming a fact.
+#
+# Structurally this is additive. Nothing above is edited, `reply_guidance` is
+# unchanged, and the booked-guest pipeline never calls anything below this line
+# -- see `tests/test_enquiry_replies.py` for the assertion that says so.
+
+ENQUIRY_DRAFTING_POLICY = (
+    "This is a booking enquiry from someone who has not booked, and nothing "
+    "you write is sent: an operator reads your draft and copies it into "
+    "Lodgify themselves. So write a reply whenever the enquirer has anything "
+    "open. Business-sensitive ground -- dates, availability, the rate, the "
+    "unit -- is what an enquiry is *about*, and is never on its own a reason "
+    "to decline to draft. "
+    "never_invent is not relaxed here and binds in full: never state a price, "
+    "an availability, whether an amenity is present, an exact distance or "
+    "travel time, a policy exception, or any reservation commitment that this "
+    "guidance, approved_knowledge or this conversation does not already "
+    "support. "
+    "When the answer needs a fact you cannot establish, write the holding "
+    "reply instead of refusing -- acknowledge what they asked, say you will "
+    "confirm it, and stop. A holding reply is a useful reply; silence is not."
+)
+
+# The shape, shown rather than described. A model matches an example more
+# reliably than an adjective, and each of these answers the person without
+# asserting the fact the answer would need.
+ENQUIRY_HOLDING_REPLIES: tuple[tuple[str, str], ...] = (
+    (
+        "the rate for their dates",
+        (
+            "Thanks for checking. Let me confirm the exact rate for those "
+            "dates and I'll get back to you."
+        ),
+    ),
+    (
+        "whether the dates are free",
+        "Let me check those dates and confirm what we can offer.",
+    ),
+    (
+        "whether the unit has a particular amenity, appliance or item",
+        "I'll confirm that for you and get back to you.",
+    ),
+)
+
+ENQUIRY_BUSINESS_SENSITIVE_ROUTING = (
+    "This enquiry touches business-sensitive ground -- "
+    "business_sensitivity.categories names which -- and on an enquiry that is "
+    "ordinary rather than a blocker. Answer from approved_knowledge or the "
+    "rules below wherever they actually cover it, and use the holding reply "
+    "for whatever is left. Do not answer a business-sensitive question from "
+    "general knowledge, and do not decline to write anything: 'let me check "
+    "those dates and confirm' is the correct output when the dates cannot be "
+    "checked from here. If the same message also asks something ordinary -- a "
+    "restaurant, a direction, a neighbourhood -- answer that part helpfully in "
+    "the same reply."
+)
+
+ENQUIRY_NO_REPLY_GUIDANCE = (
+    f"Reply with exactly {NO_REPLY_NEEDED} only when the enquirer's latest "
+    "message closes the exchange and nothing at all is open -- a bare "
+    "thank-you after their question was already answered. Never use it "
+    "because the question is about price, dates, availability, or what the "
+    "unit has: those get a holding reply. Not knowing an answer is never a "
+    "reason to send nothing."
+)
+
+
+def enquiry_reply_guidance(
+    messages: Any = (),
+    approved_knowledge: Any = (),
+) -> dict[str, Any]:
+    """`reply_guidance`, plus the four keys an enquiry diverges on.
+
+    A wrapper rather than a flag on `reply_guidance`, so the booked-guest
+    guidance has no branch in it at all: the pipeline that can send reaches
+    exactly the strings it reached before, and the divergence is visible as
+    the difference between two call sites rather than hidden in a parameter.
+
+    The keys replaced are the ones that told a model to stay silent about a
+    business-sensitive question. `never_invent`, `authority_order`,
+    `do_not_answer_from_memory`, `rules` and `conversation_state` are passed
+    through untouched -- an enquiry draft may withhold more, never assert more.
+    """
+    guidance = reply_guidance(messages, approved_knowledge)
+
+    guidance["enquiry_drafting_policy"] = ENQUIRY_DRAFTING_POLICY
+
+    guidance["holding_replies"] = [
+        {"when_you_cannot_establish": subject, "example": example}
+        for subject, example in ENQUIRY_HOLDING_REPLIES
+    ]
+
+    guidance["no_reply_needed"] = ENQUIRY_NO_REPLY_GUIDANCE
+
+    sensitivity = guidance.get("business_sensitivity")
+
+    if isinstance(sensitivity, dict) and sensitivity.get("business_sensitive"):
+        # Replaced rather than mutated in place: the booked-guest routing
+        # string itself is never touched, only which one this path attaches.
+        guidance["business_sensitivity"] = {
+            **sensitivity,
+            "how_to_answer": ENQUIRY_BUSINESS_SENSITIVE_ROUTING,
+        }
+
+    return guidance

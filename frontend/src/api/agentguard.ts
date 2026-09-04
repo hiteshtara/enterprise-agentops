@@ -7,6 +7,8 @@ import type {
   ConversationDetail,
   CurrentUser,
   DraftSummary,
+  EnquiryPage,
+  EnquiryReplyDraft,
   InboxRefreshResult,
   InboxPage,
   KnowledgeCreate,
@@ -229,6 +231,25 @@ export function editDraft(
 /** Redoes the work for the conversation as it stands now. */
 export function regenerateDraft(conversationRef: string): Promise<DraftSummary> {
   return request<DraftSummary>(`/inbox/${conversationRef}/draft/regenerate`, {
+    method: 'POST',
+  })
+}
+
+/** Open enquiries, read live. Called on request only -- this page never polls. */
+export function listEnquiries(limit?: number): Promise<EnquiryPage> {
+  return request<EnquiryPage>(`/enquiries${query({ limit })}`)
+}
+
+/**
+ * Generates one reply for an enquiry, for the operator to read and copy.
+ *
+ * **This sends nothing, and there is no companion send call.** The draft is
+ * returned and forgotten -- the backend stores no row for it. Guest messages
+ * leave AgentGuard only through the approval-gated send on the Inbox path,
+ * which this surface never reaches.
+ */
+export function generateEnquiryReply(enquiryRef: string): Promise<EnquiryReplyDraft> {
+  return request<EnquiryReplyDraft>(`/enquiries/${enquiryRef}/reply-draft`, {
     method: 'POST',
   })
 }

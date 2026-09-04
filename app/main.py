@@ -28,6 +28,16 @@ from app.auth import (
 from app.authorization import ensure_can_resolve_approval
 from app.connectors.lodgify.client import LodgifyClient
 from app.connectors.lodgify.config import is_configured, resolve_api_key
+from app.connectors.lodgify.enquiries import (
+    DEFAULT_LIMIT as ENQUIRY_DEFAULT_LIMIT,
+)
+from app.connectors.lodgify.enquiries import (
+    MAX_LIMIT as ENQUIRY_MAX_LIMIT,
+)
+from app.connectors.lodgify.enquiries import (
+    MIN_LIMIT as ENQUIRY_MIN_LIMIT,
+)
+from app.connectors.lodgify.enquiries import LodgifyEnquiries
 from app.connectors.lodgify.errors import (
     LodgifyConfigurationError,
     LodgifyUnavailable,
@@ -49,6 +59,7 @@ from app.drafts import (
     DraftStore,
     operator_attention_for,
 )
+from app.enquiry_replies import EnquiryReplyService
 from app.historical_replies import HistoricalReplyStore, index_one_conversation
 from app.identity import PermissionDenied, User
 from app.inbox_view import (
@@ -74,6 +85,9 @@ from app.models import (
     CurrentUser,
     DraftEdit,
     DraftSummary,
+    EnquiryPage,
+    EnquiryReplyDraft,
+    EnquirySummary,
     GuestReplyRequest,
     InboxPage,
     InboxRefreshResult,
@@ -238,6 +252,26 @@ conversation_refresh = (
         agent=agent,
     )
     if lodgify_inbox is not None
+    else None
+)
+
+# The enquiry helper, wired from the same credential and the same messaging
+# transport, and deliberately from nothing else. It shares no store with the
+# booked-guest pipeline because it writes to none: an enquiry draft lives in one
+# HTTP response and is never recorded.
+lodgify_enquiries = (
+    LodgifyEnquiries(LodgifyMessagingClient(api_key_provider=resolve_api_key))
+    if lodgify_configured
+    else None
+)
+
+enquiry_replies = (
+    EnquiryReplyService(
+        enquiries=lodgify_enquiries,
+        agent=agent,
+        knowledge=knowledge_store,
+    )
+    if lodgify_enquiries is not None
     else None
 )
 
@@ -1396,3 +1430,121 @@ def get_audit_events(
     )
 
     return [AuditEvent(**event) for event in events]
+
+
+# -- enquiries -------------------------------------------------------------
+#
+# A separate, operator-driven surface from the booked-guest Inbox above, and it
+# stays separate: no discovery into the Inbox, no persistence, no lineage back
+# to a converted booking, no queue aging, no proactive pass, and -- structurally
+# -- no send. There are exactly two routes and both are reads. Nothing here
+# writes to a store or to the provider.
+
+ENQUIRIES_UNAVAILABLE = INBOX_UNAVAILABLE
+
+
+def require_enquiries() -> LodgifyEnquiries:
+    if lodgify_enquiries is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ENQUIRIES_UNAVAILABLE,
+        )
+
+    return lodgify_enquiries
+
+
+@app.get(
+    "/enquiries",
+    response_model=EnquiryPage,
+)
+def get_enquiries(
+    user: User = Depends(require_view_runs),
+    limit: int = Query(
+        default=ENQUIRY_DEFAULT_LIMIT,
+        ge=ENQUIRY_MIN_LIMIT,
+        le=ENQUIRY_MAX_LIMIT,
+    ),
+) -> EnquiryPage:
+    """Open enquiries, read live. Safe metadata only.
+
+    Read on request, never on a timer: the console has no poll on this page, so
+    the provider is called when a person asks and at no other time.
+    """
+    enquiries = require_enquiries()
+
+    try:
+        rows, total = enquiries.open_page(limit=limit)
+
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except LodgifyConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ENQUIRIES_UNAVAILABLE,
+        ) from exc
+
+    except LodgifyUnavailable as exc:
+        # The provider's own words are never forwarded, only our translation.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Enquiries could not be loaded from the provider.",
+        ) from exc
+
+    return EnquiryPage(
+        enquiries=[EnquirySummary(**row) for row in rows],
+        count=len(rows),
+        total=total,
+    )
+
+
+@app.post(
+    "/enquiries/{enquiry_ref}/reply-draft",
+    response_model=EnquiryReplyDraft,
+)
+def draft_enquiry_reply(
+    enquiry_ref: str,
+    user: User = Depends(require_run_agent),
+) -> EnquiryReplyDraft:
+    """Generate one reply for the operator to read and copy.
+
+    POST because it spends a model call, not because it changes anything: this
+    route writes to no store and issues no provider write. The reply is returned
+    and forgotten. There is no companion send route, on this path or any other
+    -- guest messages leave AgentGuard only through the DANGEROUS
+    `send_guest_reply` tool behind human approval, which this surface never
+    reaches.
+
+    RUN_AGENT rather than VIEW_RUNS, like every other route that drives the
+    model. Reading nothing is not the test -- the permission follows what a
+    request *causes*, and this one causes a model call, a Run, and an audited
+    trail against the caller's own identity. `GET /enquiries` is the read, and
+    keeps a read permission.
+    """
+    require_enquiries()
+
+    if enquiry_replies is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ENQUIRIES_UNAVAILABLE,
+        )
+
+    try:
+        draft = enquiry_replies.draft(enquiry_ref, actor_user_id=user.user_id)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except LodgifyConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ENQUIRIES_UNAVAILABLE,
+        ) from exc
+
+    except LodgifyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The enquiry could not be loaded from the provider.",
+        ) from exc
+
+    return EnquiryReplyDraft(**draft.to_dict())

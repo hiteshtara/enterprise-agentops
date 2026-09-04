@@ -19,6 +19,7 @@ describe('Layout navigation', () => {
       'Overview',
       'Agent',
       'Inbox',
+      'Enquiries',
       'Knowledge',
       'Runs',
       'Approvals',

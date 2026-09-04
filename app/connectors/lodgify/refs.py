@@ -66,3 +66,54 @@ def is_well_formed(ref: object) -> bool:
     body = ref[len(REF_PREFIX) :]
 
     return len(body) == REF_BODY_LENGTH and body.isalnum() and body.isupper()
+
+
+# -- enquiries -------------------------------------------------------------
+#
+# An enquiry is a different kind of thing from a booking conversation: it has
+# its own provider id space, it is read on a separate screen, and nothing on
+# its path may send. So it gets its own reference rather than borrowing
+# `conversation_ref`, and the two are constructed so they can never coincide:
+#
+#   * a different prefix, so the strings differ even if the digests matched;
+#   * a different domain separator whose first eight bytes differ from
+#     `REF_NAMESPACE`'s -- blake2s only reads eight -- so booking 1001 and
+#     enquiry 1001 do not produce the same digest body either.
+#
+# Leading with "enquiry." rather than "agentguard." is what makes the second
+# property true; do not "tidy" it to match the namespace above.
+ENQUIRY_REF_NAMESPACE = b"enquiry.agentguard.v1"
+
+ENQUIRY_REF_PREFIX = "EQ-"
+
+
+def enquiry_ref_for(enquiry_id: int) -> str:
+    """The stable, opaque reference for one enquiry.
+
+    Deterministic, exactly like `conversation_ref_for`: the reference the list
+    route returned still resolves when the draft route receives it, without any
+    server-side state between the two calls.
+    """
+    digest = hashlib.blake2s(
+        str(enquiry_id).encode("utf-8"),
+        person=ENQUIRY_REF_NAMESPACE[:8],
+        digest_size=REF_DIGEST_BYTES,
+    ).digest()
+
+    return ENQUIRY_REF_PREFIX + base64.b32encode(digest).decode("ascii").rstrip("=")
+
+
+def is_well_formed_enquiry_ref(ref: object) -> bool:
+    """Whether a value could be an enquiry ref at all.
+
+    A shape check only, so a malformed argument fails before any provider call.
+    Passing says nothing about whether the ref names a real enquiry -- only
+    resolution, which matches against enquiries this account actually has, can
+    answer that.
+    """
+    if not isinstance(ref, str) or not ref.startswith(ENQUIRY_REF_PREFIX):
+        return False
+
+    body = ref[len(ENQUIRY_REF_PREFIX) :]
+
+    return len(body) == REF_BODY_LENGTH and body.isalnum() and body.isupper()
