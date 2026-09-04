@@ -19,6 +19,27 @@ export interface ApprovalCardProps {
 
 export const SEND_GUEST_REPLY = 'send_guest_reply'
 
+export const SEND_ENQUIRY_REPLY = 'send_enquiry_reply'
+
+/**
+ * The two tools that put text in front of a real person outside the business.
+ *
+ * They are rendered the same way for the same reason: an approver has to read
+ * the exact characters that will be transmitted, and `ArgumentList` would show
+ * them JSON-escaped on one line. The only difference is what the thread is
+ * called -- a booked guest's conversation, or an enquiry.
+ */
+const MESSAGE_SENDS: Record<string, { heading: string; recipient: string }> = {
+  [SEND_GUEST_REPLY]: {
+    heading: 'Send guest message',
+    recipient: 'a real guest',
+  },
+  [SEND_ENQUIRY_REPLY]: {
+    heading: 'Send enquiry reply',
+    recipient: 'the person who enquired',
+  },
+}
+
 function text(value: Json): string {
   return typeof value === 'string' ? value : ''
 }
@@ -47,8 +68,12 @@ function GuestMessagePreview({
           </div>
         ) : null}
         <div>
-          <div className="approval-term">Conversation</div>
-          <div className="mono truncate">{text(args?.conversation_ref)}</div>
+          <div className="approval-term">
+            {args?.enquiry_ref ? 'Enquiry' : 'Conversation'}
+          </div>
+          <div className="mono truncate">
+            {text(args?.conversation_ref) || text(args?.enquiry_ref)}
+          </div>
         </div>
         {context?.source ? (
           <div>
@@ -84,7 +109,8 @@ export function ApprovalCard({
   context,
   requestedBy,
 }: ApprovalCardProps) {
-  const guestSend = tool === SEND_GUEST_REPLY
+  const send = MESSAGE_SENDS[tool]
+  const guestSend = send !== undefined
   const [pending, setPending] = useState<'approve' | 'reject' | null>(null)
   const { can } = useAuth()
 
@@ -116,12 +142,12 @@ export function ApprovalCard({
             strokeLinejoin="round"
           />
         </svg>
-        {guestSend ? 'Send guest message' : 'Approval required'}
+        {send ? send.heading : 'Approval required'}
       </div>
 
       <p className="page-subtitle" style={{ marginTop: 8 }}>
-        {guestSend
-          ? 'This message has not been sent. Once approved it goes to a real guest, exactly as written below, and cannot be edited or recalled.'
+        {send
+          ? `This message has not been sent. Once approved it goes to ${send.recipient}, exactly as written below, and cannot be edited or recalled.`
           : `AgentGuard blocked this action because the tool is classified ${risk}. It has not been executed.`}
       </p>
 

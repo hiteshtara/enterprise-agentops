@@ -1,10 +1,19 @@
-"""Open enquiries: listing, resolution, and thread reads. GET only.
+"""Open enquiries: listing, resolution, thread reads, and the one governed send.
 
 Deliberately separate from `app/connectors/lodgify/inbox.py`. That module is
-the booked-guest pipeline -- discovery, activity, drafts, and the one governed
-send. This one is the operator's on-demand enquiry helper, and it has no send
-method at all. The absence is the safety property: there is no code path from
-this module to a provider write.
+the booked-guest pipeline -- discovery, activity, drafts, and its own governed
+send. This one is the operator's enquiry surface.
+
+Two classes, and the split between them is the safety property:
+
+  * `LodgifyEnquiries` reads. It has no send method at all, and it is the only
+    object the drafting service is given, so there is no code path from
+    drafting to a provider write.
+  * `LodgifyEnquirySender` writes, once, to the documented enquiry endpoint,
+    and is reachable only through the DANGEROUS `send_enquiry_reply` tool
+    behind a recorded human approval. It never touches the booking send
+    endpoint: an enquiry is not a booking, and there is no fallback between
+    them.
 
 Provider facts this module is built on, verified live against the account on
 2026-09-03 and not to be re-derived:
@@ -22,6 +31,10 @@ Provider facts this module is built on, verified live against the account on
     is not used, and must not be.
   * The thread is read with `GET /v2/messaging/{threadGuid}`, the same endpoint
     and the same client the booking path uses.
+  * A message is added with `POST /v1/reservation/enquiry/{id}/messages`, the
+    documented enquiry sibling of the booking send (docs/LODGIFY_API.md section
+    10). `POST /v1/reservation/booking/{id}/messages` is never used here, in
+    any circumstance, including as a fallback.
 
 Provider identifiers stop here, exactly as they do in the inbox module. Above
 this line everything speaks `enquiry_ref`; the numeric id and the `thread_uid`
@@ -32,10 +45,27 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.connectors.lodgify.config import LODGIFY_PROPERTIES
-from app.connectors.lodgify.errors import LodgifyUnavailable
-from app.connectors.lodgify.inbox import read_messages
+from app.connectors.lodgify.errors import (
+    LodgifySendAmbiguous,
+    LodgifySendRefused,
+    LodgifyUnavailable,
+)
+from app.connectors.lodgify.inbox import (
+    UNKNOWN_SEND_MESSAGE,
+    correlated,
+    read_messages,
+    summarise_delivery,
+    validate_message,
+    validate_subject,
+)
 from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
-from app.connectors.lodgify.messaging_models import ConversationMessage
+from app.connectors.lodgify.messaging_models import (
+    SENDER_OWNER,
+    ConversationMessage,
+    SendOutcome,
+    SendStatus,
+    SentMessage,
+)
 from app.connectors.lodgify.refs import enquiry_ref_for, is_well_formed_enquiry_ref
 
 RESERVATION_PATH = "/v1/reservation"
@@ -298,3 +328,179 @@ class LodgifyEnquiries:
         thread = self._client.get_thread(enquiry.thread_uid)
 
         return enquiry, read_messages(thread)
+
+
+# -- the one governed write ------------------------------------------------
+
+
+def enquiry_outcome(
+    enquiry_ref: str,
+    status: SendStatus,
+    message: str,
+    messages: tuple[SentMessage, ...] = (),
+) -> dict[str, Any]:
+    """One send outcome, named for the thing an enquiry actually is.
+
+    `SendOutcome`, `SendStatus` and `SentMessage` are the booked-guest path's
+    own types, reused rather than duplicated: this system has three send
+    outcomes, not six, and a parallel enum is how two of them start to drift.
+
+    The only adjustment is the key. The reference this outcome carries is an
+    `enquiry_ref`; emitting it as `conversation_ref` would name it after a
+    booking conversation it is not, and the console would have to guess which
+    one it had. The rename happens once, here, rather than in every caller.
+    """
+    payload = SendOutcome(
+        conversation_ref=enquiry_ref,
+        status=status,
+        message=message,
+        messages=messages,
+    ).to_dict()
+
+    payload["enquiry_ref"] = payload.pop("conversation_ref")
+
+    return payload
+
+
+class LodgifyEnquirySender:
+    """Sends one approved reply to one open enquiry. Nothing else.
+
+    Structurally the twin of `LodgifyInbox.send_reply`, and deliberately so:
+    validate, snapshot, send exactly once, re-read, diff, and resolve every
+    uncertain path to `UNKNOWN_SEND_STATE` -- which is not a failure, is never
+    retried, and asks for a person.
+
+    It is a separate object from `LodgifyEnquiries` so that reading enquiries
+    and writing to one are different capabilities. The drafting service holds
+    the reader and cannot reach this class; this class is held only by the tool
+    the approval gate stands in front of.
+    """
+
+    def __init__(
+        self,
+        enquiries: LodgifyEnquiries,
+        client: LodgifyMessagingClient,
+    ) -> None:
+        self._enquiries = enquiries
+        self._client = client
+
+    def send_reply(
+        self,
+        enquiry_ref: str,
+        subject: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Send one enquiry reply and verify it by re-reading the thread.
+
+        Arguments are validated before anything leaves the process, so a bad
+        argument costs nothing and is recoverable. Validation rejects; it never
+        rewrites, so the text a human approved is transmitted byte for byte.
+
+        Raises:
+            ValueError: the ref names no open enquiry, or the text is invalid.
+                Nothing was sent.
+            TypeError: the subject or message was not a string. Nothing was
+                sent.
+        """
+        checked_subject = validate_subject(subject)
+        checked_message = validate_message(message)
+
+        enquiry = self._enquiries.resolve(enquiry_ref)
+
+        try:
+            before = read_messages(self._client.get_thread(enquiry.thread_uid))
+
+        except LodgifyUnavailable:
+            # No snapshot means no way to verify afterwards. Refuse before
+            # sending rather than send something we could never confirm.
+            return enquiry_outcome(
+                enquiry.enquiry_ref,
+                SendStatus.CONFIRMED_FAILED,
+                "The enquiry thread could not be read before sending, so "
+                "nothing was sent.",
+            )
+
+        known_refs = {existing.message_ref for existing in before}
+
+        try:
+            # Exactly one POST, to the enquiry endpoint. There is no retry here
+            # and none may be added, and there is no branch that falls back to
+            # the booking endpoint.
+            self._client.post_enquiry_message(
+                enquiry_id=enquiry.enquiry_id,
+                subject=checked_subject,
+                message=checked_message,
+            )
+
+        except LodgifySendRefused as exc:
+            return enquiry_outcome(
+                enquiry.enquiry_ref,
+                SendStatus.CONFIRMED_FAILED,
+                f"Nothing was sent. {exc}",
+            )
+
+        except LodgifySendAmbiguous:
+            return enquiry_outcome(
+                enquiry.enquiry_ref,
+                SendStatus.UNKNOWN_SEND_STATE,
+                UNKNOWN_SEND_MESSAGE,
+            )
+
+        return self.verify(enquiry, checked_subject, checked_message, known_refs)
+
+    def verify(
+        self,
+        enquiry: ResolvedEnquiry,
+        subject: str,
+        message: str,
+        known_refs: set[str],
+    ) -> dict[str, Any]:
+        """Find the rows our send created, or admit that we cannot.
+
+        The POST carries no identifier back, so attribution is by difference:
+        rows that were not there before, from us, carrying exactly the text we
+        sent -- and only when `correlated` says the set can safely be read as
+        one send. Anything else is UNKNOWN_SEND_STATE rather than a guess.
+        """
+        try:
+            after = read_messages(self._client.get_thread(enquiry.thread_uid))
+
+        except LodgifyUnavailable:
+            # The message may well have been sent -- we just cannot show it.
+            return enquiry_outcome(
+                enquiry.enquiry_ref,
+                SendStatus.UNKNOWN_SEND_STATE,
+                UNKNOWN_SEND_MESSAGE,
+            )
+
+        matches = [
+            row
+            for row in after
+            if row.message_ref not in known_refs
+            and row.sender == SENDER_OWNER
+            and row.subject == subject
+            and row.message == message
+        ]
+
+        if not matches or not correlated(matches):
+            return enquiry_outcome(
+                enquiry.enquiry_ref,
+                SendStatus.UNKNOWN_SEND_STATE,
+                UNKNOWN_SEND_MESSAGE,
+            )
+
+        created = tuple(
+            SentMessage(
+                message_ref=row.message_ref,
+                message_status=row.message_status,
+                created_at=row.created_at,
+            )
+            for row in matches
+        )
+
+        return enquiry_outcome(
+            enquiry.enquiry_ref,
+            SendStatus.CONFIRMED_SENT,
+            summarise_delivery(created),
+            created,
+        )

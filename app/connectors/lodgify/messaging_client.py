@@ -16,7 +16,9 @@ Endpoints used, all documented and supported (docs/LODGIFY_API.md):
 
   GET  /v2/reservations/bookings
   GET  /v2/messaging/{threadGuid}
+  GET  /v1/reservation
   POST /v1/reservation/booking/{id}/messages
+  POST /v1/reservation/enquiry/{id}/messages
 
 No private `app.lodgify.com` endpoint, cookie or session token is used anywhere.
 """
@@ -213,7 +215,16 @@ class LodgifyMessagingClient:
 
         return payload
 
-    # -- the one write -----------------------------------------------------
+    # -- the writes --------------------------------------------------------
+    #
+    # Two sends, one per addressable thing Lodgify has: a booking and an
+    # enquiry. They are written out separately rather than sharing a helper,
+    # and that is deliberate. An idempotency-key-less POST that reaches a real
+    # person is the highest-consequence line in this codebase; a shared helper
+    # would mean a change made for one of them silently applies to the other,
+    # and a mistaken path variable would send an enquiry reply into a
+    # stranger's booking thread. Each path is spelled once, literally, next to
+    # the rules that govern it.
 
     def post_message(
         self,
@@ -255,6 +266,87 @@ class LodgifyMessagingClient:
             ) as client:
                 response = client.post(
                     f"/v1/reservation/booking/{booking_id}/messages",
+                    content=json.dumps(body).encode("utf-8"),
+                    headers=headers,
+                )
+
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # The connection was never established, so the request cannot have
+            # reached Lodgify. This is the one transport failure we can call
+            # clean.
+            raise LodgifySendRefused(
+                "The provider could not be reached, so nothing was sent."
+            ) from exc
+
+        except httpx.HTTPError as exc:
+            # Everything else -- read timeout, write error, pool timeout, a
+            # broken response mid-flight -- means the request may already have
+            # left the process and the message may already exist.
+            raise LodgifySendAmbiguous(
+                "The provider did not return a usable response."
+            ) from exc
+
+        if 400 <= response.status_code < 500:
+            # The provider understood and rejected it. Nothing was created.
+            raise LodgifySendRefused(
+                f"The provider rejected the message ({response.status_code})."
+            )
+
+        if response.status_code >= 500:
+            # A server error can follow partial processing, so this is not a
+            # clean failure.
+            raise LodgifySendAmbiguous(
+                f"The provider returned a server error ({response.status_code})."
+            )
+
+    def post_enquiry_message(
+        self,
+        enquiry_id: int,
+        subject: str,
+        message: str,
+    ) -> None:
+        """Send exactly one enquiry message. Never retried, under any circumstances.
+
+        The enquiry sibling of `post_message`, documented by Lodgify alongside
+        it (docs/LODGIFY_API.md section 10). The booking path is **never** a
+        fallback for this one: an enquiry id is not a booking id, so a POST to
+        `/v1/reservation/booking/{id}/messages` with an enquiry id would either
+        be rejected or address some unrelated reservation. There is no
+        cross-over branch here for that reason.
+
+        `type` and `send_notification` are pinned here rather than accepted
+        from a caller, so no code path -- model, console or test -- can vary
+        them.
+
+        Returns None on success: the endpoint's booking sibling answers 200
+        with an empty body and no identifier, and nothing here depends on a
+        richer answer. The caller verifies by re-reading the thread.
+
+        Raises:
+            LodgifySendRefused: the provider refused, or the connection was
+                never established. Nothing was sent.
+            LodgifySendAmbiguous: the request may already have taken effect.
+                Never retry on this.
+        """
+        body = [
+            {
+                "subject": subject,
+                "message": message,
+                "type": OWNER_MESSAGE_TYPE,
+                "send_notification": SEND_NOTIFICATION,
+            }
+        ]
+
+        headers = {**self.headers(), "content-type": SEND_CONTENT_TYPE}
+
+        try:
+            with httpx.Client(
+                base_url=self._base_url,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = client.post(
+                    f"/v1/reservation/enquiry/{enquiry_id}/messages",
                     content=json.dumps(body).encode("utf-8"),
                     headers=headers,
                 )

@@ -4,7 +4,11 @@ A deliberately narrow surface: two read routes, one model call per press, and
 nothing written anywhere. The tests here are mostly about what does *not*
 happen -- no booking row treated as an enquiry, no ignored provider filter
 relied on, no provider identifier or guest detail crossing the API boundary, no
-row stored, and no POST issued to Lodgify from any path this feature can reach.
+row stored, and no POST issued to Lodgify from any drafting path.
+
+The governed send that an operator can submit *after* reading a draft lives in
+tests/test_enquiry_send.py. Nothing in this file can reach it: the drafting
+service is given the reader, which has no write method.
 
 Every payload is invented. No test opens a socket, calls a model, or touches
 the development database.
@@ -466,7 +470,7 @@ def test_draft_route_persists_nothing(enquiry_api):
     assert activity == 0
 
 
-def test_neither_route_ever_posts_to_the_provider(enquiry_api):
+def test_neither_read_route_ever_posts_to_the_provider(enquiry_api):
     client = enquiry_api.client()
 
     client.get("/enquiries")
@@ -475,13 +479,29 @@ def test_neither_route_ever_posts_to_the_provider(enquiry_api):
     assert enquiry_api.fake.posts == []
 
 
-def test_there_is_no_send_route_on_this_path(enquiry_api):
-    """Structural: nothing on the enquiry surface can reach a guest."""
+def test_the_drafting_service_holds_no_object_that_can_send(enquiry_api):
+    """Structural: drafting is given the reader, which has no write method.
+
+    The enquiry surface does have a send now -- `send_enquiry_reply`, DANGEROUS
+    and behind a human approval, exercised in tests/test_enquiry_send.py. What
+    must stay true is that *drafting* cannot reach it: the service holds a
+    `LodgifyEnquiries`, and there is no send method on that object to call.
+    """
+    enquiries = enquiry_api.module.enquiry_replies._enquiries
+
+    assert not hasattr(enquiries, "send_reply")
+    assert not hasattr(enquiries, "post_message")
+    assert not hasattr(enquiries, "post_enquiry_message")
+
+
+def test_the_enquiry_surface_has_exactly_one_write_route(enquiry_api):
+    """Two reads and one submission, which parks rather than sends."""
     paths = {route.path for route in enquiry_api.module.app.routes}
 
     assert {path for path in paths if path.startswith("/enquiries")} == {
         "/enquiries",
         "/enquiries/{enquiry_ref}/reply-draft",
+        "/enquiries/{enquiry_ref}/reply",
     }
 
 

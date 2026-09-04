@@ -444,7 +444,7 @@ export interface EnquiryPage {
 }
 
 /**
- * A generated enquiry reply, for an operator to read and copy.
+ * A generated enquiry reply, for an operator to read, edit and submit.
  *
  * Nothing here is stored and nothing is queued to send. `message` is null
  * whenever a draft could not be produced, and `detail` says why.
@@ -454,4 +454,19 @@ export interface EnquiryReplyDraft {
   subject: string | null
   message: string | null
   detail: string
+}
+
+/**
+ * The result shape `send_enquiry_reply` returns as a tool result.
+ *
+ * The same three statuses as `SendOutcome` -- this system has three send
+ * outcomes, not six -- keyed by the reference an enquiry actually has.
+ * `unknown_send_state` is not a failure and is never safe to retry: the
+ * message may already have reached a real person.
+ */
+export interface EnquirySendOutcome {
+  status: SendStatus
+  enquiry_ref: string
+  message: string
+  messages: SentMessageSummary[]
 }

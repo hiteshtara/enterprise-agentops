@@ -64,8 +64,8 @@ REPLY_NEEDED = "reply_needed"
 
 DRAFTED_DETAIL = (
     "Draft prepared from the house reply rules and owner-approved knowledge. "
-    "Read it, edit it, and copy it into Lodgify yourself -- AgentGuard will not "
-    "send it."
+    "Review and edit it. Nothing is sent until you submit it for approval and a "
+    "human approves the send."
 )
 
 UNREADABLE_DETAIL = (

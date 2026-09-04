@@ -241,15 +241,33 @@ export function listEnquiries(limit?: number): Promise<EnquiryPage> {
 }
 
 /**
- * Generates one reply for an enquiry, for the operator to read and copy.
+ * Generates one reply for an enquiry, for the operator to read and edit.
  *
- * **This sends nothing, and there is no companion send call.** The draft is
- * returned and forgotten -- the backend stores no row for it. Guest messages
- * leave AgentGuard only through the approval-gated send on the Inbox path,
- * which this surface never reaches.
+ * **This sends nothing.** The draft is returned and forgotten -- the backend
+ * stores no row for it. Transmitting it is a separate, explicit step that a
+ * human has to approve; see `requestEnquiryReply`.
  */
 export function generateEnquiryReply(enquiryRef: string): Promise<EnquiryReplyDraft> {
   return request<EnquiryReplyDraft>(`/enquiries/${enquiryRef}/reply-draft`, {
     method: 'POST',
+  })
+}
+
+/**
+ * Submits an enquiry reply for approval. **This does not send it.**
+ *
+ * The server creates a governed run whose single pending action is the
+ * DANGEROUS `send_enquiry_reply` tool, and parks it. A human still has to
+ * approve it before anything reaches the person who enquired, and the text is
+ * carried through untouched -- what the approver reads is what they receive.
+ */
+export function requestEnquiryReply(
+  enquiryRef: string,
+  subject: string,
+  message: string,
+): Promise<AgentResponse> {
+  return request<AgentResponse>(`/enquiries/${enquiryRef}/reply`, {
+    method: 'POST',
+    body: JSON.stringify({ subject, message }),
   })
 }

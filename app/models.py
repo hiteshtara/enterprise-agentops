@@ -449,6 +449,27 @@ class EnquiryPage(BaseModel):
     total: int
 
 
+class EnquiryReplyRequest(BaseModel):
+    """A reply to an enquiry, as the operator submits it for approval.
+
+    The text is carried verbatim into the approval record, so what the approver
+    reads is what the enquirer receives. The operator may have edited the
+    generated draft, or written the whole thing themselves; this route cannot
+    tell the difference and does not try to. Nothing is stored between the
+    draft and this submission, so there is no draft revision to reconcile and
+    no server-side copy that could disagree with what was on screen.
+
+    There is no fingerprint field, unlike `GuestReplyRequest`. Staleness there
+    is decided against a persisted draft and a live conversation fingerprint;
+    an enquiry has neither, and inventing a token the console would have to
+    carry would be ceremony rather than a check. What actually stands between
+    this and a real person is unchanged: a DANGEROUS tool and a human approval.
+    """
+
+    subject: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+
+
 class EnquiryReplyDraft(BaseModel):
     """A generated enquiry reply, for an operator to read and copy.
 

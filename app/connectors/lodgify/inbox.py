@@ -530,6 +530,41 @@ def summarise_delivery(messages: tuple[SentMessage, ...]) -> str:
     return "Lodgify accepted the message. It does not report a delivery status."
 
 
+def correlated(matches: list[ConversationMessage]) -> bool:
+    """Whether the matching rows can safely be attributed to one send.
+
+    Snapshot-then-diff is inherently racy: another actor can write an identical
+    message into the same thread inside the window, and rows that look like
+    ours would then not be. Two conservative guards:
+
+      * more rows than fan-out plausibly explains, and
+      * rows spread wider in time than one send produces.
+
+    Either one means we stop guessing and report UNKNOWN_SEND_STATE.
+
+    Module-level so both send paths share one definition of "safe to attribute"
+    -- the enquiry send in `enquiries.py` verifies its own POST with exactly
+    this rule. `LodgifyInbox.correlated` delegates here and behaves as it always
+    did.
+    """
+    if len(matches) == 1:
+        return True
+
+    if len(matches) > MAX_FANOUT_ROWS:
+        return False
+
+    timestamps = [parse_timestamp(row.created_at) for row in matches]
+
+    if any(stamp is None for stamp in timestamps):
+        # Several rows and no way to check they belong together.
+        return False
+
+    ordered = sorted(stamp for stamp in timestamps if stamp is not None)
+    spread = (ordered[-1] - ordered[0]).total_seconds()
+
+    return abs(spread) <= CORRELATION_WINDOW_SECONDS
+
+
 class LodgifyInbox:
     """Guest conversations, sanitized, plus the one governed write."""
 
@@ -1230,30 +1265,5 @@ class LodgifyInbox:
         ).to_dict()
 
     def correlated(self, matches: list[ConversationMessage]) -> bool:
-        """Whether the matching rows can safely be attributed to one send.
-
-        Snapshot-then-diff is inherently racy: another actor can write an
-        identical message into the same thread inside the window, and rows that
-        look like ours would then not be. Two conservative guards:
-
-          * more rows than fan-out plausibly explains, and
-          * rows spread wider in time than one send produces.
-
-        Either one means we stop guessing and report UNKNOWN_SEND_STATE.
-        """
-        if len(matches) == 1:
-            return True
-
-        if len(matches) > MAX_FANOUT_ROWS:
-            return False
-
-        timestamps = [parse_timestamp(row.created_at) for row in matches]
-
-        if any(stamp is None for stamp in timestamps):
-            # Several rows and no way to check they belong together.
-            return False
-
-        ordered = sorted(stamp for stamp in timestamps if stamp is not None)
-        spread = (ordered[-1] - ordered[0]).total_seconds()
-
-        return abs(spread) <= CORRELATION_WINDOW_SECONDS
+        """Whether the matching rows can safely be attributed to one send."""
+        return correlated(matches)

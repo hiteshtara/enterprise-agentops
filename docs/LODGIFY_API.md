@@ -485,8 +485,27 @@ This is the exact body used in the controlled live send (§11).
 guest contact address is the Lodgify account owner's own address. No real customer
 was messaged. **The recipient address is not recorded in this document.**
 
-*Evidence: DOCUMENTED BY LODGIFY (endpoint, description, body shape);
-DOCUMENTED + VERIFIED LIVE (the exact body above — see §11).*
+### Which endpoint AgentGuard uses for what
+
+| Thread | Endpoint | Tool |
+|---|---|---|
+| A booked guest's conversation | `POST /v1/reservation/booking/{id}/messages` | `send_guest_reply` |
+| An open enquiry | `POST /v1/reservation/enquiry/{id}/messages` | `send_enquiry_reply` |
+
+**They are never interchangeable and neither is a fallback for the other.** An
+enquiry id is not a booking id, so posting an enquiry reply to the booking path
+would either be rejected or address an unrelated reservation. The two POSTs are
+written out separately in `messaging_client.py` rather than sharing a helper,
+so a change made for one cannot silently apply to the other.
+
+Both are pinned to `type: "Owner"` and `send_notification: true` server-side,
+both are issued exactly once with no retry, and both are verified by
+re-reading the thread and diffing.
+
+*Evidence: DOCUMENTED BY LODGIFY (both endpoints, description, body shape);
+DOCUMENTED + VERIFIED LIVE (the exact body above, on the booking endpoint — see
+§11). The enquiry endpoint has **not** been exercised against the live account:
+it is used on the documented contract and the shared body shape only.*
 
 ---
 

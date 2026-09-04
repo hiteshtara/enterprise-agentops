@@ -4,6 +4,10 @@ Kept out of main.py so that tool wiring can be constructed and inspected in
 tests without importing the FastAPI app or a model provider.
 """
 
+from app.connectors.lodgify.enquiry_tools import (
+    SEND_ENQUIRY_REPLY_SCHEMA,
+    LodgifyEnquiryTools,
+)
 from app.connectors.lodgify.messaging_tools import (
     GET_CONVERSATION_SCHEMA,
     LIST_CONVERSATIONS_SCHEMA,
@@ -241,10 +245,44 @@ def lodgify_messaging_tools(tools: LodgifyMessagingTools) -> list[Tool]:
     ]
 
 
+def send_enquiry_reply_tool(tools: LodgifyEnquiryTools) -> Tool:
+    """The enquiry send: DANGEROUS, and never advertised to the model.
+
+    DANGEROUS for the same reason `send_guest_reply` is -- it reaches a real
+    person outside the business, cannot be recalled, and has no provider
+    idempotency key, so a duplicate is a real duplicate.
+
+    `model_callable=False` is the second half. An enquiry reply exists because
+    a person read a draft, edited it, and pressed a button; the words are the
+    model's, the decision to transmit them is not. Advertising this tool would
+    let a drafting run choose to send, which is precisely the authority this
+    design withholds. It stays registered so it stays governed: the console
+    lists it, the approval gate stands in front of it, and every request and
+    execution is audited like any other.
+    """
+    return Tool(
+        name="send_enquiry_reply",
+        description=(
+            "Send a reply to a real person who enquired about a property. This "
+            "is irreversible and externally visible: they receive it, and it "
+            "cannot be edited or unsent. It requires human approval, and the "
+            "text is sent exactly as written. If the result is "
+            "'unknown_send_state', the message may already have been delivered "
+            "-- it must not be sent again for the same enquiry; a person has to "
+            "check the thread."
+        ),
+        function=tools.send_enquiry_reply,
+        risk=ToolRisk.DANGEROUS,
+        model_callable=False,
+        parameters=SEND_ENQUIRY_REPLY_SCHEMA,
+    )
+
+
 def build_tool_registry(
     migration_store: MigrationBatchStore,
     lodgify: LodgifyTools | None = None,
     lodgify_messaging: LodgifyMessagingTools | None = None,
+    lodgify_enquiries: LodgifyEnquiryTools | None = None,
 ) -> ToolRegistry:
     """Assemble every tool the agent may call.
 
@@ -271,5 +309,8 @@ def build_tool_registry(
     if lodgify_messaging is not None:
         for tool in lodgify_messaging_tools(lodgify_messaging):
             registry.register(tool)
+
+    if lodgify_enquiries is not None:
+        registry.register(send_enquiry_reply_tool(lodgify_enquiries))
 
     return registry

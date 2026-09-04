@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 
 from app.connectors.lodgify.client import LodgifyClient
-from app.connectors.lodgify.enquiries import LodgifyEnquiries
+from app.connectors.lodgify.enquiries import LodgifyEnquiries, LodgifyEnquirySender
 from app.connectors.lodgify.inbox import LodgifyInbox
 from app.connectors.lodgify.messaging_client import LodgifyMessagingClient
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
@@ -267,6 +267,28 @@ class FakeLodgify:
         return [request for request in self.requests if request.method == "POST"]
 
     @property
+    def enquiry_posts(self) -> list[httpx.Request]:
+        """POSTs to the documented enquiry message endpoint."""
+        return [
+            request
+            for request in self.posts
+            if request.url.path.startswith("/v1/reservation/enquiry/")
+        ]
+
+    @property
+    def booking_posts(self) -> list[httpx.Request]:
+        """POSTs to the booking message endpoint.
+
+        Exists to be asserted empty on every enquiry send: an enquiry id is not
+        a booking id, and there is no fallback between the two endpoints.
+        """
+        return [
+            request
+            for request in self.posts
+            if request.url.path.startswith("/v1/reservation/booking/")
+        ]
+
+    @property
     def booking_reads(self) -> list[httpx.Request]:
         return [
             request
@@ -419,11 +441,28 @@ class FakeLodgify:
         """The enquiry reader, on the same scripted transport.
 
         A separate object from `inbox()` on purpose: it has no send method, so
-        no test on this path can reach a provider write even by accident.
+        no test holding only this can reach a provider write even by accident.
         """
         return LodgifyEnquiries(
             LodgifyMessagingClient(
                 api_key_provider=key_provider or (lambda: FAKE_KEY),
                 transport=self.transport(),
             )
+        )
+
+    def enquiry_sender(self, key_provider=None) -> LodgifyEnquirySender:
+        """The governed enquiry send, on the same scripted transport.
+
+        One client for both the reader and the sender, so a test sees the
+        snapshot read, the single POST and the verification read in one
+        recorded sequence.
+        """
+        client = LodgifyMessagingClient(
+            api_key_provider=key_provider or (lambda: FAKE_KEY),
+            transport=self.transport(),
+        )
+
+        return LodgifyEnquirySender(
+            enquiries=LodgifyEnquiries(client),
+            client=client,
         )

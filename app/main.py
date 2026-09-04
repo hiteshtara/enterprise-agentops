@@ -37,7 +37,12 @@ from app.connectors.lodgify.enquiries import (
 from app.connectors.lodgify.enquiries import (
     MIN_LIMIT as ENQUIRY_MIN_LIMIT,
 )
-from app.connectors.lodgify.enquiries import LodgifyEnquiries
+from app.connectors.lodgify.enquiries import (
+    UNKNOWN_ENQUIRY,
+    LodgifyEnquiries,
+    LodgifyEnquirySender,
+)
+from app.connectors.lodgify.enquiry_tools import LodgifyEnquiryTools
 from app.connectors.lodgify.errors import (
     LodgifyConfigurationError,
     LodgifyUnavailable,
@@ -49,6 +54,7 @@ from app.connectors.lodgify.messaging_models import (
     conversation_fingerprint,
 )
 from app.connectors.lodgify.messaging_tools import LodgifyMessagingTools
+from app.connectors.lodgify.refs import is_well_formed_enquiry_ref
 from app.connectors.lodgify.tools import LodgifyTools
 from app.conversation_activity import ConversationActivityStore
 from app.conversation_refresh import ConversationRefreshService
@@ -87,6 +93,7 @@ from app.models import (
     DraftSummary,
     EnquiryPage,
     EnquiryReplyDraft,
+    EnquiryReplyRequest,
     EnquirySummary,
     GuestReplyRequest,
     InboxPage,
@@ -206,6 +213,31 @@ draft_store = DraftStore(database=database)
 
 activity_store = ConversationActivityStore(database=database)
 
+# The enquiry surface, wired from the same credential and the same messaging
+# transport, and deliberately from nothing else. It shares no store with the
+# booked-guest pipeline: an enquiry draft lives in one HTTP response and is
+# never recorded.
+#
+# Two objects, because reading an enquiry and replying to one are different
+# capabilities. `lodgify_enquiries` is the reader, and it is all the drafting
+# service is given -- it has no send method, so no drafting path can reach a
+# provider write. `enquiry_sender` is the writer, and the only thing that holds
+# it is the DANGEROUS, non-model-callable `send_enquiry_reply` tool.
+lodgify_enquiries = (
+    LodgifyEnquiries(LodgifyMessagingClient(api_key_provider=resolve_api_key))
+    if lodgify_configured
+    else None
+)
+
+enquiry_sender = (
+    LodgifyEnquirySender(
+        enquiries=lodgify_enquiries,
+        client=LodgifyMessagingClient(api_key_provider=resolve_api_key),
+    )
+    if lodgify_enquiries is not None
+    else None
+)
+
 tool_registry = build_tool_registry(
     migration_store=migration_store,
     lodgify=lodgify_tools,
@@ -217,6 +249,9 @@ tool_registry = build_tool_registry(
         )
         if lodgify_inbox is not None
         else None
+    ),
+    lodgify_enquiries=(
+        LodgifyEnquiryTools(enquiry_sender) if enquiry_sender is not None else None
     ),
 )
 
@@ -252,16 +287,6 @@ conversation_refresh = (
         agent=agent,
     )
     if lodgify_inbox is not None
-    else None
-)
-
-# The enquiry helper, wired from the same credential and the same messaging
-# transport, and deliberately from nothing else. It shares no store with the
-# booked-guest pipeline because it writes to none: an enquiry draft lives in one
-# HTTP response and is never recorded.
-lodgify_enquiries = (
-    LodgifyEnquiries(LodgifyMessagingClient(api_key_provider=resolve_api_key))
-    if lodgify_configured
     else None
 )
 
@@ -1436,9 +1461,13 @@ def get_audit_events(
 #
 # A separate, operator-driven surface from the booked-guest Inbox above, and it
 # stays separate: no discovery into the Inbox, no persistence, no lineage back
-# to a converted booking, no queue aging, no proactive pass, and -- structurally
-# -- no send. There are exactly two routes and both are reads. Nothing here
-# writes to a store or to the provider.
+# to a converted booking, no queue aging and no proactive pass. Nothing here
+# writes to a store, and nothing here sends.
+#
+# Three routes. Two are reads. The third submits text a person composed for
+# approval and returns a parked run -- it reaches the provider no more than the
+# other two do. The send itself happens in `POST /agent/approvals/{id}`, after
+# a human has decided, through the same gate every DANGEROUS tool goes through.
 
 ENQUIRIES_UNAVAILABLE = INBOX_UNAVAILABLE
 
@@ -1548,3 +1577,64 @@ def draft_enquiry_reply(
         ) from exc
 
     return EnquiryReplyDraft(**draft.to_dict())
+
+
+SEND_ENQUIRY_REPLY_TOOL = "send_enquiry_reply"
+
+
+@app.post(
+    "/enquiries/{enquiry_ref}/reply",
+    response_model=AgentResponse,
+)
+def request_enquiry_reply(
+    enquiry_ref: str,
+    reply: EnquiryReplyRequest,
+    user: User = Depends(require_run_agent),
+) -> AgentResponse:
+    """Submit a composed enquiry reply for approval. **This does not send anything.**
+
+    The same shape as `POST /inbox/{conversation_ref}/reply`, deliberately: it
+    creates a normal governed run whose single pending action is
+    `send_enquiry_reply` with exactly the text supplied. The tool is DANGEROUS,
+    so `ToolRegistry.execute` parks it for a human; the console has no path that
+    reaches Lodgify directly, and the model has no path here at all -- the tool
+    is not model-callable, so it never appears in what the model is told it can
+    do.
+
+    The text is passed through untouched, whether it came from a generated
+    draft the operator edited or was written from scratch, so the string an
+    approver reads is the string the enquirer receives.
+
+    The same permission as a booked-guest reply, RUN_AGENT. Submitting a reply
+    for approval is the same authority regardless of whether the person on the
+    other end has booked yet; approving it is a separate and stronger one, and
+    is decided by the approval's own risk tier.
+    """
+    require_enquiries()
+
+    if tool_registry.get(SEND_ENQUIRY_REPLY_TOOL) is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ENQUIRIES_UNAVAILABLE,
+        )
+
+    # A shape check only, and cheap: it costs no provider call and rejects an
+    # obviously malformed ref before a run exists. Whether the ref names a real
+    # open enquiry is decided by `resolve` at execution time, against enquiries
+    # this account actually has -- a fabricated ref matches nothing there, so
+    # nothing can be addressed that was never listed.
+    if not is_well_formed_enquiry_ref(enquiry_ref):
+        raise HTTPException(status_code=404, detail=UNKNOWN_ENQUIRY)
+
+    result = agent.request_action(
+        tool=SEND_ENQUIRY_REPLY_TOOL,
+        arguments={
+            "enquiry_ref": enquiry_ref,
+            "subject": reply.subject,
+            "message": reply.message,
+        },
+        summary=f"Send a reply to enquiry {enquiry_ref}.",
+        actor_user_id=user.user_id,
+    )
+
+    return AgentResponse(**result)
