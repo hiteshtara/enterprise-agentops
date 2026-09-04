@@ -614,12 +614,7 @@ export interface VacancyResponse {
 
 // -- pricing actions -------------------------------------------------------
 
-export type PriceActionKind =
-  | 'LOWER'
-  | 'RAISE'
-  | 'REMOVE_PIN'
-  | 'HOLD'
-  | 'KEEP_PIN'
+export type PriceActionKind = 'LOWER' | 'RAISE' | 'REMOVE_PIN' | 'HOLD' | 'KEEP_PIN'
 
 /**
  * One proposed pricing action with the whole case for it.

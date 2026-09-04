@@ -54,12 +54,26 @@ function Evidence({ rec }: { rec: PricingRecommendation }) {
   const rows: [string, string][] = [
     ['Days out', String(rec.days_out)],
     ['Current price', money(rec.current_price)],
-    ['Proposed price', rec.proposed_price === null ? 'back to dynamic' : money(rec.proposed_price)],
-    ['Change', rec.pct_change === null ? '—' : `${rec.pct_change > 0 ? '+' : ''}${rec.pct_change}%`],
+    [
+      'Proposed price',
+      rec.proposed_price === null ? 'back to dynamic' : money(rec.proposed_price),
+    ],
+    [
+      'Change',
+      rec.pct_change === null
+        ? '—'
+        : `${rec.pct_change > 0 ? '+' : ''}${rec.pct_change}%`,
+    ],
     ['Market p25', money(rec.market_p25)],
     ['Market booked median', money(rec.market_booked_median)],
-    ['Market occupancy', rec.market_occupancy === null ? '—' : `${rec.market_occupancy.toFixed(0)}%`],
-    ['Listing occupancy', rec.listing_occupancy === null ? '—' : `${rec.listing_occupancy.toFixed(0)}%`],
+    [
+      'Market occupancy',
+      rec.market_occupancy === null ? '—' : `${rec.market_occupancy.toFixed(0)}%`,
+    ],
+    [
+      'Listing occupancy',
+      rec.listing_occupancy === null ? '—' : `${rec.listing_occupancy.toFixed(0)}%`,
+    ],
     ['Demand', rec.demand ?? '—'],
     ['Pinned at', money(rec.pinned_price)],
     ['Hard floor', money(rec.hard_floor)],
@@ -197,8 +211,8 @@ function ActionCard({
             <>
               <strong>Override stored.</strong> PriceLabs accepted and persisted{' '}
               {money(outcome.old_price)} → {money(outcome.new_price)}, verified by
-              re-reading. The guest-facing rate changes on the next PriceLabs
-              refresh — this is not confirmation that it has.
+              re-reading. The guest-facing rate changes on the next PriceLabs refresh —
+              this is not confirmation that it has.
             </>
           ) : outcome.outcome === 'CONFIRMED_FAILED' ? (
             <>Failed. {outcome.message}</>
@@ -213,8 +227,8 @@ function ActionCard({
       ) : approval ? (
         <div className="vac-approve">
           <p className="faint">
-            Approving applies this one change in PriceLabs. The server re-reads
-            first and refuses if anything moved.
+            Approving applies this one change in PriceLabs. The server re-reads first
+            and refuses if anything moved.
           </p>
           <div className="row" style={{ gap: 8 }}>
             <button type="button" disabled={busy} onClick={() => onDecide(true)}>
@@ -227,8 +241,7 @@ function ActionCard({
         </div>
       ) : rec.blocked_reason ? (
         <div className="state state-warn" role="note">
-          <strong>Blocked pending live verification.</strong>{' '}
-          {rec.blocked_reason}
+          <strong>Blocked pending live verification.</strong> {rec.blocked_reason}
         </div>
       ) : (
         <div className="row" style={{ gap: 8 }}>
@@ -236,9 +249,7 @@ function ActionCard({
             {busy ? 'Preparing…' : 'Review'}
           </button>
           {!writesEnabled ? (
-            <span className="faint">
-              Pricing writes are disabled — review only.
-            </span>
+            <span className="faint">Pricing writes are disabled — review only.</span>
           ) : null}
         </div>
       )}
@@ -259,16 +270,17 @@ export function RecommendedActions() {
     <section className="vac-section">
       <h2 className="card-title">Recommended actions</h2>
       <p className="page-subtitle">
-        Computed in Python from PriceLabs market data for these exact dates. No
-        model scores these, and none of them changes a price until you approve
-        one individually.
+        Computed in Python from PriceLabs market data for these exact dates. No model
+        scores these, and none of them changes a price until you approve one
+        individually.
       </p>
 
       {!data.writes_enabled ? (
         <div className="card demo-note" role="note">
-          <strong>Pricing writes are disabled.</strong> Recommendations are shown
-          for review. Applying one requires <span className="mono">ENABLE_PRICING_WRITES</span>{' '}
-          and that listing&rsquo;s own switch.
+          <strong>Pricing writes are disabled.</strong> Recommendations are shown for
+          review. Applying one requires{' '}
+          <span className="mono">ENABLE_PRICING_WRITES</span> and that listing&rsquo;s
+          own switch.
         </div>
       ) : null}
 
