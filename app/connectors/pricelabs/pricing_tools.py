@@ -44,6 +44,7 @@ from app.pricing_cleanup import (
 )
 from app.pricing_config import bands_for, unverified_reason
 from app.pricing_policy import MarketState, PriceAction, fingerprint
+from app.tool_registry import ExecutionContext
 
 APPLY_PRICING_ACTION_TOOL = "apply_pricing_action"
 
@@ -214,6 +215,7 @@ class PriceLabsPricingTools:
             record.id,
             result.provider_created_at,
             reason_sent,
+            provider_updated_at=result.provider_updated_at,
         )
 
         if state is CleanupState.NEEDS_REVIEW:
@@ -224,9 +226,10 @@ class PriceLabsPricingTools:
                 "cleanup_state": state.value,
                 "needs_human": True,
                 "message": (
-                    "The price was applied, but PriceLabs returned no creation "
-                    "time, so this override cannot be verified as ours later. "
-                    "It needs a person."
+                    "The price was applied, but the confirming re-read could "
+                    "not establish that PriceLabs created this override just "
+                    "now, so it cannot be verified as ours later. It needs a "
+                    "person."
                 ),
             }
 
@@ -240,10 +243,24 @@ class PriceLabsPricingTools:
         fingerprint: str,
         reason: str,
         proposed_price: float | None = None,
-        approval_id: str | None = None,
-        run_id: str | None = None,
+        context: ExecutionContext | None = None,
     ) -> dict[str, Any]:
-        """Apply one approved action. Never retries, never loops."""
+        """Apply one approved action. Never retries, never loops.
+
+        `context` is supplied by `ToolRegistry.execute`, not by the caller.
+        The approval and run ids it carries are what tie the cleanup row -- and
+        every later audit event about removing this override -- back to the
+        human decision that authorised the write. They are deliberately absent
+        from `APPLY_PRICING_ACTION_SCHEMA`: an id asserting that a person
+        approved something must not be a field anyone can fill in.
+
+        The live proof on 2026-09-05 is why this is a parameter at all. The
+        tool previously took `approval_id` and `run_id` as ordinary optional
+        arguments, so `tool.function(**arguments)` never passed them and the
+        cleanup row recorded `None` for both -- while a unit test that supplied
+        them by hand went green.
+        """
+        ctx = context or ExecutionContext()
         bands = bands_for(listing_id)
 
         if bands is None:
@@ -345,8 +362,8 @@ class PriceLabsPricingTools:
                     cleanup_at=default_cleanup_at(
                         _dt.date.fromisoformat(stay_date)
                     ).isoformat(),
-                    approval_id=approval_id,
-                    run_id=run_id,
+                    approval_id=ctx.approval_id,
+                    run_id=ctx.run_id,
                 )
 
                 marked = build_reason(record.marker, reason)

@@ -12,6 +12,30 @@ class ToolRisk(str, Enum):
     DANGEROUS = "DANGEROUS"
 
 
+#: The reserved parameter name a context-taking tool receives. It is never a
+#: schema property, so no model or HTTP client can put it in `arguments`.
+CONTEXT_ARGUMENT = "context"
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Trusted facts about the invocation being executed.
+
+    These are established by the runtime -- the run it belongs to, and the
+    approval that released it -- and never by the caller of the tool. They are
+    deliberately *not* tool arguments: an argument is something a model or an
+    HTTP client can propose, and an id that says "a human approved this" must
+    not be proposable. `ToolRegistry.execute` supplies it out-of-band, past the
+    JSON schema, so there is no path by which either could invent one.
+
+    A tool opts in with `Tool.wants_context`. Tools that do not opt in cannot
+    see it at all.
+    """
+
+    run_id: str | None = None
+    approval_id: str | None = None
+
+
 @dataclass
 class Tool:
     """One governed capability.
@@ -37,6 +61,10 @@ class Tool:
     parameters: dict[str, Any]
     risk: ToolRisk = ToolRisk.READ
     model_callable: bool = True
+    #: Whether this tool is handed the runtime's `ExecutionContext`. Off by
+    #: default: a tool that does not need to know which approval released it
+    #: should not be told, and most do not.
+    wants_context: bool = False
 
     def definition(self) -> ToolDefinition:
         """The provider-neutral advertisement of this tool."""
@@ -76,7 +104,16 @@ class ToolRegistry:
         name: str,
         arguments: dict[str, Any],
         approved: bool = False,
+        context: ExecutionContext | None = None,
     ) -> Any:
+        """Run one governed tool.
+
+        `arguments` is untrusted -- it comes from a model or an HTTP client and
+        is bounded by the tool's JSON schema. `context` is trusted and comes
+        from the runtime. The two are kept apart here rather than merged,
+        because merging them is exactly how a caller would get to claim its own
+        approval id.
+        """
         if name not in self._tools:
             raise ValueError(f"Unknown tool: {name}")
 
@@ -89,7 +126,21 @@ class ToolRegistry:
                 risk=tool.risk,
             )
 
-        return tool.function(**arguments)
+        if not tool.wants_context:
+            return tool.function(**arguments)
+
+        if CONTEXT_ARGUMENT in arguments:
+            # A caller trying to occupy the context slot. Refuse rather than
+            # let it through: this is the one name that must mean the runtime.
+            raise ValueError(
+                f"{CONTEXT_ARGUMENT!r} is execution context and cannot be "
+                "supplied as a tool argument"
+            )
+
+        return tool.function(
+            **arguments,
+            **{CONTEXT_ARGUMENT: context or ExecutionContext()},
+        )
 
     def definitions(
         self,

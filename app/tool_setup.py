@@ -300,6 +300,10 @@ def apply_pricing_action_tool(pricing: PriceLabsPricingTools) -> Tool:
         risk=ToolRisk.DANGEROUS,
         model_callable=False,
         parameters=APPLY_PRICING_ACTION_SCHEMA,
+        # The runtime hands this tool the run and approval it is executing
+        # under, so the cleanup row it writes can name the human decision that
+        # authorised it. Not a schema property -- see `ExecutionContext`.
+        wants_context=True,
     )
 
 
