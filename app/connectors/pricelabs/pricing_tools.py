@@ -14,6 +14,27 @@ The division of labour: Python computes the recommendation, a person approves
 one specific change, and Python carries it out. There is no path by which a
 model can price a night.
 
+Refusal order
+-------------
+Not every refusal can be reached without touching the provider, and the
+distinction is worth stating precisely rather than claiming more than is true.
+
+*Locally decidable* refusals -- owner bands, the action name, the verification
+gates, and both runtime kill switches -- are settled from configuration alone.
+They all run first: before any provider access, before the credential is
+resolved, and before a cleanup row is created. An action refused for one of
+these reasons does nothing whatsoever.
+
+*Later* refusals -- STALE, STALE_DATA, PROVIDER_UNAVAILABLE -- follow read-only
+provider access, and could not be reached any other way. Whether the market
+moved since the recommendation, and how old the provider's data is, are only
+knowable from fresh provider state; there is no deciding them without asking.
+
+What holds across both: **no refusal may leave behind a cleanup obligation for
+a write that was never attempted.** The cleanup row is created immediately
+before the write and after every check that could refuse, so a refusal never
+produces a record of an obligation that does not exist.
+
 Staleness
 ---------
 A recommendation is computed from a reading of PriceLabs. Between that reading
@@ -42,7 +63,7 @@ from app.pricing_cleanup import (
     build_reason,
     default_cleanup_at,
 )
-from app.pricing_config import bands_for, unverified_reason
+from app.pricing_config import bands_for, unverified_reason, writes_enabled
 from app.pricing_policy import MarketState, PriceAction, fingerprint
 from app.tool_registry import ExecutionContext
 
@@ -292,6 +313,31 @@ class PriceLabsPricingTools:
         if blocked is not None:
             return _refused("UNVERIFIED_BEHAVIOUR", blocked, stay_date)
 
+        # Both kill switches, checked here rather than only at the moment of
+        # writing. `PriceLabsWriteClient._guard` still checks them too and must
+        # keep doing so -- it is the last line and the only one a future caller
+        # cannot route around -- but checking there *alone* made a refusal do
+        # real work first: it read the provider four times and left a
+        # PENDING_WRITE cleanup row describing an obligation for a write that
+        # never happened. A refusal must change nothing, and that includes not
+        # creating records and not calling a third party.
+        if not writes_enabled():
+            return _refused(
+                "WRITES_DISABLED",
+                "ENABLE_PRICING_WRITES is not enabled; no price was changed.",
+                stay_date,
+            )
+
+        if not bands.automation_enabled:
+            return _refused(
+                "WRITES_DISABLED",
+                (
+                    "Pricing automation is not enabled for this listing; "
+                    "no price was changed."
+                ),
+                stay_date,
+            )
+
         try:
             state, currency = self._current_state(listing_id, stay_date)
 
@@ -421,7 +467,15 @@ def fingerprint_of(listing_id: str, stay_date: str, state: MarketState) -> str:
 
 
 def _refused(code: str, message: str, stay_date: str) -> dict[str, Any]:
-    """A refusal is a clean outcome: nothing was sent, nothing changed."""
+    """A refusal is a clean outcome: nothing was sent, nothing changed.
+
+    That is an obligation on every caller, not just a description. It was once
+    untrue: a WRITES_DISABLED refusal reached here *after* four provider reads
+    and a PENDING_WRITE cleanup row, so the "nothing changed" it reported was
+    a claim the code did not keep. Every check that can refuse now runs before
+    anything with a side effect. Adding a refusal after a read, a write or a
+    record means moving it earlier, not widening what this sentence covers.
+    """
     return {
         "outcome": WriteOutcome.CONFIRMED_FAILED.value,
         "refusal": code,
