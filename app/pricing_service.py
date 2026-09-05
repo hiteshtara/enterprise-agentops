@@ -88,7 +88,15 @@ class PricingRecommendationService:
             if listing is None:
                 continue
 
+            # The provider's bedroom count selects the comp band, so a wrong
+            # one benchmarks a listing against the wrong homes. An owner
+            # override wins where one is recorded.
+            band = bands_for(lid)
+
             bedrooms = listing.get("no_of_bedrooms")
+
+            if band is not None and band.bedrooms_override is not None:
+                bedrooms = band.bedrooms_override
 
             try:
                 market = parse_market_series(
@@ -233,8 +241,17 @@ def unblocked_actions() -> list[str]:
     if not writes_enabled():
         return []
 
+    # LOWER is listing-dependent -- it is blocked per property while that
+    # property's channel discount exposure is unknown -- so it is reported here
+    # only when it is unblocked for every listing. The per-card
+    # `blocked_reason` carries the property-level truth.
     return [
         action
         for action in ("REMOVE_PIN", "LOWER", "RAISE")
-        if unverified_reason(action) is None
+        if all(
+            unverified_reason(action, band.listing_id) is None
+            for band in __import__(
+                "app.pricing_config", fromlist=["BANDS"]
+            ).BANDS
+        )
     ]

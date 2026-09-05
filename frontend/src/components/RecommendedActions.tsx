@@ -77,7 +77,9 @@ function Evidence({ rec }: { rec: PricingRecommendation }) {
     ['Demand', rec.demand ?? '—'],
     ['Pinned at', money(rec.pinned_price)],
     ['Hard floor', money(rec.hard_floor)],
-    ['Normal floor', money(rec.normal_floor)],
+    // Two floors, and the difference matters to whoever is deciding: the hard
+    // floor is refused outright, the owner floor asks them.
+    ['Owner floor tonight', money(rec.owner_floor)],
     ['Auto-raise ceiling', money(rec.auto_raise_ceiling)],
     ['Absolute ceiling', money(rec.absolute_ceiling)],
     ['Confidence', rec.confidence],
@@ -95,6 +97,9 @@ function Evidence({ rec }: { rec: PricingRecommendation }) {
           </div>
         ))}
       </dl>
+      {rec.owner_floor_basis ? (
+        <p className="vac-note">Owner floor basis: {rec.owner_floor_basis}</p>
+      ) : null}
       <p className="vac-reason">{rec.reason}</p>
       {rec.blocked_reason ? <p className="vac-note">{rec.blocked_reason}</p> : null}
       {rec.notes.map((note) => (

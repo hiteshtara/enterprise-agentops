@@ -433,8 +433,14 @@ def test_explicit_cleanup_is_the_sole_unlock_for_a_price_write(monkeypatch):
     monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
     monkeypatch.setattr(config, "EXPIRY_SEMANTICS_VERIFIED", False)
 
-    for action in ("LOWER", "RAISE"):
-        assert config.unverified_reason(action) is None
+    # RAISE clears on the cleanup gate alone. LOWER does not: it carries a
+    # second, independent gate for channel discount exposure.
+    assert config.unverified_reason("RAISE", BUNKERS) is None
+    assert config.unverified_reason("LOWER", BUNKERS) is not None
+
+    monkeypatch.setattr(config, "BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED", True)
+
+    assert config.unverified_reason("LOWER", BUNKERS) is None
 
 
 # -- provider_created_at is mandatory -------------------------------------

@@ -668,6 +668,11 @@ class PricingRecommendation(BaseModel):
     pricelabs_minimum: float | None = None
     hard_floor: float | None = None
     normal_floor: float | None = None
+    #: The owner dynamic floor for this exact night, and the evidence for it.
+    #: Distinct from `hard_floor`: undercutting this asks a person, while the
+    #: hard floor refuses outright.
+    owner_floor: float | None = None
+    owner_floor_basis: str | None = None
     auto_raise_ceiling: float | None = None
     absolute_ceiling: float | None = None
     market_p25: float | None = None

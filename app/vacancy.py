@@ -286,6 +286,25 @@ def count_high_value(
     )
 
 
+def minimum_viable_stay(window: Window) -> int | None:
+    """The shortest stay worth recommending for this gap, or None.
+
+    Turnover costs roughly $200 a reservation, so a one-night stay can be worth
+    less than servicing it. `ONE_NIGHT_STAYS_ALLOWED` is False as an owner
+    business rule, and this returns None for a one-night gap rather than
+    suggesting a restriction change that would sell a night at a loss.
+
+    That makes a one-night orphan an observation, not an opportunity: it is
+    still surfaced, still valued, and never accompanied by advice to open it.
+    """
+    from app.pricing_config import ONE_NIGHT_STAYS_ALLOWED
+
+    if window.nights <= 1 and not ONE_NIGHT_STAYS_ALLOWED:
+        return None
+
+    return window.nights
+
+
 def unbookable_reason(window: Window) -> str | None:
     """Why the provider's data shows this run as unsellable, or None.
 

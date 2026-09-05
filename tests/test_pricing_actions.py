@@ -127,7 +127,7 @@ def test_a_lower_that_clears_the_cap_but_breaks_the_floor_is_still_rejected():
     assert not r.is_actionable
 
 
-def test_a_lower_between_hard_and_normal_floor_is_flagged_for_a_human():
+def test_a_lower_between_hard_and_owner_floor_is_flagged_for_a_human():
     r = rec(
         PriceAction.LOWER,
         150.0,
@@ -136,7 +136,8 @@ def test_a_lower_between_hard_and_normal_floor_is_flagged_for_a_human():
     )
 
     assert r.is_actionable
-    assert any("normal floor" in note for note in r.notes)
+    assert any("owner floor" in note for note in r.notes)
+    assert any("$170" in note for note in r.notes)
 
 
 def test_raise_within_the_auto_ceiling_is_actionable():
@@ -446,6 +447,7 @@ def verified(monkeypatch):
     import app.pricing_config as config
 
     monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
+    monkeypatch.setattr(config, "BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED", True)
     monkeypatch.setattr(config, "EXPIRY_SEMANTICS_VERIFIED", True)
     monkeypatch.setattr(config, "DELETE_ENDPOINT_VERIFIED", True)
 
@@ -1070,7 +1072,9 @@ def test_the_console_reports_the_real_switch_state_not_the_table(monkeypatch):
 # -- unverified provider behaviour ----------------------------------------
 
 
-def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(monkeypatch):
+def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(
+    monkeypatch, database
+):
     """Approval authorises a change; it cannot authorise an untested assumption.
 
     `lead_time_expiry` was accepted and echoed back by PriceLabs on the first
@@ -1087,7 +1091,7 @@ def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(monkeypatch):
     writer = RecordingWriter()
 
     for action, price in (("LOWER", 190.0), ("RAISE", 215.0)):
-        result = tools(reader, writer).apply_pricing_action(
+        result = tools(reader, writer, store(database)).apply_pricing_action(
             listing_id=BUNKERS,
             stay_date="2026-09-20",
             action=action,
@@ -1097,9 +1101,48 @@ def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(monkeypatch):
         )
 
         assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
-        assert "explicit cleanup lifecycle" in result["message"]
 
     assert writer.calls == [], "no write may reach PriceLabs while this is open"
+
+    assert writer.calls == [], "no write may reach PriceLabs while this is open"
+
+
+def test_lowering_is_blocked_separately_by_channel_discount_exposure(
+    monkeypatch, database
+):
+    """Two independent gates stand in front of a LOWER.
+
+    Proving the cleanup lifecycle does not answer what a guest actually pays
+    after Booking.com discounts it, so it cannot unblock a price cut on a
+    property that sells there.
+    """
+    import app.pricing_config as config
+
+    monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
+    monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
+    monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
+    monkeypatch.setattr(config, "BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED", False)
+
+    reader = FakeReader()
+
+    writer = RecordingWriter()
+
+    result = tools(reader, writer, store(database)).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="LOWER",
+        fingerprint=current_fingerprint(reader),
+        reason="test",
+        proposed_price=190.0,
+    )
+
+    assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
+    assert "Booking.com" in result["message"]
+    assert writer.calls == []
+
+    # A RAISE is not blocked by it: a raise cannot lower a published price, so
+    # an unknown discount cannot carry it below a floor.
+    assert config.unverified_reason("RAISE", BUNKERS) is None
 
 
 def test_remove_pin_is_unblocked_now_that_delete_is_verified(monkeypatch):
