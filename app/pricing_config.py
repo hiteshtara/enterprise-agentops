@@ -142,9 +142,47 @@ ONE_NIGHT_STAYS_ALLOWED = False
 #: an ownership re-read that matches, exactly one DELETE, and a re-read
 #: confirming the override is absent -- CLEANED_UP.
 #:
-#: Until then a fixed-price write has no proven way to expire, so LOWER and
-#: RAISE stay blocked. See docs/PRICING_CLEANUP_V2.md.
-CLEANUP_STRATEGY_VERIFIED = False
+#: 2026-09-05: VERIFIED, on Arboretum Retreat 2026-10-05 -- a night 30 days
+#: out, open, with no existing override. One owner-approved RAISE, $250 ->
+#: $260 (+4.0%). The cleanup row existed as PENDING_WRITE before the POST;
+#: exactly one POST was sent; the confirming re-read matched on marker,
+#: byte-for-byte reason, price, `created_at` present and `updated_at ==
+#: created_at`, so the row reached ACTIVE. Thirty-one minutes later
+#: `app.pricing_cleanup_job` -> `PricingCleanupRunner` proved ownership, sent
+#: exactly one DELETE, and re-read the override as absent (9 -> 8 overrides,
+#: the other eight untouched) -- CLEANED_UP. A second pass processed 0 and
+#: deleted 0, so CLEANED_UP is terminal.
+#:
+#: The proof is also what found three defects, and this flag records that they
+#: are fixed rather than that the first attempt was clean:
+#:
+#:   * the cleanup row and its audit event carried `approval_id: None` and
+#:     `run_id: None`, because `ToolRegistry.execute` passed only schema
+#:     arguments. Governance context now travels through `ExecutionContext`,
+#:     proven by a production-path integration test rather than by a unit test
+#:     that hands the function the value it is meant to obtain elsewhere;
+#:   * two processes could select and delete the same row. A due row is now
+#:     claimed by an atomic compare-and-swap before the provider is read, and
+#:     an expired claim reconciles to NEEDS_REVIEW rather than being taken
+#:     over -- elapsed time cannot establish that an external side effect did
+#:     not happen;
+#:   * a claim holder that stalled past its lease could still call the
+#:     provider. `DELETE_STARTED` now fences the irreversible call: it is a
+#:     second token-guarded CAS, and `remove_override` runs only if it commits.
+#:
+#: Every ambiguous state -- UNKNOWN_CLEANUP_STATE, a stranded DELETE_STARTED --
+#: is never retried automatically and waits for a person.
+#:
+#: What this unblocks and what it does not. RAISE is released from *this* gate
+#: and remains subject to the deterministic guardrails, per-listing rules,
+#: individual human approval, and both runtime write switches. LOWER stays
+#: blocked on every Booking.com property by
+#: BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED, which is independent and still
+#: False. REMOVE_PIN is unaffected. Nothing here enables a write:
+#: ENABLE_PRICING_WRITES and the per-listing allowlist are both off.
+#:
+#: See docs/PRICING_CLEANUP_V2.md.
+CLEANUP_STRATEGY_VERIFIED = True
 
 #: Whether `DELETE /v1/listings/{id}/overrides` has been live-verified through
 #: the same approval -> one write -> re-read path the POST went through.

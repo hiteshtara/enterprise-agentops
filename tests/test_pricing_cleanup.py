@@ -404,13 +404,27 @@ def test_only_an_adopted_record_may_skip_the_marker(store):
 # -- the gate --------------------------------------------------------------
 
 
-def test_the_cleanup_strategy_ships_unverified():
-    from app.pricing_config import CLEANUP_STRATEGY_VERIFIED, unverified_reason
+def test_the_cleanup_strategy_is_verified_and_unblocks_only_raise():
+    """The gate reflects the 2026-09-05 live Arboretum lifecycle, and no more.
 
-    assert CLEANUP_STRATEGY_VERIFIED is False
+    Flipping it released RAISE from *this* gate. It did not release LOWER,
+    which carries an independent Booking.com channel-discount gate, and it did
+    not enable any write -- both runtime switches are separate and off.
+    """
+    from app.pricing_config import (
+        BANDS,
+        CLEANUP_STRATEGY_VERIFIED,
+        unverified_reason,
+    )
 
-    for action in ("LOWER", "RAISE"):
-        assert unverified_reason(action) is not None
+    assert CLEANUP_STRATEGY_VERIFIED is True
+
+    for band in BANDS:
+        assert unverified_reason("RAISE", band.listing_id) is None
+
+        blocked = unverified_reason("LOWER", band.listing_id)
+
+        assert blocked is not None and "Booking.com" in blocked, band.slug
 
 
 def test_explicit_cleanup_is_the_sole_unlock_for_a_price_write(monkeypatch):

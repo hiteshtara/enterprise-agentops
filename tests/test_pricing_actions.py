@@ -1072,14 +1072,15 @@ def test_the_console_reports_the_real_switch_state_not_the_table(monkeypatch):
 # -- unverified provider behaviour ----------------------------------------
 
 
-def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(
+def test_a_lower_is_still_blocked_after_the_cleanup_gate_opened(
     monkeypatch, database
 ):
     """Approval authorises a change; it cannot authorise an untested assumption.
 
-    `lead_time_expiry` was accepted and echoed back by PriceLabs on the first
-    live write, which proves persistence and nothing about expiry. Until that
-    is settled empirically, a fixed-price write could strand a permanent pin.
+    The cleanup lifecycle was live-verified on 2026-09-05, which released
+    RAISE. LOWER is untouched by that: it sets a published price, and a
+    published price minus an unknown Booking.com discount is an unknown
+    guest-facing rate that cannot be shown to respect any floor.
     """
     monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
@@ -1090,18 +1091,17 @@ def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(
 
     writer = RecordingWriter()
 
-    for action, price in (("LOWER", 190.0), ("RAISE", 215.0)):
-        result = tools(reader, writer, store(database)).apply_pricing_action(
-            listing_id=BUNKERS,
-            stay_date="2026-09-20",
-            action=action,
-            fingerprint=stamp,
-            reason="test",
-            proposed_price=price,
-        )
+    result = tools(reader, writer, store(database)).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="LOWER",
+        fingerprint=stamp,
+        reason="test",
+        proposed_price=190.0,
+    )
 
-        assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
-
+    assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
+    assert "Booking.com" in result["message"]
     assert writer.calls == [], "no write may reach PriceLabs while this is open"
 
     assert writer.calls == [], "no write may reach PriceLabs while this is open"
@@ -1181,13 +1181,15 @@ def test_the_gate_is_checked_before_anything_is_read(monkeypatch):
 
     reader = FakeReader(fail=True)  # any read would raise
 
+    # LOWER is the action still gated, so it is the one that proves the
+    # ordering: a blocked action is refused before the provider is touched.
     result = tools(reader, RecordingWriter()).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
-        action="RAISE",
+        action="LOWER",
         fingerprint="x",
         reason="test",
-        proposed_price=215.0,
+        proposed_price=140.0,
     )
 
     assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
@@ -1196,34 +1198,46 @@ def test_the_gate_is_checked_before_anything_is_read(monkeypatch):
 def test_only_the_verified_behaviour_is_unlocked():
     """Each flag reflects exactly what has been proven against the provider.
 
-    DELETE was verified live on 2026-09-04. The fixed-price lifecycle was not,
-    so LOWER and RAISE stay shut until the 2026-09-18 expiry check settles it.
+    DELETE live-verified 2026-09-04, so REMOVE_PIN is open. The explicit
+    cleanup lifecycle live-verified 2026-09-05, so RAISE is open. Neither
+    result says anything about the Booking.com discount exposure, so LOWER
+    stays shut -- and neither says anything about provider-side expiry, which
+    is why EXPIRY_SEMANTICS_VERIFIED is still False and is informational
+    rather than a permission.
     """
     from app.pricing_config import (
+        BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED,
+        CLEANUP_STRATEGY_VERIFIED,
         DELETE_ENDPOINT_VERIFIED,
         EXPIRY_SEMANTICS_VERIFIED,
         unverified_reason,
     )
 
     assert DELETE_ENDPOINT_VERIFIED is True
+    assert CLEANUP_STRATEGY_VERIFIED is True
+    assert BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED is False
     assert EXPIRY_SEMANTICS_VERIFIED is False
 
-    assert unverified_reason("REMOVE_PIN") is None
-    assert unverified_reason("LOWER") is not None
-    assert unverified_reason("RAISE") is not None
+    assert unverified_reason("REMOVE_PIN", BUNKERS) is None
+    assert unverified_reason("RAISE", BUNKERS) is None
+    assert unverified_reason("LOWER", BUNKERS) is not None
 
 
-def test_the_block_is_surfaced_on_the_recommendation(monkeypatch):
-    """The console must say so before a person spends a decision on it."""
-    r = rec(PriceAction.RAISE, 215.0)
+def test_the_block_is_surfaced_on_the_recommendation():
+    """The console must say so before a person spends a decision on it.
 
+    LOWER is the action still gated, and the reason names the Booking.com
+    exposure rather than a generic refusal.
+    """
     from app.pricing_policy import to_payload
 
-    payload = to_payload(r)
+    payload = to_payload(
+        rec(PriceAction.LOWER, 185.0, band=bands(listing_id=BUNKERS))
+    )
 
     assert payload["actionable"] is True
     assert payload["blocked_reason"] is not None
-    assert "explicit cleanup lifecycle" in payload["blocked_reason"]
+    assert "Booking.com" in payload["blocked_reason"]
 
 
 def test_an_informational_recommendation_carries_no_block():
