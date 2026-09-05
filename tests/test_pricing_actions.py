@@ -456,7 +456,7 @@ def verified(monkeypatch):
 
 
 def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch, database):
-    verified(monkeypatch)
+    enable(monkeypatch)  # past the kill switches; these test later checks
 
     reader = FakeReader(price=200.0)
 
@@ -480,7 +480,7 @@ def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch, 
 
 
 def test_a_pin_that_changed_after_the_recommendation_refuses_execution(monkeypatch):
-    verified(monkeypatch)
+    enable(monkeypatch)  # past the kill switches; these test later checks
 
     reader = FakeReader(override={"date": "2026-09-20", "price": "109"})
 
@@ -503,7 +503,7 @@ def test_a_pin_that_changed_after_the_recommendation_refuses_execution(monkeypat
 
 
 def test_stale_pricelabs_data_refuses_execution(monkeypatch, database):
-    verified(monkeypatch)
+    enable(monkeypatch)  # past the kill switches; these test later checks
 
     old = (
         datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=40)
@@ -527,7 +527,7 @@ def test_stale_pricelabs_data_refuses_execution(monkeypatch, database):
 
 
 def test_provider_unavailable_refuses_execution(monkeypatch, database):
-    verified(monkeypatch)
+    enable(monkeypatch)  # past the kill switches; these test later checks
 
     reader = FakeReader(fail=True)
 
@@ -988,7 +988,7 @@ def test_the_execution_state_carries_the_market_reference():
 
 def test_a_market_move_after_the_recommendation_refuses_execution(monkeypatch):
     """The protection still works once the market is actually in scope."""
-    verified(monkeypatch)
+    enable(monkeypatch)  # past the kill switches; these test later checks
 
     from app.connectors.pricelabs.pricing_tools import fingerprint_of
 
@@ -1998,36 +1998,29 @@ def test_the_verified_cleanup_gate_does_not_by_itself_permit_a_raise(
     assert config.writes_enabled() is False
     assert not config.automation_allowlist()
 
-    reader = FakeReader()
+    provider = ExplodingProvider()  # any provider contact fails the test
 
     result = tools(
-        reader,
-        real_write_client(reader),
+        provider,
+        real_write_client(provider),
         store(database),
     ).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="RAISE",
-        fingerprint=current_fingerprint(reader),
+        fingerprint="whatever",
         reason="test",
         proposed_price=215.0,
     )
 
+    assert provider.touched == [], "no read and no write may reach PriceLabs"
     assert result["outcome"] == WriteOutcome.CONFIRMED_FAILED.value
     assert result["refusal"] == "WRITES_DISABLED"
     assert "ENABLE_PRICING_WRITES" in result["message"]
 
-    # A cleanup row was written before the attempt, as the design requires,
-    # and the refusal leaves it stranded in PENDING_WRITE. Untidy, and
-    # reported -- but not dangerous, which is what is asserted here: cleanup
-    # only ever acts on ACTIVE rows, so an orphan can never produce a DELETE.
-    import datetime as _dt
-
-    cleanups = store(database)
-
-    assert cleanups.due(
-        now=_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=365)
-    ) == [], "a row for a write that never happened must never become due"
+    assert store(database).open_records() == [], (
+        "a refusal must leave no record of an obligation that never existed"
+    )
 
 
 def test_a_disabled_raise_is_refused_by_the_switch_and_not_by_the_gate(
@@ -2045,22 +2038,23 @@ def test_a_disabled_raise_is_refused_by_the_switch_and_not_by_the_gate(
     monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
     monkeypatch.delenv("PRICELABS_AUTOMATION_ENABLED", raising=False)
 
-    reader = FakeReader()
+    provider = ExplodingProvider()
 
     result = tools(
-        reader,
-        real_write_client(reader),
+        provider,
+        real_write_client(provider),
         store(database),
     ).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="RAISE",
-        fingerprint=current_fingerprint(reader),
+        fingerprint="whatever",
         reason="test",
         proposed_price=215.0,
     )
 
     assert result["refusal"] == "WRITES_DISABLED"
+    assert provider.touched == []
 
 
 def test_the_global_switch_alone_is_not_enough_for_a_raise(monkeypatch, database):
@@ -2068,23 +2062,91 @@ def test_the_global_switch_alone_is_not_enough_for_a_raise(monkeypatch, database
     monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", "")
 
-    reader = FakeReader()
+    provider = ExplodingProvider()
 
     result = tools(
-        reader,
-        real_write_client(reader),
+        provider,
+        real_write_client(provider),
         store(database),
     ).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="RAISE",
-        fingerprint=current_fingerprint(reader),
+        fingerprint="whatever",
         reason="test",
         proposed_price=215.0,
     )
 
     assert result["refusal"] == "WRITES_DISABLED"
     assert "not enabled for this listing" in result["message"]
+    assert provider.touched == [], "an un-allowlisted listing is never read"
+    assert store(database).open_records() == []
+
+
+def test_remove_pin_with_the_switches_off_is_refused_before_any_provider_access(
+    monkeypatch,
+    database,
+):
+    """The early check covers every action that can write, not just prices."""
+    monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
+    monkeypatch.delenv("PRICELABS_AUTOMATION_ENABLED", raising=False)
+
+    import app.pricing_config as config
+
+    assert config.unverified_reason("REMOVE_PIN", BUNKERS) is None, (
+        "REMOVE_PIN is past its verification gate, so the switch is what holds"
+    )
+
+    provider = ExplodingProvider()
+
+    result = tools(
+        provider,
+        real_write_client(provider),
+        store(database),
+    ).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="REMOVE_PIN",
+        fingerprint="whatever",
+        reason="test",
+    )
+
+    assert result["refusal"] == "WRITES_DISABLED"
+    assert provider.touched == []
+    assert store(database).open_records() == []
+
+
+def test_the_write_client_still_guards_even_when_reached_directly(monkeypatch):
+    """Defence in depth: the early check did not replace `_guard`.
+
+    A future caller that bypassed `apply_pricing_action` -- or a reordering
+    that dropped the early check -- must still hit a closed door at the client.
+    """
+    monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
+
+    from app.connectors.pricelabs.write_client import PricingWritesDisabled
+
+    client = real_write_client(FakeReader())
+
+    for call in (
+        lambda: client.set_override(
+            BUNKERS, "lodgify", "2026-09-20", 215.0,
+            currency="USD", reason="r", automation_enabled=True,
+        ),
+        lambda: client.remove_override(
+            BUNKERS, "lodgify", "2026-09-20", automation_enabled=True,
+        ),
+    ):
+        with pytest.raises(PricingWritesDisabled):
+            call()
+
+    # ...and with the global switch on but the listing off.
+    monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
+
+    with pytest.raises(PricingWritesDisabled):
+        client.remove_override(
+            BUNKERS, "lodgify", "2026-09-20", automation_enabled=False,
+        )
 
 
 def test_a_raise_still_needs_an_approval_even_with_the_switches_on(

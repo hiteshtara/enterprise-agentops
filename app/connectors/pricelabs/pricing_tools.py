@@ -14,6 +14,15 @@ The division of labour: Python computes the recommendation, a person approves
 one specific change, and Python carries it out. There is no path by which a
 model can price a night.
 
+Refusal order
+-------------
+Every check that can refuse without side effects runs before anything that has
+one. Bands, the action name, the verification gate and both kill switches are
+settled first; only then does this tool read PriceLabs, recompute the
+fingerprint, or write a cleanup row. A refusal therefore leaves no record and
+makes no provider call -- which was not true when the switches were enforced
+only inside the write client.
+
 Staleness
 ---------
 A recommendation is computed from a reading of PriceLabs. Between that reading
@@ -42,7 +51,7 @@ from app.pricing_cleanup import (
     build_reason,
     default_cleanup_at,
 )
-from app.pricing_config import bands_for, unverified_reason
+from app.pricing_config import bands_for, unverified_reason, writes_enabled
 from app.pricing_policy import MarketState, PriceAction, fingerprint
 from app.tool_registry import ExecutionContext
 
@@ -292,6 +301,31 @@ class PriceLabsPricingTools:
         if blocked is not None:
             return _refused("UNVERIFIED_BEHAVIOUR", blocked, stay_date)
 
+        # Both kill switches, checked here rather than only at the moment of
+        # writing. `PriceLabsWriteClient._guard` still checks them too and must
+        # keep doing so -- it is the last line and the only one a future caller
+        # cannot route around -- but checking there *alone* made a refusal do
+        # real work first: it read the provider four times and left a
+        # PENDING_WRITE cleanup row describing an obligation for a write that
+        # never happened. A refusal must change nothing, and that includes not
+        # creating records and not calling a third party.
+        if not writes_enabled():
+            return _refused(
+                "WRITES_DISABLED",
+                "ENABLE_PRICING_WRITES is not enabled; no price was changed.",
+                stay_date,
+            )
+
+        if not bands.automation_enabled:
+            return _refused(
+                "WRITES_DISABLED",
+                (
+                    "Pricing automation is not enabled for this listing; "
+                    "no price was changed."
+                ),
+                stay_date,
+            )
+
         try:
             state, currency = self._current_state(listing_id, stay_date)
 
@@ -421,7 +455,15 @@ def fingerprint_of(listing_id: str, stay_date: str, state: MarketState) -> str:
 
 
 def _refused(code: str, message: str, stay_date: str) -> dict[str, Any]:
-    """A refusal is a clean outcome: nothing was sent, nothing changed."""
+    """A refusal is a clean outcome: nothing was sent, nothing changed.
+
+    That is an obligation on every caller, not just a description. It was once
+    untrue: a WRITES_DISABLED refusal reached here *after* four provider reads
+    and a PENDING_WRITE cleanup row, so the "nothing changed" it reported was
+    a claim the code did not keep. Every check that can refuse now runs before
+    anything with a side effect. Adding a refusal after a read, a write or a
+    record means moving it earlier, not widening what this sentence covers.
+    """
     return {
         "outcome": WriteOutcome.CONFIRMED_FAILED.value,
         "refusal": code,
