@@ -68,6 +68,19 @@ MAX_CHANGE_PER_RUN = 0.10
 #: While False, no fixed-price write (LOWER or RAISE) may execute.
 EXPIRY_SEMANTICS_VERIFIED = False
 
+#: Whether the V2 explicit-cleanup lifecycle has been proven end to end
+#: against the live provider.
+#:
+#: Code passing its tests is not this flag. It flips only after one complete
+#: live proof: an approved temporary override, with its cleanup row written
+#: first, stored carrying the exact marker, reaching ACTIVE, then at cleanup_at
+#: an ownership re-read that matches, exactly one DELETE, and a re-read
+#: confirming the override is absent -- CLEANED_UP.
+#:
+#: Until then a fixed-price write has no proven way to expire, so LOWER and
+#: RAISE stay blocked. See docs/PRICING_CLEANUP_V2.md.
+CLEANUP_STRATEGY_VERIFIED = False
+
 #: Whether `DELETE /v1/listings/{id}/overrides` has been live-verified through
 #: the same approval -> one write -> re-read path the POST went through.
 #:
@@ -182,13 +195,16 @@ def unverified_reason(action: str) -> str | None:
     rest on different unproven assumptions and will be unblocked at different
     times.
     """
-    if action in {"LOWER", "RAISE"} and not EXPIRY_SEMANTICS_VERIFIED:
+    if action in {"LOWER", "RAISE"} and not (
+        EXPIRY_SEMANTICS_VERIFIED or CLEANUP_STRATEGY_VERIFIED
+    ):
         return (
-            "A fixed-price write is blocked: lead_time_expiry has been "
-            "accepted and stored by PriceLabs but its expiration behaviour has "
-            "not been empirically verified, so this write could strand a "
-            "permanent pin. Re-read the 2026-09-21 override on or after "
-            "2026-09-18 to settle it."
+            "A fixed-price write is blocked: it has no proven way to expire. "
+            "PriceLabs accepted and stored lead_time_expiry but its expiration "
+            "behaviour has never been observed, and AgentGuard's own explicit "
+            "cleanup has not yet completed a full live lifecycle. Either would "
+            "unblock this; neither has happened, so the write could strand a "
+            "permanent pin."
         )
 
     if action == "REMOVE_PIN" and not DELETE_ENDPOINT_VERIFIED:

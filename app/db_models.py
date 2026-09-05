@@ -828,3 +828,133 @@ class ConversationActivityRecord(Base):
     first_seen_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
     last_refreshed_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class PricingCleanupRecord(Base):
+    """One temporary fixed-price override AgentGuard owes a cleanup for.
+
+    The row is written **before** the override is sent. A write with no row is
+    impossible by construction: the row is what makes the cleanup owed, and an
+    override nobody recorded is exactly the stranded pin this exists to
+    prevent.
+
+    Ownership is carried in `marker`, written to the front of the provider's
+    `reason` field as ``AGENTGUARD:<marker>: <text>``. PriceLabs gives an
+    override no id, so the token is the only thing that ties a provider row to
+    a specific record here. See docs/PRICING_CLEANUP_V2.md.
+    """
+
+    __tablename__ = "pricing_cleanups"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+    )
+
+    listing_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    pms: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+
+    stay_date: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        index=True,
+    )
+
+    #: What was there before, so a reviewer can see what was displaced. Null
+    #: when the date carried no override.
+    old_price: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    new_price: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+
+    currency: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        default="USD",
+    )
+
+    #: The ownership token. Equal to `id` for rows this system created; the
+    #: adopted pre-V2 row has none, which is why `adopted` exists.
+    marker: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    #: The exact `reason` string sent, so the confirming re-read can be
+    #: compared byte-for-byte and truncation caught at write time.
+    reason_sent: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    #: True only for the one override written before V2 existed. It carries no
+    #: marker, so ownership falls back to price and timestamps. The exemption
+    #: is stored here rather than inferred, so it cannot spread.
+    adopted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    approval_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )
+
+    #: `created_at` as the provider reported it on the confirming re-read.
+    provider_created_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    #: When the override must be removed. Stored, never recomputed, so a later
+    #: change to the default policy cannot silently re-date overrides in flight.
+    cleanup_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        index=True,
+    )
+
+    state: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        index=True,
+    )
+
+    resolved_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    #: Free-text account of how it ended, for a person reading the queue.
+    resolution: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
