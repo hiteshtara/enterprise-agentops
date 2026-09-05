@@ -178,14 +178,20 @@ a test override and observing whether `updated_at` moves.
                                        matches          differs
                                           |                 |
                                           v                 v
-                                     DELETE once       NEEDS_REVIEW
-                                          |
-                                re-read to confirm
-                                  /            \
-                             absent           present
-                                |                 |
-                                v                 v
-                           CLEANED_UP        NEEDS_REVIEW
+                              CAS: CLAIMED + my token   NEEDS_REVIEW
+                                   -> DELETE_STARTED
+                                    /            \
+                                 won             lost
+                                  |               |
+                                  v               v
+                            DELETE once     send nothing
+                                  |         (OWNERSHIP_LOST)
+                        re-read to confirm
+                          /            \
+                     absent           present
+                        |                 |
+                        v                 v
+                   CLEANED_UP        NEEDS_REVIEW
 
 
   CLAIMED, lease expired, nobody released it
@@ -201,7 +207,9 @@ Plus `UNKNOWN_CLEANUP_STATE` when the DELETE's outcome cannot be established —
 never retried, always surfaced.
 
 Terminal states: `CLEANED_UP`, `VANISHED`, `NEEDS_REVIEW`, `UNKNOWN_CLEANUP_STATE`.
-`CLAIMED` is the one non-terminal state a row can sit in during a pass.
+`CLAIMED` and `DELETE_STARTED` are the two non-terminal states a row can sit in
+during a pass. A row left in `DELETE_STARTED` is never resolved by automation
+and waits for a person.
 
 ---
 
@@ -236,6 +244,88 @@ AWS instances.
 **The claim precedes the provider read, not the DELETE.** A loser therefore
 never reads, so two processes can never simultaneously hold an ownership proof
 for the same override.
+
+### The delete boundary: `DELETE_STARTED`
+
+A claim authorises *work*. It does not authorise the *call*.
+
+The claim alone leaves one hazard open. A process can claim a row, read the
+provider, prove ownership, then stall past its lease. Reconciliation settles
+the row to `NEEDS_REVIEW`, a person starts acting on it — and then the stalled
+process resumes straight into `remove_override` and deletes an override
+somebody had already taken over. Its token would stop the *verdict* from
+landing, but only after the provider call had happened.
+
+So there is a second compare-and-swap, immediately before the call:
+
+```sql
+UPDATE pricing_cleanups
+   SET state='DELETE_STARTED'
+ WHERE id = ? AND state='CLAIMED' AND claim_token = ?
+```
+
+`remove_override` is called **only if that CAS committed**. Reconciliation
+clears `claim_token`, so a row it settled fails this on both predicates and
+nothing is sent. The stale process reports `OWNERSHIP_LOST`, emits
+`PRICING_CLEANUP_STALE_OWNER` with `provider_delete_attempted: false`, and
+changes nothing.
+
+Everything above that line is reversible. Everything below it may reach a third
+party.
+
+The kill switches are checked *before* the boundary is taken, so a pass that
+cannot write puts the claim down and leaves the row `ACTIVE` rather than
+parking it at a boundary that would need a person.
+
+### A row left at the boundary belongs to a person
+
+`DELETE_STARTED` is an **ambiguous external-write boundary**. A process that
+died there may have sent its DELETE or may not, and neither system can settle
+which — the same reason a lease cannot make the call exactly-once. So:
+
+- `due()` selects `ACTIVE` only, and `expired_claims()` selects `CLAIMED` only,
+  so no automatic pass ever picks up a `DELETE_STARTED` row;
+- reconciliation never changes one, whatever the provider now shows;
+- a later pass may read the provider for diagnosis, but that reading is never
+  permission for a second automatic DELETE;
+- `open_records()` and `overdue()` both include it, because a row automation
+  will never resolve is only ever seen if it is surfaced.
+
+Once the boundary is committed, the holder records the terminal state using the
+same token — nothing can take the claim away from a `DELETE_STARTED` row, since
+reconciliation only touches `CLAIMED`.
+
+### Operational rule: a `DELETE_STARTED` row is hands off
+
+**`DELETE_STARTED` means an external DELETE may be in flight, or may already
+have been sent.** Nothing in AgentGuard can tell which, and nothing at
+PriceLabs will say.
+
+While a row is in that state:
+
+- **AgentGuard must never automatically retry it.** No pass, no schedule, no
+  backfill.
+- **AgentGuard must never offer an automatic cleanup or retry control for it.**
+  Not a button, not a menu item, not an API parameter. (There is no such
+  control today: the console has no cleanup surface at all, and
+  `POST /pricing/cleanup/run` takes no input, so nothing can be aimed at a
+  specific row.)
+- **A human reviewing a stranded `DELETE_STARTED` record must treat that stay
+  date as "hands off"** until the original worker or request is known to have
+  finished. Editing the date at the provider while a DELETE may still land is
+  the collision this whole design exists to avoid.
+- **Human review may read PriceLabs for diagnosis.** Reading is always safe;
+  it just cannot settle the question.
+- **No automated action may infer from elapsed time that another DELETE is
+  safe.** Not after an hour, not after a week. Elapsed time is not evidence
+  about an external side effect.
+
+This is an unavoidable boundary, not a gap someone forgot to close. Our
+database transaction cannot include the PriceLabs DELETE, and it cannot exclude
+a person editing the same override in the PriceLabs UI at the same moment.
+Exactly-once is therefore not available at any lease length or retry policy.
+What *is* available is never doing it twice automatically, and that is what
+`DELETE_STARTED` buys.
 
 ### Expired claims fail closed
 

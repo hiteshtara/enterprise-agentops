@@ -87,6 +87,21 @@ class CleanupState(str, Enum):
     #: pricing decision a person made in the meantime is unrecoverable. So this
     #: fails closed and asks.
     CLAIMED = "CLAIMED"
+    #: The fencing boundary in front of the provider DELETE.
+    #:
+    #: Committed by the claim holder *immediately before* it calls PriceLabs,
+    #: and only if it still holds its claim. That is what stops the other
+    #: hazard a token alone cannot reach: a process that proved ownership, then
+    #: froze past its lease, then resumed. The token would stop its database
+    #: verdict landing -- but nothing would have stopped the DELETE itself,
+    #: against a row a person may already be acting on.
+    #:
+    #: A row left here is an **ambiguous external-write boundary**: the DELETE
+    #: may have been sent or not, and nothing in either system can settle it.
+    #: So automation never touches it again -- not `due`, not `expired_claims`,
+    #: not reconciliation. It waits for a person, and is surfaced by
+    #: `open_records` and `overdue` so the wait is visible.
+    DELETE_STARTED = "DELETE_STARTED"
     CLEANED_UP = "CLEANED_UP"
     VANISHED = "VANISHED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
@@ -446,6 +461,41 @@ class PricingCleanupStore:
 
             return result.rowcount == 1
 
+    def begin_delete(
+        self,
+        record_id: str,
+        token: str,
+    ) -> bool:
+        """Cross the boundary into DELETE_STARTED. True if we may now call out.
+
+        The last thing that happens before a provider DELETE, and the second
+        compare-and-swap in the lifecycle: `state='CLAIMED' AND claim_token=?`.
+
+        The claim alone is not enough to authorise the call. A process can
+        claim a row, prove ownership, then stall past its lease while another
+        process reconciles the row to NEEDS_REVIEW and a person starts acting
+        on it. If the stalled process then resumed straight into
+        `remove_override`, it would delete an override somebody was already
+        handling. Its token would stop the *verdict* landing, but the provider
+        call would already have happened.
+
+        So the durable transition is taken first, and the call is made only if
+        it committed. Reconciliation clears `claim_token`, so a row it settled
+        fails this CAS on both predicates and nothing is sent.
+        """
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                .where(PricingCleanupRecord.state == CleanupState.CLAIMED.value)
+                .where(PricingCleanupRecord.claim_token == token)
+                .values(state=CleanupState.DELETE_STARTED.value)
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
+
     def expired_claims(
         self,
         now: datetime | None = None,
@@ -660,6 +710,11 @@ class PricingCleanupStore:
                                 # not less. Hiding it here would make a crashed
                                 # process invisible.
                                 CleanupState.CLAIMED.value,
+                                # Likewise a row abandoned at the delete
+                                # boundary. Automation will never resolve it,
+                                # so surfacing it is the only way it is ever
+                                # seen.
+                                CleanupState.DELETE_STARTED.value,
                             )
                         )
                     )
@@ -679,6 +734,7 @@ class PricingCleanupStore:
             CleanupState.PENDING_WRITE.value,
             CleanupState.ACTIVE.value,
             CleanupState.CLAIMED.value,
+            CleanupState.DELETE_STARTED.value,
             CleanupState.NEEDS_REVIEW.value,
             CleanupState.UNKNOWN_CLEANUP_STATE.value,
         ]

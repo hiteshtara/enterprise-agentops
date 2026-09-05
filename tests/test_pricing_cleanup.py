@@ -1153,61 +1153,18 @@ def stale_owner_runner(store, database, record, reader, writer, audit):
     return PricingCleanupRunner(store, reader, writer, audit=audit)
 
 
-def test_a_stale_owner_does_not_audit_a_transition_it_did_not_make(
+def test_a_stale_owner_is_stopped_at_the_boundary_before_any_delete(
     store,
     database,
     monkeypatch,
 ):
-    """It concluded CLEANED_UP; the row says NEEDS_REVIEW. Only one is true."""
-    switches_on(monkeypatch)
+    """The exact race. Proof of ownership is not permission to call out.
 
-    record = active_record(store)
-
-    audit = Recorder()
-
-    runner = stale_owner_runner(
-        store,
-        database,
-        record,
-        FakeReader(provider_override(record)),
-        RecordingWriter(),
-        audit,
-    )
-
-    outcome = runner._process(store.get(record.id), "slow-process")
-
-    assert "PRICING_CLEANUP" not in audit.types(), (
-        "no event may announce a terminal state the row never reached"
-    )
-
-    stale = audit.one("PRICING_CLEANUP_STALE_OWNER")
-
-    assert stale["attempted_state"] == CleanupState.CLEANED_UP.value
-    assert stale["provider_delete_attempted"] is True
-    assert stale["cleanup_id"] == record.id
-    assert stale["listing_id"] == BUNKERS
-    assert stale["stay_date"] == STAY
-    assert stale["approval_id"] == "ap-1"
-    assert stale["claim_token"] == "slow-process"
-    assert "the claim was gone" in stale["ownership"]
-
-    assert outcome.committed is False
-    assert outcome.reported_state == OWNERSHIP_LOST
-
-    # The durable row is untouched by the stale process.
-    assert store.get(record.id).state == CleanupState.NEEDS_REVIEW.value
-    assert store.get(record.id).resolution == "reconciled: the claim expired"
-
-
-def test_a_stale_owners_delete_attempt_stays_auditable(
-    store,
-    database,
-    monkeypatch,
-):
-    """The provider side effect is real whatever happened to our bookkeeping.
-
-    Losing the claim must not erase the fact that a DELETE was sent -- that is
-    exactly what a person reconstructing the night needs to know.
+    The owner claims, reads, proves ownership, then stalls past its lease.
+    Reconciliation settles the row to NEEDS_REVIEW and a person may already be
+    acting on it. When the owner resumes it must send nothing -- and the
+    DELETE_STARTED compare-and-swap is what stops it, because the token alone
+    would only have stopped the database verdict, after the provider call.
     """
     switches_on(monkeypatch)
 
@@ -1228,31 +1185,93 @@ def test_a_stale_owners_delete_attempt_stays_auditable(
 
     outcome = runner._process(store.get(record.id), "slow-process")
 
-    assert len(writer.calls) == 1, "the DELETE did happen"
-    assert outcome.deleted is True
-    assert audit.one("PRICING_CLEANUP_STALE_OWNER")["provider_delete_attempted"] is True
+    assert writer.calls == [], "a lost claim must reach no provider write"
+    assert "PRICING_CLEANUP" not in audit.types()
+
+    stale = audit.one("PRICING_CLEANUP_STALE_OWNER")
+
+    assert stale["attempted_state"] == CleanupState.DELETE_STARTED.value
+    assert stale["provider_delete_attempted"] is False
+    assert stale["cleanup_id"] == record.id
+    assert stale["listing_id"] == BUNKERS
+    assert stale["stay_date"] == STAY
+    assert stale["approval_id"] == "ap-1"
+    assert stale["claim_token"] == "slow-process"
+    assert "lost before the provider was called" in stale["ownership"]
+
+    assert outcome.committed is False
+    assert outcome.reported_state == OWNERSHIP_LOST
+
+    # The reconciler's verdict stands, untouched.
+    settled = store.get(record.id)
+
+    assert settled.state == CleanupState.NEEDS_REVIEW.value
+    assert settled.resolution == "reconciled: the claim expired"
 
 
-def test_a_stale_owner_is_not_counted_as_a_settled_record(
+def test_a_delete_attempt_stays_auditable_even_if_the_verdict_is_refused(
     store,
     database,
-    monkeypatch,
 ):
-    """The summary the route returns must not report an uncommitted verdict."""
-    switches_on(monkeypatch)
+    """Defence in depth for a refused verdict *after* a provider call.
 
+    The boundary makes this unreachable through `_process` -- nothing clears
+    the token once a row is in DELETE_STARTED -- so `_resolve` is exercised
+    directly. If it ever did happen, the DELETE attempt is the one fact that
+    must survive: it is what someone reconstructing the night needs.
+    """
     record = active_record(store)
 
-    runner = stale_owner_runner(
+    audit = Recorder()
+
+    runner = PricingCleanupRunner(
         store,
-        database,
-        record,
         FakeReader(provider_override(record)),
         RecordingWriter(),
-        Recorder(),
+        audit=audit,
     )
 
-    summary = summarise([runner._process(store.get(record.id), "slow-process")])
+    outcome = runner._resolve(
+        record,
+        "a-token-nobody-holds",
+        CleanupState.CLEANED_UP,
+        "removed",
+        deleted=True,
+    )
+
+    assert "PRICING_CLEANUP" not in audit.types()
+
+    stale = audit.one("PRICING_CLEANUP_STALE_OWNER")
+
+    assert stale["attempted_state"] == CleanupState.CLEANED_UP.value
+    assert stale["provider_delete_attempted"] is True
+    assert outcome.committed is False
+    assert outcome.deleted is True
+    assert outcome.reported_state == OWNERSHIP_LOST
+
+
+def test_an_uncommitted_verdict_is_not_counted_as_a_settled_record(store):
+    """The summary the route returns must not report a state that did not land."""
+    record = active_record(store)
+
+    runner = PricingCleanupRunner(
+        store,
+        FakeReader(provider_override(record)),
+        RecordingWriter(),
+        audit=Recorder(),
+    )
+
+    summary = summarise(
+        [
+            runner._resolve(
+                record,
+                "a-token-nobody-holds",
+                CleanupState.CLEANED_UP,
+                "removed",
+                deleted=True,
+            )
+        ]
+    )
 
     assert summary["by_state"] == {OWNERSHIP_LOST: 1}
     assert CleanupState.CLEANED_UP.value not in summary["by_state"]
@@ -1362,3 +1381,203 @@ def test_the_unclaimed_escape_hatch_cannot_settle_a_properly_claimed_row(store):
 
     assert store.get(record.id).state == CleanupState.CLAIMED.value
     assert store.get(record.id).claim_token == "rightful-owner"
+
+
+# -- the delete boundary --------------------------------------------------
+#
+# A claim authorises *work*; DELETE_STARTED authorises the *call*. The gap
+# between them is where a stalled process used to be able to delete an override
+# somebody else had already taken over. These cover both sides of that fence.
+
+
+def test_the_boundary_holder_deletes_and_the_reconciler_leaves_it_alone(
+    store,
+    database,
+    monkeypatch,
+):
+    """B: the owner wins the boundary, so it -- and only it -- may call out."""
+    switches_on(monkeypatch)
+
+    record = active_record(store)
+
+    assert store.claim(record.id, "owner", now=NOW)
+    assert store.begin_delete(record.id, "owner") is True
+    assert store.get(record.id).state == CleanupState.DELETE_STARTED.value
+
+    # A reconciler runs while the owner is mid-call. It must find nothing.
+    later = NOW + datetime.timedelta(seconds=CLAIM_LEASE_SECONDS + 1)
+
+    other = PricingCleanupStore(database=database)
+
+    assert other.due(now=later) == []
+    assert other.expired_claims(now=later) == []
+
+    reconciler_writer = RecordingWriter()
+
+    PricingCleanupRunner(
+        other,
+        FakeReader(provider_override(record)),
+        reconciler_writer,
+    ).run_once(now=later)
+
+    assert reconciler_writer.calls == [], "DELETE_STARTED is never automation's"
+
+    # The owner completes, fenced by its own token.
+    assert store.resolve(
+        record.id,
+        CleanupState.CLEANED_UP,
+        "removed",
+        expected_token="owner",
+    )
+
+    assert store.get(record.id).state == CleanupState.CLEANED_UP.value
+
+
+def test_the_boundary_refuses_a_row_reconciliation_already_settled(store, database):
+    """E: a verdict that landed first wins, and the stale owner cannot call."""
+    record = active_record(store)
+
+    assert store.claim(record.id, "slow-process", now=NOW)
+
+    PricingCleanupStore(database=database).resolve(
+        record.id,
+        CleanupState.NEEDS_REVIEW,
+        "reconciled",
+        expected_token="slow-process",
+    )
+
+    assert store.begin_delete(record.id, "slow-process") is False
+    assert store.get(record.id).state == CleanupState.NEEDS_REVIEW.value
+
+    # And it cannot overwrite the verdict afterwards either.
+    assert (
+        store.resolve(
+            record.id,
+            CleanupState.CLEANED_UP,
+            "stale",
+            expected_token="slow-process",
+        )
+        is False
+    )
+
+
+def test_the_boundary_refuses_a_token_that_is_not_the_holders(store):
+    record = active_record(store)
+
+    assert store.claim(record.id, "owner", now=NOW)
+    assert store.begin_delete(record.id, "someone-else") is False
+    assert store.get(record.id).state == CleanupState.CLAIMED.value
+
+
+def test_a_row_abandoned_at_the_boundary_is_never_retried(
+    store,
+    database,
+    monkeypatch,
+):
+    """C and D: crashed before the call, or after it. Same answer either way.
+
+    DELETE_STARTED cannot say which, and nothing in either system can settle
+    it, so automation never touches the row again -- whatever the provider now
+    shows.
+    """
+    switches_on(monkeypatch)
+
+    # Two worlds: the override is still there (crashed before the call) and
+    # the override is gone (crashed after it). Neither may be acted on.
+    for still_present in (True, False):
+        record = active_record(store)
+
+        override = provider_override(record) if still_present else None
+
+        assert store.claim(record.id, "died-here", now=NOW)
+        assert store.begin_delete(record.id, "died-here")
+
+        later = NOW + datetime.timedelta(days=3)
+
+        writer = RecordingWriter()
+
+        outcomes = PricingCleanupRunner(
+            PricingCleanupStore(database=database),
+            FakeReader(override),
+            writer,
+        ).run_once(now=later)
+
+        assert writer.calls == [], "an ambiguous boundary is never retried"
+        assert record.id not in [o.record_id for o in outcomes]
+        assert store.get(record.id).state == CleanupState.DELETE_STARTED.value
+
+
+def test_a_row_abandoned_at_the_boundary_is_surfaced_for_a_person(store):
+    """It will never resolve itself, so it must be visible in the queue."""
+    record = active_record(store)
+
+    assert store.claim(record.id, "died-here", now=NOW)
+    assert store.begin_delete(record.id, "died-here")
+
+    later = NOW + datetime.timedelta(days=3)
+
+    assert record.id in [r.id for r in store.open_records()]
+    assert record.id in [r.id for r in store.overdue(now=later)]
+
+
+def test_the_happy_path_crosses_the_boundary_exactly_once(store, monkeypatch):
+    """F: ACTIVE -> CLAIMED -> DELETE_STARTED -> one DELETE -> CLEANED_UP."""
+    switches_on(monkeypatch)
+
+    record = active_record(store)
+
+    seen: list[str] = []
+
+    class Watching(RecordingWriter):
+        def remove_override(self, listing_id, pms, stay_date, **kw):
+            # The state at the moment the provider is called.
+            seen.append(store.get(record.id).state)
+
+            return super().remove_override(listing_id, pms, stay_date, **kw)
+
+    writer = Watching()
+
+    audit = Recorder()
+
+    outcomes = PricingCleanupRunner(
+        store,
+        FakeReader(provider_override(record)),
+        writer,
+        audit=audit,
+    ).run_once(now=NOW)
+
+    assert seen == [CleanupState.DELETE_STARTED.value], (
+        "the boundary must be committed before the provider is called"
+    )
+    assert len(writer.calls) == 1
+    assert store.get(record.id).state == CleanupState.CLEANED_UP.value
+    assert outcomes[0].committed is True
+    assert audit.types() == ["PRICING_CLEANUP"]
+
+
+def test_the_kill_switch_is_checked_before_the_boundary_is_taken(
+    store,
+    database,
+    monkeypatch,
+):
+    """A parked boundary needs a person, so don't take one we cannot use."""
+    monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
+    monkeypatch.delenv("PRICELABS_AUTOMATION_ENABLED", raising=False)
+
+    record = active_record(store)
+
+    writer = RecordingWriter()
+
+    PricingCleanupRunner(
+        PricingCleanupStore(database=database),
+        FakeReader(provider_override(record)),
+        writer,
+    ).run_once(now=NOW)
+
+    reloaded = store.get(record.id)
+
+    assert writer.calls == []
+    assert reloaded.state == CleanupState.ACTIVE.value, (
+        "the row goes back to the queue rather than parking at the boundary"
+    )
+    assert reloaded.claim_token is None

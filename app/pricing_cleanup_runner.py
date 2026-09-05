@@ -32,7 +32,7 @@ from app.pricing_cleanup import (
     PricingCleanupStore,
     check_ownership,
 )
-from app.pricing_config import bands_for
+from app.pricing_config import bands_for, writes_enabled
 
 #: Reported instead of a terminal state when this process's verdict did not
 #: land, because its claim was gone by the time it tried to write. Not a
@@ -123,6 +123,9 @@ class PricingCleanupRunner:
         A pass also reconciles claims whose lease expired. Those are **not**
         taken over and retried -- they are resolved to NEEDS_REVIEW without a
         single write. See `_reconcile`.
+
+        Rows sitting in DELETE_STARTED are touched by neither loop. They are
+        ambiguous external-write boundaries and belong to a person.
         """
         outcomes: list[CleanupOutcome] = [
             self._reconcile(record) for record in self._store.expired_claims(now=now)
@@ -271,6 +274,54 @@ class PricingCleanupRunner:
                 f"not removed: {ownership.reason}",
             )
 
+        # Nothing is gained by taking the delete boundary when we already know
+        # the write is switched off, and a row parked at that boundary needs a
+        # person. Check first, put the claim down, and let the next pass try.
+        if not (writes_enabled() and bands.automation_enabled):
+            self._store.release(record.id, token)
+
+            return CleanupOutcome(
+                record.id,
+                record.listing_id,
+                record.stay_date,
+                CleanupState.ACTIVE,
+                (
+                    "pricing writes are switched off for this listing; "
+                    "nothing was sent"
+                ),
+            )
+
+        # The fence. Everything above this line is reversible; everything below
+        # may reach a third party. A process that lost its claim while proving
+        # ownership -- because it stalled past its lease and reconciliation
+        # settled the row -- fails here and calls nothing.
+        if not self._store.begin_delete(record.id, token):
+            self._record_audit(
+                "PRICING_CLEANUP_STALE_OWNER",
+                record,
+                attempted_state=CleanupState.DELETE_STARTED.value,
+                provider_delete_attempted=False,
+                detail=(
+                    "the claim was gone before the delete boundary could be "
+                    "taken, so no removal was sent and the row was not changed "
+                    "by this process"
+                ),
+                claim_token=token,
+                ownership="lost before the provider was called",
+            )
+
+            return CleanupOutcome(
+                record.id,
+                record.listing_id,
+                record.stay_date,
+                CleanupState.DELETE_STARTED,
+                (
+                    "ownership was lost before the delete boundary; nothing "
+                    "was sent to PriceLabs"
+                ),
+                committed=False,
+            )
+
         try:
             result = self._writer.remove_override(
                 record.listing_id,
@@ -280,6 +331,9 @@ class PricingCleanupRunner:
             )
 
         except PricingWritesDisabled as exc:
+            # Defence in depth: the pre-check above should already have caught
+            # this. `_guard` is the first statement of `remove_override`, so
+            # nothing left the process and the row may safely go back.
             self._store.release(record.id, token)
 
             return CleanupOutcome(
