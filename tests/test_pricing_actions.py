@@ -1908,3 +1908,253 @@ def test_one_approvals_context_cannot_leak_into_another_execution(api, monkeypat
 
     assert rows == expected
     assert len(rows) == 2, "each execution recorded its own approval, not a shared one"
+
+
+# -- what CLEANUP_STRATEGY_VERIFIED=True actually means --------------------
+#
+# The flag records that the explicit-cleanup lifecycle was proven live on
+# 2026-09-05. It is a *verification* record, not a permission, and these hold
+# it to that. Opening it released RAISE from one gate and from nothing else:
+# two runtime switches and an individual human approval still stand between a
+# recommendation and a real listing.
+
+
+class ExplodingProvider:
+    """Fails the test on any provider contact at all, read or write."""
+
+    def __init__(self):
+        self.touched = []
+
+    def _forbid(self, what):
+        self.touched.append(what)
+
+        raise AssertionError(f"the provider was contacted: {what}")
+
+    def listings(self):
+        self._forbid("listings")
+
+    def listing_prices(self, *a, **kw):
+        self._forbid("listing_prices")
+
+    def overrides(self, *a, **kw):
+        self._forbid("overrides")
+
+    def neighborhood_data(self, *a, **kw):
+        self._forbid("neighborhood_data")
+
+    def set_override(self, *a, **kw):
+        self._forbid("set_override")
+
+    def remove_override(self, *a, **kw):
+        self._forbid("remove_override")
+
+
+def real_write_client(reader):
+    """The production write client, with a fake reader and no network.
+
+    Deliberately not `RecordingWriter`: the kill switches live in
+    `PriceLabsWriteClient._guard`, so a test double that does not implement
+    them would sail past the very control it claims to be testing. `_guard`
+    runs before any request is built, so nothing here can reach the network.
+    """
+    from app.connectors.pricelabs.write_client import PriceLabsWriteClient
+
+    return PriceLabsWriteClient(
+        reader=reader,
+        api_key_provider=lambda: (_ for _ in ()).throw(
+            AssertionError("a credential was resolved, so a request was built")
+        ),
+    )
+
+
+def test_the_verified_cleanup_gate_does_not_by_itself_permit_a_raise(
+    monkeypatch,
+    database,
+):
+    """Production defaults: the gate is open and no price can still move.
+
+    This is the whole meaning of the flag. `CLEANUP_STRATEGY_VERIFIED = True`
+    says one provider behaviour was proven; it does not say a price may move.
+    With `ENABLE_PRICING_WRITES` unset and an empty allowlist -- the shipped
+    defaults -- a perfectly valid RAISE reaches no write, and the credential
+    resolver is never even called.
+
+    **It does reach reads.** The switches are enforced at the moment of
+    writing, so a disabled RAISE still re-reads listings, prices, overrides and
+    market data before being refused. That is unchanged by this flag -- the
+    cleanup gate used to refuse RAISE earlier, so those reads never happened --
+    and it is safe, because they alter nothing. The guarantee defended here is
+    *no write*, not *no contact*.
+    """
+    monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
+    monkeypatch.delenv("PRICELABS_AUTOMATION_ENABLED", raising=False)
+
+    import app.pricing_config as config
+
+    assert config.CLEANUP_STRATEGY_VERIFIED is True
+    assert config.unverified_reason("RAISE", BUNKERS) is None, (
+        "the cleanup gate is open, so any refusal below is a different control"
+    )
+    assert config.writes_enabled() is False
+    assert not config.automation_allowlist()
+
+    reader = FakeReader()
+
+    result = tools(
+        reader,
+        real_write_client(reader),
+        store(database),
+    ).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="RAISE",
+        fingerprint=current_fingerprint(reader),
+        reason="test",
+        proposed_price=215.0,
+    )
+
+    assert result["outcome"] == WriteOutcome.CONFIRMED_FAILED.value
+    assert result["refusal"] == "WRITES_DISABLED"
+    assert "ENABLE_PRICING_WRITES" in result["message"]
+
+    # A cleanup row was written before the attempt, as the design requires,
+    # and the refusal leaves it stranded in PENDING_WRITE. Untidy, and
+    # reported -- but not dangerous, which is what is asserted here: cleanup
+    # only ever acts on ACTIVE rows, so an orphan can never produce a DELETE.
+    import datetime as _dt
+
+    cleanups = store(database)
+
+    assert cleanups.due(
+        now=_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=365)
+    ) == [], "a row for a write that never happened must never become due"
+
+
+def test_a_disabled_raise_is_refused_by_the_switch_and_not_by_the_gate(
+    monkeypatch,
+    database,
+):
+    """Name the control that actually stopped it.
+
+    A refusal reading UNVERIFIED_BEHAVIOUR here would mean the cleanup gate
+    was still shut and this flag had not taken effect; WRITES_DISABLED means
+    the gate opened and the kill switch is what holds. Distinguishing them is
+    the difference between two safety controls that look identical from
+    outside.
+    """
+    monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
+    monkeypatch.delenv("PRICELABS_AUTOMATION_ENABLED", raising=False)
+
+    reader = FakeReader()
+
+    result = tools(
+        reader,
+        real_write_client(reader),
+        store(database),
+    ).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="RAISE",
+        fingerprint=current_fingerprint(reader),
+        reason="test",
+        proposed_price=215.0,
+    )
+
+    assert result["refusal"] == "WRITES_DISABLED"
+
+
+def test_the_global_switch_alone_is_not_enough_for_a_raise(monkeypatch, database):
+    """Two switches, independent. The listing allowlist is the second."""
+    monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
+    monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", "")
+
+    reader = FakeReader()
+
+    result = tools(
+        reader,
+        real_write_client(reader),
+        store(database),
+    ).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="RAISE",
+        fingerprint=current_fingerprint(reader),
+        reason="test",
+        proposed_price=215.0,
+    )
+
+    assert result["refusal"] == "WRITES_DISABLED"
+    assert "not enabled for this listing" in result["message"]
+
+
+def test_a_raise_still_needs_an_approval_even_with_the_switches_on(
+    api,
+    monkeypatch,
+):
+    """Switches on is not the same as executable.
+
+    `apply_pricing_action` is DANGEROUS, so `ToolRegistry.execute` raises
+    `ApprovalRequired` and the run parks. Submitting is not executing: the
+    write happens only after a person resolves that specific approval.
+    """
+    monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
+    monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
+
+    import app.pricing_config as config
+
+    assert config.CLEANUP_STRATEGY_VERIFIED is True
+    assert config.writes_enabled() is True
+
+    writer = RecordingWriter()
+
+    reader = install_pricing_tool(api, writer)
+
+    response = submit(api, reader, action="RAISE", price=215.0)
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["status"] == "WAITING_FOR_APPROVAL"
+    assert body["approval_required"]["risk"] == "DANGEROUS"
+    assert body["approval_required"]["arguments"]["action"] == "RAISE"
+    assert writer.calls == [], "submitting must not execute"
+
+    tool = api.module.tool_registry.get(APPLY_PRICING_ACTION_TOOL)
+
+    assert tool.model_callable is False, "the model is never told this exists"
+
+
+def test_lower_is_blocked_for_every_property_before_any_provider_access(
+    monkeypatch,
+    database,
+):
+    """All seven, by the channel gate, and refused before a single read.
+
+    Held per listing rather than spot-checked: the Booking.com exposure is a
+    per-property fact, and a future listing that did not sell there would be a
+    deliberate change to this list rather than a silent one.
+    """
+    monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
+    monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", "")
+
+    import app.pricing_config as config
+
+    assert config.BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED is False
+    assert len(config.BANDS) == 7
+
+    for band in config.BANDS:
+        provider = ExplodingProvider()
+
+        result = tools(provider, provider, store(database)).apply_pricing_action(
+            listing_id=band.listing_id,
+            stay_date="2026-09-20",
+            action="LOWER",
+            fingerprint="whatever",
+            reason="test",
+            proposed_price=band.hard_floor + 1,
+        )
+
+        assert provider.touched == [], f"{band.slug}: provider was contacted"
+        assert result["refusal"] == "UNVERIFIED_BEHAVIOUR", band.slug
+        assert "Booking.com" in result["message"], band.slug
