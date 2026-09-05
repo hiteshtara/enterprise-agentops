@@ -54,7 +54,7 @@ this feature exists to prevent.
 | `reason_sent` | The exact `reason` string sent, marker included, so the confirming re-read can be compared byte-for-byte. |
 | `approval_id`, `run_id` | The human decision that authorised it. |
 | `created_at` | When AgentGuard sent it. |
-| `provider_created_at` | `created_at` as PriceLabs reported it on the confirming re-read. |
+| `provider_created_at` | `created_at` as PriceLabs reported it on the confirming re-read. **Mandatory** for anything V2 wrote — see below. |
 | `cleanup_at` | When the override must be removed. Explicit, not derived at read time. |
 | `state` | See §4. |
 | `resolved_at`, `resolution` | How it ended. |
@@ -90,6 +90,20 @@ not own. A namespaced id cannot collide by accident.
 
 The token goes first so that any provider-side truncation removes the
 human-readable tail rather than the identity.
+
+### `provider_created_at` is mandatory before a row may become ACTIVE
+
+A row without one could only ever satisfy three of the four checks. Admitting
+it to `ACTIVE` would create a record held to a quietly weaker standard than its
+neighbours, with nothing downstream saying so.
+
+So if the confirming re-read cannot supply a creation time, the row goes
+straight to `NEEDS_REVIEW` with the override still in place, and `mark_active`
+returns the state actually reached so a caller cannot assume success. Cleanup
+refuses such a row too, as defence in depth.
+
+The adopted pre-V2 row is exempt from the *marker*, not from this: it carries a
+`provider_created_at` taken from the audit record.
 
 ### The four checks
 
@@ -150,25 +164,240 @@ a test override and observing whether `updated_at` moves.
                      ACTIVE  ------------------------- cleanup_at reached
                         |                                      |
         override vanished before cleanup                       v
-        (guest booked / human removed)                  ownership check
-                        |                                /            \
-                        v                          matches          differs
-                    VANISHED                          |                 |
-                                                      v                 v
-                                                 DELETE once       NEEDS_REVIEW
-                                                      |
-                                            re-read to confirm
-                                              /            \
-                                         absent           present
-                                            |                 |
-                                            v                 v
-                                       CLEANED_UP        NEEDS_REVIEW
+        (guest booked / human removed)              atomic claim (CAS)
+                        |                            /               \
+                        v                        won                lost
+                    VANISHED                      |                   |
+                                                  v                   v
+                                              CLAIMED           do nothing
+                                                  |             (no read,
+                                          provider re-read       no write)
+                                                  |
+                                           ownership check
+                                            /            \
+                                       matches          differs
+                                          |                 |
+                                          v                 v
+                              CAS: CLAIMED + my token   NEEDS_REVIEW
+                                   -> DELETE_STARTED
+                                    /            \
+                                 won             lost
+                                  |               |
+                                  v               v
+                            DELETE once     send nothing
+                                  |         (OWNERSHIP_LOST)
+                        re-read to confirm
+                          /            \
+                     absent           present
+                        |                 |
+                        v                 v
+                   CLEANED_UP        NEEDS_REVIEW
+
+
+  CLAIMED, lease expired, nobody released it
+                        |
+                        v
+              reconciliation: read for diagnosis only
+                        |
+                        v
+                  NEEDS_REVIEW          <-- never a second DELETE
 ```
 
 Plus `UNKNOWN_CLEANUP_STATE` when the DELETE's outcome cannot be established —
 never retried, always surfaced.
 
 Terminal states: `CLEANED_UP`, `VANISHED`, `NEEDS_REVIEW`, `UNKNOWN_CLEANUP_STATE`.
+`CLAIMED` and `DELETE_STARTED` are the two non-terminal states a row can sit in
+during a pass. A row left in `DELETE_STARTED` is never resolved by automation
+and waits for a person.
+
+---
+
+## 4a. Concurrency: one obligation, at most one automatic DELETE
+
+Two things drive the runner — `POST /pricing/cleanup/run` and the hourly
+`app.pricing_cleanup_job` — and neither knows about the other. They can run at
+the same moment, in different processes, on different hosts. Without
+coordination both would select the same due row, both would prove ownership
+against the same override, and both would send a DELETE. The second one is the
+dangerous half: if a person re-pinned that date in between, it destroys their
+pin.
+
+**`due()` is not permission.** It returns a candidate set, and two callers get
+the same list. That is expected and safe, because selecting a row grants
+nothing.
+
+**The claim is the gate, and it is one atomic `UPDATE`.**
+
+```sql
+UPDATE pricing_cleanups
+   SET state='CLAIMED', claim_token=?, claimed_at=?, lease_until=?
+ WHERE id = ? AND state='ACTIVE'
+```
+
+The `WHERE` is the compare, the `SET` is the swap. Concurrent callers both
+reach the database and exactly one matches a row; the loser sees `rowcount = 0`
+and does nothing. This is durable state, not a Python lock, a module global or
+a single-instance assumption — it holds across processes, hosts and any future
+AWS instances.
+
+**The claim precedes the provider read, not the DELETE.** A loser therefore
+never reads, so two processes can never simultaneously hold an ownership proof
+for the same override.
+
+### The delete boundary: `DELETE_STARTED`
+
+A claim authorises *work*. It does not authorise the *call*.
+
+The claim alone leaves one hazard open. A process can claim a row, read the
+provider, prove ownership, then stall past its lease. Reconciliation settles
+the row to `NEEDS_REVIEW`, a person starts acting on it — and then the stalled
+process resumes straight into `remove_override` and deletes an override
+somebody had already taken over. Its token would stop the *verdict* from
+landing, but only after the provider call had happened.
+
+So there is a second compare-and-swap, immediately before the call:
+
+```sql
+UPDATE pricing_cleanups
+   SET state='DELETE_STARTED'
+ WHERE id = ? AND state='CLAIMED' AND claim_token = ?
+```
+
+`remove_override` is called **only if that CAS committed**. Reconciliation
+clears `claim_token`, so a row it settled fails this on both predicates and
+nothing is sent. The stale process reports `OWNERSHIP_LOST`, emits
+`PRICING_CLEANUP_STALE_OWNER` with `provider_delete_attempted: false`, and
+changes nothing.
+
+Everything above that line is reversible. Everything below it may reach a third
+party.
+
+The kill switches are checked *before* the boundary is taken, so a pass that
+cannot write puts the claim down and leaves the row `ACTIVE` rather than
+parking it at a boundary that would need a person.
+
+### A row left at the boundary belongs to a person
+
+`DELETE_STARTED` is an **ambiguous external-write boundary**. A process that
+died there may have sent its DELETE or may not, and neither system can settle
+which — the same reason a lease cannot make the call exactly-once. So:
+
+- `due()` selects `ACTIVE` only, and `expired_claims()` selects `CLAIMED` only,
+  so no automatic pass ever picks up a `DELETE_STARTED` row;
+- reconciliation never changes one, whatever the provider now shows;
+- a later pass may read the provider for diagnosis, but that reading is never
+  permission for a second automatic DELETE;
+- `open_records()` and `overdue()` both include it, because a row automation
+  will never resolve is only ever seen if it is surfaced.
+
+Once the boundary is committed, the holder records the terminal state using the
+same token — nothing can take the claim away from a `DELETE_STARTED` row, since
+reconciliation only touches `CLAIMED`.
+
+### Operational rule: a `DELETE_STARTED` row is hands off
+
+**`DELETE_STARTED` means an external DELETE may be in flight, or may already
+have been sent.** Nothing in AgentGuard can tell which, and nothing at
+PriceLabs will say.
+
+While a row is in that state:
+
+- **AgentGuard must never automatically retry it.** No pass, no schedule, no
+  backfill.
+- **AgentGuard must never offer an automatic cleanup or retry control for it.**
+  Not a button, not a menu item, not an API parameter. (There is no such
+  control today: the console has no cleanup surface at all, and
+  `POST /pricing/cleanup/run` takes no input, so nothing can be aimed at a
+  specific row.)
+- **A human reviewing a stranded `DELETE_STARTED` record must treat that stay
+  date as "hands off"** until the original worker or request is known to have
+  finished. Editing the date at the provider while a DELETE may still land is
+  the collision this whole design exists to avoid.
+- **Human review may read PriceLabs for diagnosis.** Reading is always safe;
+  it just cannot settle the question.
+- **No automated action may infer from elapsed time that another DELETE is
+  safe.** Not after an hour, not after a week. Elapsed time is not evidence
+  about an external side effect.
+
+This is an unavoidable boundary, not a gap someone forgot to close. Our
+database transaction cannot include the PriceLabs DELETE, and it cannot exclude
+a person editing the same override in the PriceLabs UI at the same moment.
+Exactly-once is therefore not available at any lease length or retry policy.
+What *is* available is never doing it twice automatically, and that is what
+`DELETE_STARTED` buys.
+
+### Expired claims fail closed
+
+A claim carries `lease_until`. When it lapses without being released, the row
+is **not** taken over and retried. It is reconciled to `NEEDS_REVIEW` with zero
+writes.
+
+The reason is that a PriceLabs DELETE cannot participate in our database
+transaction. There is no shared commit between the two systems, so when a claim
+expires we cannot distinguish a process that:
+
+- died before sending its DELETE,
+- is frozen on the line immediately before sending it,
+- sent it and died before recording the result, or
+- is simply slow and will resume.
+
+**No amount of elapsed time separates those.** A lease can bound a window; it
+can never establish that an external side effect did not happen. So exactly-once
+delete cannot be guaranteed by a lease, and a longer lease would not change
+that — lengthening it buys nothing and is not the fix.
+
+Fifteen minutes (`CLAIM_LEASE_SECONDS`) is therefore a threshold for calling a
+claim *stale*, not a licence to take it over. Stale means review.
+
+Reconciliation may read the provider, purely to describe what a person will
+find, and records that in the resolution: the override is still in place, it is
+already gone, or PriceLabs could not be reached. It never writes.
+
+`release()` is a different thing and is deliberately allowed to return a row to
+`ACTIVE`: it is the live owner putting the row down on a path where **nothing
+was sent** — the provider could not be read, or the kill switch is off. We know
+no DELETE was attempted, so the row may safely re-enter the automatic path.
+
+### Why this asymmetry
+
+A stranded AgentGuard override costs a person a few minutes clearing a queue.
+Deleting a pricing decision a person made in the meantime cannot be undone.
+`NEEDS_REVIEW` is preferred over any retry that could be destructive, and that
+preference is the design, not a limitation of it.
+
+`resolve()` takes an `expected_token` so a process whose claim lapsed cannot
+overwrite the verdict reconciliation already recorded. A settled row clears
+`claim_token` and `lease_until`, so terminal never looks like work in progress.
+
+### The audit reports what committed, not what was concluded
+
+A refused write is not the end of it: the process that lost its claim must not
+*say* it settled the row either. An event announcing `CLEANED_UP` for a row the
+database never moved would make the trail disagree with the thing it exists to
+describe.
+
+So a refused resolution emits **`PRICING_CLEANUP_STALE_OWNER`** instead of
+`PRICING_CLEANUP`, carrying `attempted_state`, `provider_delete_attempted`, the
+claim token, the detail, and the originating `approval_id` / `run_id`. The
+DELETE attempt is preserved deliberately — that side effect is real whatever
+happened to our bookkeeping afterwards, and it is exactly what someone
+reconstructing the night needs.
+
+The returned outcome reports `OWNERSHIP_LOST` rather than the state it wanted,
+and `summarise()` counts it that way, so a route response never reports a
+terminal state the row does not have. The current state is *not* substituted in
+its place: this process has not read the row back and will not guess.
+
+### `CLAIMED` implies a claim token
+
+`claim` is the only writer of `CLAIMED` and always sets a token, so a CLAIMED
+row without one is an invariant violation. If one ever appears, reconciliation
+still sends nothing to the provider and settles it through
+`resolve_unclaimed()` — its own compare-and-swap on
+`state='CLAIMED' AND claim_token IS NULL`, never an unconditional write — with
+the violation named in the resolution and the audit event. A properly claimed
+row does not match that predicate and is left alone.
 
 ---
 
@@ -224,11 +453,16 @@ trigger is inspectable and repeatable by hand.
 
 ## 7. What this does not change
 
-* `EXPIRY_SEMANTICS_VERIFIED` stays `False`.
 * `LOWER` and `RAISE` stay blocked.
-* Unblocking them requires a **separate** flag, `CLEANUP_STRATEGY_VERIFIED`,
-  set only after this design is approved, implemented, unit-tested, and
-  exercised live end to end: write → active → cleanup → confirmed removal.
+* **`CLEANUP_STRATEGY_VERIFIED` is the sole unlock.** It is set only after this
+  design is implemented, unit-tested, and exercised live end to end: write →
+  active → cleanup → confirmed removal.
+* `EXPIRY_SEMANTICS_VERIFIED` is **informational only and is not a permission**.
+  It was briefly an alternate unlock and no longer is. Provider-side expiry is
+  unowned, unobservable in the moment, and leaves no per-override audit trail;
+  even proven it would show the mechanism worked once, not that it worked for a
+  given override on a given day. A positive result is a second belt, never the
+  braces.
 * Nothing here is unattended pricing. A price still moves only when a human
   approves that exact change.
 

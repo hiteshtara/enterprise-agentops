@@ -706,6 +706,39 @@ class PricingRecommendationPage(BaseModel):
     bands: list[PricingBandsOut]
 
 
+class PricingCleanupOut(BaseModel):
+    """One cleanup record as the runner left it.
+
+    `state` is what the pass may honestly claim about the row -- the terminal
+    state when the write committed, `OWNERSHIP_LOST` when this process's claim
+    was gone before its verdict could land. `attempted_state` keeps what it
+    concluded, so a reader can see the difference rather than infer it.
+    """
+
+    id: str
+    listing_id: str
+    stay_date: str
+    state: str
+    attempted_state: str | None = None
+    committed: bool = True
+    detail: str
+
+
+class PricingCleanupRunOut(BaseModel):
+    """What one cleanup pass did.
+
+    There is no request model to pair with this, and that is the point: the
+    route takes no input at all, so a caller cannot name a listing or a date.
+    The only work a pass can do is what the store already records as owed.
+    """
+
+    processed: int
+    deleted: int
+    by_state: dict[str, int] = {}
+    ran_at: str
+    records: list[PricingCleanupOut] = []
+
+
 class PricingActionRequest(BaseModel):
     """A request to submit one recommendation for human approval.
 

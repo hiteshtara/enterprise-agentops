@@ -85,7 +85,12 @@ uv run pytest                              # full suite
 uv run pytest tests/test_agent.py::test_agent_blocks_write_tool_without_approval
 uv run ruff check .                        # lint  (ruff is a dev dep; no config = defaults)
 uv run ruff format .                       # format
+uv run python -m app.pricing_cleanup_job   # one cleanup pass; schedule hourly
 ```
+
+`pricing_cleanup_job` is the scheduled half of override cleanup and
+`POST /pricing/cleanup/run` is the operator half; both drive the single
+`pricelabs_cleanup_runner` built in `main.py`. Never add a second one.
 
 ```bash
 cd frontend && npm install

@@ -17,6 +17,7 @@ from app.connectors.pricelabs.write_client import (
     PricingWritesDisabled,
     WriteOutcome,
 )
+from app.pricing_cleanup import CleanupState
 from app.pricing_config import MAX_CHANGE_PER_RUN, PricingBands, bands_for
 from app.pricing_policy import (
     Confidence,
@@ -29,6 +30,7 @@ from app.pricing_policy import (
     finalise,
     fingerprint,
 )
+from app.tool_registry import ExecutionContext
 
 STAY = datetime.date(2026, 9, 20)
 
@@ -394,8 +396,26 @@ class RecordingWriter:
         return self._result(stay_date, 109.0, None)
 
 
-def tools(reader, writer):
-    return PriceLabsPricingTools(reader=reader, writer=writer, pms="lodgify")
+def store(database):
+    from app.pricing_cleanup import PricingCleanupStore
+
+    return PricingCleanupStore(database=database)
+
+
+def tools(reader, writer, cleanups=None):
+    """A price-setting write now needs a cleanup store, by design.
+
+    An override nobody recorded is the stranded pin the whole cleanup design
+    exists to prevent, so the tool refuses to write one. Tests that exercise a
+    LOWER or RAISE therefore pass a store; `test_a_price_write_without_a_cleanup_
+    store_is_refused` covers the absence.
+    """
+    return PriceLabsPricingTools(
+        reader=reader,
+        writer=writer,
+        pms="lodgify",
+        cleanups=cleanups,
+    )
 
 
 def current_fingerprint(reader, stay="2026-09-20"):
@@ -425,6 +445,7 @@ def verified(monkeypatch):
     """Treat the provider behaviours as proven, for tests about other things."""
     import app.pricing_config as config
 
+    monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
     monkeypatch.setattr(config, "EXPIRY_SEMANTICS_VERIFIED", True)
     monkeypatch.setattr(config, "DELETE_ENDPOINT_VERIFIED", True)
 
@@ -432,7 +453,7 @@ def verified(monkeypatch):
 # -- staleness -------------------------------------------------------------
 
 
-def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch):
+def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch, database):
     verified(monkeypatch)
 
     reader = FakeReader(price=200.0)
@@ -443,7 +464,7 @@ def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch):
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -479,7 +500,7 @@ def test_a_pin_that_changed_after_the_recommendation_refuses_execution(monkeypat
     assert writer.calls == []
 
 
-def test_stale_pricelabs_data_refuses_execution(monkeypatch):
+def test_stale_pricelabs_data_refuses_execution(monkeypatch, database):
     verified(monkeypatch)
 
     old = (
@@ -490,7 +511,7 @@ def test_stale_pricelabs_data_refuses_execution(monkeypatch):
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -503,14 +524,14 @@ def test_stale_pricelabs_data_refuses_execution(monkeypatch):
     assert writer.calls == []
 
 
-def test_provider_unavailable_refuses_execution(monkeypatch):
+def test_provider_unavailable_refuses_execution(monkeypatch, database):
     verified(monkeypatch)
 
     reader = FakeReader(fail=True)
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -526,7 +547,7 @@ def test_provider_unavailable_refuses_execution(monkeypatch):
 # -- outcomes --------------------------------------------------------------
 
 
-def test_an_approved_action_sends_exactly_one_write(monkeypatch):
+def test_an_approved_action_sends_exactly_one_write(monkeypatch, database):
     enable(monkeypatch)
 
     reader = FakeReader(price=200.0)
@@ -535,7 +556,7 @@ def test_an_approved_action_sends_exactly_one_write(monkeypatch):
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -570,7 +591,7 @@ def test_remove_pin_sends_a_removal_and_nothing_else(monkeypatch):
     assert writer.calls == [("remove", BUNKERS, "2026-09-20")]
 
 
-def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch):
+def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch, database):
     from app.connectors.pricelabs.write_client import WriteResult
 
     enable(monkeypatch)
@@ -587,7 +608,7 @@ def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch):
         )
     )
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -600,7 +621,7 @@ def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch):
     assert result["needs_human"] is False
 
 
-def test_an_ambiguous_send_is_unknown_and_is_never_retried(monkeypatch):
+def test_an_ambiguous_send_is_unknown_and_is_never_retried(monkeypatch, database):
     enable(monkeypatch)
 
     reader = FakeReader()
@@ -609,7 +630,7 @@ def test_an_ambiguous_send_is_unknown_and_is_never_retried(monkeypatch):
 
     writer = RecordingWriter(raises=PriceLabsUnavailable("timeout"))
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -657,7 +678,7 @@ def test_every_listing_ships_with_automation_off():
     assert all(not band.automation_enabled for band in BANDS)
 
 
-def test_the_kill_switch_is_off_unless_exactly_true(monkeypatch):
+def test_the_kill_switch_is_off_unless_exactly_true(monkeypatch, database):
     from app.pricing_config import writes_enabled
 
     for value in ("", "false", "1", "yes", "TRUE ", "on"):
@@ -666,7 +687,7 @@ def test_the_kill_switch_is_off_unless_exactly_true(monkeypatch):
         assert writes_enabled() is (value.strip().lower() == "true")
 
 
-def test_a_disabled_switch_surfaces_as_a_refusal_not_a_crash(monkeypatch):
+def test_a_disabled_switch_surfaces_as_a_refusal_not_a_crash(monkeypatch, database):
     verified(monkeypatch)
 
     monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
@@ -677,7 +698,7 @@ def test_a_disabled_switch_surfaces_as_a_refusal_not_a_crash(monkeypatch):
 
     real = PriceLabsWriteClient(reader=reader, api_key_provider=lambda: "k")
 
-    result = tools(reader, real).apply_pricing_action(
+    result = tools(reader, real, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -724,7 +745,7 @@ def test_the_pricing_write_is_dangerous_and_needs_approval(registry):
 # -- the approval flow -----------------------------------------------------
 
 
-def install_pricing_tool(api, writer, reader=None):
+def install_pricing_tool(api, writer, reader=None, cleanups=None):
     """Register a recording pricing tool on the running app.
 
     Mirrors production wiring: DANGEROUS and not model-callable, so approval is
@@ -734,7 +755,9 @@ def install_pricing_tool(api, writer, reader=None):
 
     reader = reader or FakeReader()
 
-    tool = apply_pricing_action_tool(tools(reader, writer))
+    tool = apply_pricing_action_tool(
+        tools(reader, writer, cleanups or store(api.module.database))
+    )
 
     api.module.tool_registry.register(tool)
 
@@ -1074,7 +1097,7 @@ def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(monkeypatch):
         )
 
         assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
-        assert "lead_time_expiry" in result["message"]
+        assert "explicit cleanup lifecycle" in result["message"]
 
     assert writer.calls == [], "no write may reach PriceLabs while this is open"
 
@@ -1157,7 +1180,7 @@ def test_the_block_is_surfaced_on_the_recommendation(monkeypatch):
 
     assert payload["actionable"] is True
     assert payload["blocked_reason"] is not None
-    assert "lead_time_expiry" in payload["blocked_reason"]
+    assert "explicit cleanup lifecycle" in payload["blocked_reason"]
 
 
 def test_an_informational_recommendation_carries_no_block():
@@ -1277,3 +1300,554 @@ def test_once_the_pin_is_gone_the_card_is_gone():
 
     assert after.action is not PriceAction.REMOVE_PIN
     assert not after.is_actionable or after.action is not PriceAction.REMOVE_PIN
+
+
+def test_a_price_write_without_a_cleanup_store_is_refused(monkeypatch):
+    """No store means no way to record the obligation, so no write happens.
+
+    An override nobody recorded is exactly the stranded pin the cleanup design
+    exists to prevent, so the absence of a store is a refusal rather than a
+    write that quietly skips its bookkeeping.
+    """
+    enable(monkeypatch)
+
+    reader = FakeReader()
+
+    stamp = current_fingerprint(reader)
+
+    writer = RecordingWriter()
+
+    result = tools(reader, writer, cleanups=None).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="LOWER",
+        fingerprint=stamp,
+        reason="test",
+        proposed_price=190.0,
+    )
+
+    assert result["refusal"] == "NO_CLEANUP_STORE"
+    assert writer.calls == []
+
+
+def test_a_price_write_records_its_cleanup_row_before_sending(monkeypatch, database):
+    """The row must exist first, not be written after a successful send."""
+    enable(monkeypatch)
+
+    cleanups = store(database)
+
+    reader = FakeReader()
+
+    stamp = current_fingerprint(reader)
+
+    seen: list[int] = []
+
+    class Watching(RecordingWriter):
+        def set_override(self, *args, **kwargs):
+            # How many rows exist at the moment the write is attempted.
+            seen.append(len(cleanups.open_records()))
+
+            return super().set_override(*args, **kwargs)
+
+    tools(reader, Watching(), cleanups).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="LOWER",
+        fingerprint=stamp,
+        reason="test",
+        proposed_price=190.0,
+    )
+
+    assert seen == [1], "the cleanup row must already exist when the write goes out"
+
+
+# -- the cleanup row a price write must leave behind ----------------------
+
+
+def confirming_writer(created="2026-09-05T09:00:00.000Z", updated=None, intact=True):
+    """A writer whose confirming re-read behaves like a real PriceLabs create."""
+    from app.connectors.pricelabs.write_client import WriteResult
+
+    class Confirming(RecordingWriter):
+        def set_override(self, listing_id, pms, stay_date, price, **kw):
+            self.calls.append(("set", listing_id, stay_date, price))
+            self.reason = kw.get("reason")
+
+            return WriteResult(
+                outcome=WriteOutcome.CONFIRMED_APPLIED,
+                message="applied",
+                stay_date=stay_date,
+                old_price=None,
+                new_price=price,
+                provider_created_at=created,
+                provider_updated_at=created if updated is None else updated,
+                reason_intact=intact,
+            )
+
+    return Confirming()
+
+
+def write_once(monkeypatch, database, writer, action="LOWER", price=190.0):
+    enable(monkeypatch)
+
+    cleanups = store(database)
+
+    reader = FakeReader()
+
+    stamp = current_fingerprint(reader)
+
+    result = tools(reader, writer, cleanups).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action=action,
+        fingerprint=stamp,
+        reason="near-term vacancy",
+        proposed_price=price,
+        context=ExecutionContext(run_id="run-77", approval_id="ap-77"),
+    )
+
+    return result, cleanups
+
+
+def test_the_reason_sent_carries_this_row_s_own_marker(monkeypatch, database):
+    """The token in the provider's `reason` is the record's uuid, exactly.
+
+    Ownership a week later rests entirely on this equality: a marker that
+    belonged to some other row, or was reformatted, would leave the override
+    unprovable and therefore unremovable.
+    """
+    from app.pricing_cleanup import build_reason, marker_of
+
+    writer = confirming_writer()
+
+    _, cleanups = write_once(monkeypatch, database, writer)
+
+    rows = cleanups.open_records()
+
+    assert len(rows) == 1
+
+    record = rows[0]
+
+    assert marker_of(writer.reason) == record.marker == record.id
+    assert writer.reason == build_reason(record.marker, "near-term vacancy")
+    assert record.state == CleanupState.ACTIVE.value
+
+
+def test_a_reason_the_provider_altered_needs_review(monkeypatch, database):
+    """The marker did not survive, so the override could never be proven ours.
+
+    Caught seconds after the write rather than a week later when cleanup
+    refuses -- and the row is parked, so no automatic removal is ever tried.
+    """
+    result, cleanups = write_once(
+        monkeypatch,
+        database,
+        confirming_writer(intact=False),
+    )
+
+    record = cleanups.open_records()[0]
+
+    assert record.state == CleanupState.NEEDS_REVIEW.value
+    assert result["needs_human"] is True
+    assert "needs a person" in result["message"]
+
+    # Far enough ahead that an ACTIVE row would certainly be due. A parked one
+    # never is, which is what stops cleanup ever touching this override.
+    assert cleanups.due(now=datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC)) == []
+
+
+def test_a_write_with_no_provider_creation_time_needs_review(monkeypatch, database):
+    result, cleanups = write_once(
+        monkeypatch,
+        database,
+        confirming_writer(created=None),
+    )
+
+    assert cleanups.open_records()[0].state == CleanupState.NEEDS_REVIEW.value
+    assert result["needs_human"] is True
+
+
+def test_a_write_onto_an_existing_override_needs_review(monkeypatch, database):
+    """`updated_at != created_at`: modified, not created."""
+    result, cleanups = write_once(
+        monkeypatch,
+        database,
+        confirming_writer(updated="2026-09-05T09:07:00.000Z"),
+    )
+
+    assert cleanups.open_records()[0].state == CleanupState.NEEDS_REVIEW.value
+    assert result["needs_human"] is True
+
+
+def test_the_cleanup_row_records_the_approval_that_authorised_the_write(
+    monkeypatch,
+    database,
+):
+    """Unit-level: given a context, the row records it.
+
+    Necessary but **not sufficient**, and the live proof on 2026-09-05 is why:
+    this passed while production wrote `None` for both ids, because nothing
+    was supplying the context. `test_the_production_path_records_the_real_
+    approval_and_run` is what proves the runtime actually does.
+    """
+    _, cleanups = write_once(monkeypatch, database, confirming_writer())
+
+    record = cleanups.open_records()[0]
+
+    assert record.approval_id == "ap-77"
+    assert record.run_id == "run-77"
+    assert record.stay_date == "2026-09-20"
+    assert record.new_price == 190.0
+
+
+# -- the operator route ---------------------------------------------------
+
+
+class RecordingRunner:
+    """Stands in for the real runner, so the route's own behaviour is visible."""
+
+    def __init__(self, outcomes=None, raises=None):
+        self.calls = []
+        self.outcomes = outcomes or []
+        self.raises = raises
+
+    def run_once(self, now=None):
+        self.calls.append(now)
+
+        if self.raises:
+            raise self.raises
+
+        return self.outcomes
+
+
+def install_runner(api, runner):
+    api.module.pricelabs_cleanup_runner = runner
+
+    return runner
+
+
+def test_the_cleanup_route_drives_the_runner_and_nothing_else(api):
+    """One implementation. The route is a handle on it, not a second copy."""
+    runner = install_runner(api, RecordingRunner())
+
+    response = api.client("ADMIN").post("/pricing/cleanup/run")
+
+    assert response.status_code == 200
+    assert len(runner.calls) == 1
+    assert response.json() == {
+        "processed": 0,
+        "deleted": 0,
+        "by_state": {},
+        "ran_at": response.json()["ran_at"],
+        "records": [],
+    }
+
+
+def test_the_cleanup_route_cannot_be_aimed_at_a_date(api):
+    """No listing, no date, no record id -- the route takes no input at all.
+
+    A body naming a night is ignored entirely, because there is no parameter
+    for it to bind to. The only work a pass can do is what the store already
+    holds as owed.
+    """
+    runner = install_runner(api, RecordingRunner())
+
+    response = api.client("ADMIN").post(
+        "/pricing/cleanup/run",
+        json={
+            "listing_id": BUNKERS,
+            "stay_date": "2026-12-25",
+            "record_id": "anything",
+        },
+    )
+
+    assert response.status_code == 200
+    assert runner.calls == [None], "the route passes no target of any kind"
+
+
+def test_the_cleanup_route_requires_administer(api):
+    runner = install_runner(api, RecordingRunner())
+
+    for role in ("VIEWER", "OPERATOR", "APPROVER"):
+        assert api.client(role).post("/pricing/cleanup/run").status_code == 403
+
+    assert runner.calls == [], "no pass may run for a role that lacks the permission"
+
+
+def test_the_cleanup_route_reports_what_the_pass_did(api):
+    from app.pricing_cleanup import CleanupState
+    from app.pricing_cleanup_runner import CleanupOutcome
+
+    install_runner(
+        api,
+        RecordingRunner(
+            outcomes=[
+                CleanupOutcome(
+                    record_id="c-1",
+                    listing_id=BUNKERS,
+                    stay_date="2026-09-20",
+                    state=CleanupState.CLEANED_UP,
+                    detail="removed",
+                    deleted=True,
+                )
+            ]
+        ),
+    )
+
+    body = api.client("ADMIN").post("/pricing/cleanup/run").json()
+
+    assert body["processed"] == 1
+    assert body["deleted"] == 1
+    assert body["by_state"] == {"CLEANED_UP": 1}
+    assert body["records"][0]["id"] == "c-1"
+
+
+def test_the_cleanup_route_is_unavailable_without_a_connector(api):
+    api.module.pricelabs_cleanup_runner = None
+
+    assert api.client("ADMIN").post("/pricing/cleanup/run").status_code == 503
+
+
+def test_a_provider_outage_surfaces_as_a_gateway_error_not_a_trace(api):
+    install_runner(api, RecordingRunner(raises=PriceLabsUnavailable("down")))
+
+    response = api.client("ADMIN").post("/pricing/cleanup/run")
+
+    assert response.status_code == 502
+    assert "down" not in response.json()["detail"]
+
+
+def test_the_hourly_job_drives_the_same_runner_as_the_route(api, capsys):
+    """The job is a scheduler's handle on the one runner, not a second path."""
+    from app.pricing_cleanup_job import main as run_job
+
+    runner = install_runner(api, RecordingRunner())
+
+    assert run_job() == 0
+    assert len(runner.calls) == 1
+
+    import json as _json
+
+    assert _json.loads(capsys.readouterr().out)["processed"] == 0
+
+
+def test_the_hourly_job_reports_an_outage_without_pretending_it_ran(api, capsys):
+    install_runner(api, RecordingRunner(raises=PriceLabsUnavailable("down")))
+
+    from app.pricing_cleanup_job import main as run_job
+
+    assert run_job() == 1
+    assert capsys.readouterr().out == ""
+
+
+# -- execution context, through the path production actually uses ---------
+
+
+def test_the_production_path_records_the_real_approval_and_run(api, monkeypatch):
+    """The whole chain, end to end, with nothing hand-fed.
+
+    request_action -> approval created -> approval granted -> ToolRegistry
+    .execute -> apply_pricing_action -> record_intent, then the cleanup runner
+    and its audit event. No test supplies an approval id anywhere; the ids
+    asserted below are the ones the runtime minted.
+
+    This exists because the unit-level version passed while production wrote
+    `None` for both. A test that hands a function the value it is meant to
+    obtain from elsewhere proves the parameter works, not that anything uses
+    it -- and the live proof on 2026-09-05 is where that showed up, on a real
+    override against a real listing.
+    """
+    enable(monkeypatch)
+
+    cleanups = store(api.module.database)
+
+    writer = confirming_writer()
+
+    reader = install_pricing_tool(api, writer, cleanups=cleanups)
+
+    submitted = submit(api, reader, action="LOWER", price=190.0).json()
+
+    run_id = submitted["run_id"]
+    approval_id = submitted["approval_required"]["approval_id"]
+
+    assert run_id and approval_id
+
+    # The stored arguments are the business ones only. Neither id is in them.
+    from app.db_models import ApprovalRecord
+
+    with api.module.database.session() as session:
+        stored = session.get(ApprovalRecord, approval_id).arguments
+
+    assert set(stored) == {
+        "listing_id",
+        "stay_date",
+        "action",
+        "proposed_price",
+        "fingerprint",
+        "reason",
+    }
+
+    resolved = api.client("ADMIN").post(
+        f"/agent/approvals/{approval_id}",
+        json={"approved": True},
+    )
+
+    assert resolved.status_code == 200
+
+    rows = cleanups.open_records()
+
+    assert len(rows) == 1
+
+    record = rows[0]
+
+    assert record.state == CleanupState.ACTIVE.value
+    assert record.approval_id == approval_id
+    assert record.run_id == run_id
+
+    # ...and the cleanup that eventually removes the override carries them too.
+    from app.pricing_cleanup_runner import PricingCleanupRunner
+
+    class Reader:
+        def overrides(self, listing_id, pms):
+            return [
+                {
+                    "date": record.stay_date,
+                    "price": str(round(record.new_price)),
+                    "reason": record.reason_sent,
+                    "created_at": record.provider_created_at,
+                    "updated_at": record.provider_created_at,
+                }
+            ]
+
+    import datetime as _dt
+
+    cleanups._update(
+        record.id,
+        cleanup_at=(
+            _dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=1)
+        ).isoformat(),
+    )
+
+    PricingCleanupRunner(
+        cleanups,
+        Reader(),
+        RemovingWriter(),
+        audit=api.module.audit_store,
+    ).run_once()
+
+    events = [
+        e
+        for e in api.module.audit_store.list_events(limit=200)
+        if e["event_type"] == "PRICING_CLEANUP"
+    ]
+
+    assert len(events) == 1
+    assert events[0]["details"]["approval_id"] == approval_id
+    assert events[0]["run_id"] == run_id
+
+
+class RemovingWriter(RecordingWriter):
+    def remove_override(self, listing_id, pms, stay_date, **kw):
+        from app.connectors.pricelabs.write_client import WriteResult
+
+        self.calls.append(("remove", listing_id, stay_date))
+
+        return WriteResult(
+            outcome=WriteOutcome.CONFIRMED_APPLIED,
+            message="removed",
+            stay_date=stay_date,
+        )
+
+
+def test_the_model_is_never_told_the_context_exists():
+    """Neither id is a schema property, so nothing can propose one."""
+    from app.connectors.pricelabs.pricing_tools import APPLY_PRICING_ACTION_SCHEMA
+
+    properties = APPLY_PRICING_ACTION_SCHEMA["properties"]
+
+    assert "approval_id" not in properties
+    assert "run_id" not in properties
+    assert "context" not in properties
+    assert APPLY_PRICING_ACTION_SCHEMA["additionalProperties"] is False
+
+
+def test_a_caller_cannot_occupy_the_context_slot():
+    """`context` in the arguments is refused, not merged and not ignored.
+
+    Ignoring it would be safe today and a trap later: a future tool reading
+    `arguments["context"]` would silently trust a caller-supplied value.
+    """
+    from app.tool_registry import ExecutionContext, Tool, ToolRegistry, ToolRisk
+
+    seen = {}
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="ctx",
+            description="d",
+            function=lambda context=None: seen.setdefault("ctx", context),
+            parameters={"type": "object", "properties": {}},
+            risk=ToolRisk.READ,
+            wants_context=True,
+        )
+    )
+
+    with pytest.raises(ValueError, match="execution context"):
+        registry.execute(
+            "ctx",
+            {"context": ExecutionContext(approval_id="forged")},
+        )
+
+    assert seen == {}, "nothing may run once a caller has tried to forge context"
+
+
+def test_a_tool_that_did_not_opt_in_is_never_handed_context():
+    from app.tool_registry import ExecutionContext, Tool, ToolRegistry, ToolRisk
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="plain",
+            description="d",
+            function=lambda: "ok",
+            parameters={"type": "object", "properties": {}},
+            risk=ToolRisk.READ,
+        )
+    )
+
+    # Would raise TypeError if the context were passed to a tool taking none.
+    assert registry.execute("plain", {}, context=ExecutionContext(run_id="r")) == "ok"
+
+
+def test_one_approvals_context_cannot_leak_into_another_execution(api, monkeypatch):
+    """Two approvals, two rows, each naming its own decision."""
+    enable(monkeypatch)
+
+    cleanups = store(api.module.database)
+
+    reader = install_pricing_tool(api, confirming_writer(), cleanups=cleanups)
+
+    first = submit(api, reader, action="LOWER", price=190.0).json()
+
+    api.client("ADMIN").post(
+        f"/agent/approvals/{first['approval_required']['approval_id']}",
+        json={"approved": True},
+    )
+
+    second = submit(api, reader, action="LOWER", price=191.0).json()
+
+    api.client("ADMIN").post(
+        f"/agent/approvals/{second['approval_required']['approval_id']}",
+        json={"approved": True},
+    )
+
+    rows = {r.approval_id: r.run_id for r in cleanups.open_records()}
+
+    expected = {
+        first["approval_required"]["approval_id"]: first["run_id"],
+        second["approval_required"]["approval_id"]: second["run_id"],
+    }
+
+    assert rows == expected
+    assert len(rows) == 2, "each execution recorded its own approval, not a shared one"

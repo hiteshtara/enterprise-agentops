@@ -128,6 +128,7 @@ from app.models import (
     Overview,
     PricingActionRequest,
     PricingBandsOut,
+    PricingCleanupRunOut,
     PricingRecommendation,
     PricingRecommendationPage,
     ReconcileResponse,
@@ -144,6 +145,8 @@ from app.observability_store import (
     ToolExecutionStore,
 )
 from app.overview import OverviewService
+from app.pricing_cleanup import PricingCleanupStore
+from app.pricing_cleanup_runner import PricingCleanupRunner, summarise
 from app.pricing_config import (
     MAX_CHANGE_PER_RUN,
     bands_for,
@@ -247,15 +250,45 @@ pricelabs_recommendations = (
     else None
 )
 
+# One write client, shared by the approved-action path and by cleanup. They
+# are the same capability -- an override write -- and giving cleanup its own
+# client would mean two objects that could drift on which switches they check.
+pricelabs_write_client = (
+    PriceLabsWriteClient(
+        reader=pricelabs_client,
+        api_key_provider=resolve_pricelabs_api_key,
+    )
+    if pricelabs_client is not None
+    else None
+)
+
+# Durable record of every temporary override AgentGuard owes a cleanup for.
+# Always constructed, even with no PriceLabs connector: the obligations
+# outlive any one process, and a store that disappears when a credential does
+# would lose the record of a pin that is still live at the provider.
+pricelabs_cleanups = PricingCleanupStore(database=database)
+
 # The write path. Registered as a DANGEROUS, non-model-callable tool, and
 # inert until both ENABLE_PRICING_WRITES and the listing's own switch are on.
 pricelabs_pricing_tools = (
     PriceLabsPricingTools(
         reader=pricelabs_client,
-        writer=PriceLabsWriteClient(
-            reader=pricelabs_client,
-            api_key_provider=resolve_pricelabs_api_key,
-        ),
+        writer=pricelabs_write_client,
+        cleanups=pricelabs_cleanups,
+    )
+    if pricelabs_client is not None
+    else None
+)
+
+# Executes owed cleanups. Holds no schedule of its own -- `run_once` is driven
+# either by the operator route below or by the hourly job in
+# `app.pricing_cleanup_job`, both of which reach this same object.
+pricelabs_cleanup_runner = (
+    PricingCleanupRunner(
+        store=pricelabs_cleanups,
+        reader=pricelabs_client,
+        writer=pricelabs_write_client,
+        audit=audit_store,
     )
     if pricelabs_client is not None
     else None
@@ -1848,6 +1881,48 @@ def get_pricing_recommendations(
         ],
         bands=[PricingBandsOut(**row) for row in bands_payload()],
     )
+
+
+@app.post(
+    "/pricing/cleanup/run",
+    response_model=PricingCleanupRunOut,
+)
+def run_pricing_cleanup(
+    user: User = Depends(require_administer),
+) -> PricingCleanupRunOut:
+    """Run one cleanup pass over the overrides AgentGuard already owes.
+
+    **It takes no input, deliberately.** There is no listing, no date and no
+    record id to supply, so nobody can aim this at a night of their choosing.
+    The only work a pass can do is what the store already holds as an ACTIVE
+    row whose `cleanup_at` has arrived -- an obligation created earlier by a
+    human-approved write.
+
+    Cleanup removes; it can never set a price. It needs no second approval,
+    because it restores a date to where it was before a change someone already
+    authorised. It still sits behind both kill switches, still proves ownership
+    against the recorded marker before sending anything, and still never
+    retries an ambiguous DELETE.
+
+    This is the operator's manual handle on exactly the same runner the hourly
+    job drives. There is one implementation, and both reach it.
+    """
+    if pricelabs_cleanup_runner is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PRICING_UNAVAILABLE,
+        )
+
+    try:
+        outcomes = pricelabs_cleanup_runner.run_once()
+
+    except PriceLabsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="PriceLabs could not be reached; no cleanup was attempted.",
+        ) from exc
+
+    return PricingCleanupRunOut(**summarise(outcomes))
 
 
 @app.post(

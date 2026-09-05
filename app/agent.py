@@ -19,6 +19,7 @@ from app.run_store import RunStatus, RunStore, StepType
 from app.timing import MonotonicNs, Stopwatch
 from app.tool_registry import (
     ApprovalRequired,
+    ExecutionContext,
     ToolRegistry,
 )
 
@@ -213,7 +214,11 @@ class AgentService:
 
         try:
             with watch:
-                result = self.tool_registry.execute(tool, arguments)
+                result = self.tool_registry.execute(
+                    tool,
+                    arguments,
+                    context=ExecutionContext(run_id=run_id),
+                )
 
         except ApprovalRequired as approval:
             return self.park(run_id, [], call, approval, [], actor_user_id)
@@ -378,6 +383,13 @@ class AgentService:
                     pending.tool,
                     arguments,
                     approved=True,
+                    # Bound to *this* approval. A tool that records what it did
+                    # can name the decision that released it without either the
+                    # model or the browser being able to supply the id.
+                    context=ExecutionContext(
+                        run_id=run_id,
+                        approval_id=approval_id,
+                    ),
                 )
 
         except RECOVERABLE_TOOL_ERRORS as exc:
@@ -547,7 +559,11 @@ class AgentService:
 
             try:
                 with watch:
-                    result = self.tool_registry.execute(call.name, call.arguments)
+                    result = self.tool_registry.execute(
+                        call.name,
+                        call.arguments,
+                        context=ExecutionContext(run_id=run_id),
+                    )
 
             except ApprovalRequired as approval:
                 # Parking for a human is not tool execution: nothing ran, so
