@@ -1227,3 +1227,53 @@ def test_the_removal_message_disclaims_touching_a_reservation(monkeypatch):
     # conditionally instead.
     assert "still for sale" not in result.message
     assert "If the date is sellable" in result.message
+
+
+# -- a completed action must stop being recommended ------------------------
+
+
+def pinned_night(is_pinned: bool):
+    """One strong, still-open night, with the pin present or already gone."""
+    from app.pricing_recommendations import recommend_night
+
+    return recommend_night(
+        listing_id=BUNKERS,
+        display_name="Bunkers",
+        stay_date=datetime.date(2026, 9, 20),
+        days_out=6,
+        state=MarketState(
+            current_price=179.0,
+            market_p25=250.0,
+            market_booked_median=320.0,
+            market_occupancy=60.0,
+            listing_occupancy=68.0,
+            demand="Good Demand",
+            pickup_7_days=10.0,
+            pinned_price=179.0 if is_pinned else None,
+            last_refreshed_at=fresh_stamp(),
+        ),
+        occupancy_gap=32.0,
+        history_adr=200.0,
+        history_count=6,
+        lead_band="4-7d",
+        is_pinned=is_pinned,
+        is_open=True,
+    )
+
+
+def test_a_pinned_night_is_recommended_for_removal():
+    assert pinned_night(True).action is PriceAction.REMOVE_PIN
+
+
+def test_once_the_pin_is_gone_the_card_is_gone():
+    """A completed action must stop being offered on the next load.
+
+    The recommendation is derived from live override state rather than from
+    anything remembered, so a removed pin cannot keep producing a card an owner
+    has already acted on. Verified live on 2026-09-05: six approved removals
+    left zero REMOVE_PIN cards on the next refresh of /vacancy.
+    """
+    after = pinned_night(False)
+
+    assert after.action is not PriceAction.REMOVE_PIN
+    assert not after.is_actionable or after.action is not PriceAction.REMOVE_PIN
