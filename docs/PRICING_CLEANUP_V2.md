@@ -164,25 +164,150 @@ a test override and observing whether `updated_at` moves.
                      ACTIVE  ------------------------- cleanup_at reached
                         |                                      |
         override vanished before cleanup                       v
-        (guest booked / human removed)                  ownership check
-                        |                                /            \
-                        v                          matches          differs
-                    VANISHED                          |                 |
-                                                      v                 v
-                                                 DELETE once       NEEDS_REVIEW
-                                                      |
-                                            re-read to confirm
-                                              /            \
-                                         absent           present
-                                            |                 |
-                                            v                 v
-                                       CLEANED_UP        NEEDS_REVIEW
+        (guest booked / human removed)              atomic claim (CAS)
+                        |                            /               \
+                        v                        won                lost
+                    VANISHED                      |                   |
+                                                  v                   v
+                                              CLAIMED           do nothing
+                                                  |             (no read,
+                                          provider re-read       no write)
+                                                  |
+                                           ownership check
+                                            /            \
+                                       matches          differs
+                                          |                 |
+                                          v                 v
+                                     DELETE once       NEEDS_REVIEW
+                                          |
+                                re-read to confirm
+                                  /            \
+                             absent           present
+                                |                 |
+                                v                 v
+                           CLEANED_UP        NEEDS_REVIEW
+
+
+  CLAIMED, lease expired, nobody released it
+                        |
+                        v
+              reconciliation: read for diagnosis only
+                        |
+                        v
+                  NEEDS_REVIEW          <-- never a second DELETE
 ```
 
 Plus `UNKNOWN_CLEANUP_STATE` when the DELETE's outcome cannot be established —
 never retried, always surfaced.
 
 Terminal states: `CLEANED_UP`, `VANISHED`, `NEEDS_REVIEW`, `UNKNOWN_CLEANUP_STATE`.
+`CLAIMED` is the one non-terminal state a row can sit in during a pass.
+
+---
+
+## 4a. Concurrency: one obligation, at most one automatic DELETE
+
+Two things drive the runner — `POST /pricing/cleanup/run` and the hourly
+`app.pricing_cleanup_job` — and neither knows about the other. They can run at
+the same moment, in different processes, on different hosts. Without
+coordination both would select the same due row, both would prove ownership
+against the same override, and both would send a DELETE. The second one is the
+dangerous half: if a person re-pinned that date in between, it destroys their
+pin.
+
+**`due()` is not permission.** It returns a candidate set, and two callers get
+the same list. That is expected and safe, because selecting a row grants
+nothing.
+
+**The claim is the gate, and it is one atomic `UPDATE`.**
+
+```sql
+UPDATE pricing_cleanups
+   SET state='CLAIMED', claim_token=?, claimed_at=?, lease_until=?
+ WHERE id = ? AND state='ACTIVE'
+```
+
+The `WHERE` is the compare, the `SET` is the swap. Concurrent callers both
+reach the database and exactly one matches a row; the loser sees `rowcount = 0`
+and does nothing. This is durable state, not a Python lock, a module global or
+a single-instance assumption — it holds across processes, hosts and any future
+AWS instances.
+
+**The claim precedes the provider read, not the DELETE.** A loser therefore
+never reads, so two processes can never simultaneously hold an ownership proof
+for the same override.
+
+### Expired claims fail closed
+
+A claim carries `lease_until`. When it lapses without being released, the row
+is **not** taken over and retried. It is reconciled to `NEEDS_REVIEW` with zero
+writes.
+
+The reason is that a PriceLabs DELETE cannot participate in our database
+transaction. There is no shared commit between the two systems, so when a claim
+expires we cannot distinguish a process that:
+
+- died before sending its DELETE,
+- is frozen on the line immediately before sending it,
+- sent it and died before recording the result, or
+- is simply slow and will resume.
+
+**No amount of elapsed time separates those.** A lease can bound a window; it
+can never establish that an external side effect did not happen. So exactly-once
+delete cannot be guaranteed by a lease, and a longer lease would not change
+that — lengthening it buys nothing and is not the fix.
+
+Fifteen minutes (`CLAIM_LEASE_SECONDS`) is therefore a threshold for calling a
+claim *stale*, not a licence to take it over. Stale means review.
+
+Reconciliation may read the provider, purely to describe what a person will
+find, and records that in the resolution: the override is still in place, it is
+already gone, or PriceLabs could not be reached. It never writes.
+
+`release()` is a different thing and is deliberately allowed to return a row to
+`ACTIVE`: it is the live owner putting the row down on a path where **nothing
+was sent** — the provider could not be read, or the kill switch is off. We know
+no DELETE was attempted, so the row may safely re-enter the automatic path.
+
+### Why this asymmetry
+
+A stranded AgentGuard override costs a person a few minutes clearing a queue.
+Deleting a pricing decision a person made in the meantime cannot be undone.
+`NEEDS_REVIEW` is preferred over any retry that could be destructive, and that
+preference is the design, not a limitation of it.
+
+`resolve()` takes an `expected_token` so a process whose claim lapsed cannot
+overwrite the verdict reconciliation already recorded. A settled row clears
+`claim_token` and `lease_until`, so terminal never looks like work in progress.
+
+### The audit reports what committed, not what was concluded
+
+A refused write is not the end of it: the process that lost its claim must not
+*say* it settled the row either. An event announcing `CLEANED_UP` for a row the
+database never moved would make the trail disagree with the thing it exists to
+describe.
+
+So a refused resolution emits **`PRICING_CLEANUP_STALE_OWNER`** instead of
+`PRICING_CLEANUP`, carrying `attempted_state`, `provider_delete_attempted`, the
+claim token, the detail, and the originating `approval_id` / `run_id`. The
+DELETE attempt is preserved deliberately — that side effect is real whatever
+happened to our bookkeeping afterwards, and it is exactly what someone
+reconstructing the night needs.
+
+The returned outcome reports `OWNERSHIP_LOST` rather than the state it wanted,
+and `summarise()` counts it that way, so a route response never reports a
+terminal state the row does not have. The current state is *not* substituted in
+its place: this process has not read the row back and will not guess.
+
+### `CLAIMED` implies a claim token
+
+`claim` is the only writer of `CLAIMED` and always sets a token, so a CLAIMED
+row without one is an invariant violation. If one ever appears, reconciliation
+still sends nothing to the provider and settles it through
+`resolve_unclaimed()` — its own compare-and-swap on
+`state='CLAIMED' AND claim_token IS NULL`, never an unconditional write — with
+the violation named in the resolution and the audit event. A properly claimed
+row does not match that predicate and is left alone.
 
 ---
 

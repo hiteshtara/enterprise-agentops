@@ -958,3 +958,35 @@ class PricingCleanupRecord(Base):
         Text,
         nullable=True,
     )
+
+    # -- the durable claim ------------------------------------------------
+    #
+    # Two handles drive the same runner -- an operator route and an hourly
+    # job -- and neither knows about the other. Without a claim, both could
+    # select the same due row, both prove ownership, and both send a DELETE.
+    # The second one is the dangerous half: if a person re-pinned the date
+    # between them, it destroys their work.
+    #
+    # The claim is a compare-and-swap in the database, so it holds across
+    # processes, hosts and future instances. Nothing here is a Python lock.
+
+    #: Who holds the claim. A fresh uuid per attempt, so a process can prove
+    #: the row it is about to resolve is still the one it claimed.
+    claim_token: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+    )
+
+    claimed_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    #: When the claim expires and the row may be taken by someone else. This
+    #: is what makes a crashed process recoverable: a claim nobody released
+    #: eventually lapses instead of stranding the obligation forever.
+    lease_until: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )

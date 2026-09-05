@@ -24,7 +24,7 @@ from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.database import Database, get_database
 from app.db_models import PricingCleanupRecord
@@ -44,6 +44,21 @@ MAX_LIFETIME_DAYS = 7
 
 DAYS_CLEAR_OF_ARRIVAL = 2
 
+#: How long a claim is held before it is considered stale.
+#:
+#: **This is a threshold for calling something abandoned, not a licence to take
+#: it over.** An expired claim is reconciled to NEEDS_REVIEW and sends nothing;
+#: it is never automatically reclaimed and deleted. See `CleanupState.CLAIMED`
+#: for why elapsed time cannot be permission.
+#:
+#: Fifteen minutes is generous against the work it covers -- one provider read,
+#: a comparison, at most one DELETE, each bounded by
+#: `REQUEST_TIMEOUT_SECONDS = 10` -- so a live owner is very unlikely to have
+#: its claim declared stale. That matters only because a false positive costs a
+#: person a look, not because the margin is load-bearing for safety.
+#: Lengthening it would not make anything safer.
+CLAIM_LEASE_SECONDS = 15 * 60
+
 
 class CleanupState(str, Enum):
     """Where one temporary override stands.
@@ -58,6 +73,20 @@ class CleanupState(str, Enum):
 
     PENDING_WRITE = "PENDING_WRITE"
     ACTIVE = "ACTIVE"
+    #: Claimed by one process, which is working on it now.
+    #:
+    #: Not terminal, but a lapsed lease does **not** return the row to the
+    #: queue -- it sends the row to NEEDS_REVIEW. An expired claim is an
+    #: unknown execution boundary, not an abandoned one: the process that held
+    #: it may have died before its DELETE, may be frozen immediately before it,
+    #: may have sent it and died before recording it, or may still resume. The
+    #: provider DELETE cannot participate in our database transaction, so no
+    #: amount of elapsed time distinguishes those cases.
+    #:
+    #: A stranded AgentGuard override costs a person a few minutes. Deleting a
+    #: pricing decision a person made in the meantime is unrecoverable. So this
+    #: fails closed and asks.
+    CLAIMED = "CLAIMED"
     CLEANED_UP = "CLEANED_UP"
     VANISHED = "VANISHED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
@@ -373,18 +402,187 @@ class PricingCleanupStore:
 
         return CleanupState.ACTIVE
 
+    def claim(
+        self,
+        record_id: str,
+        token: str,
+        now: datetime | None = None,
+        lease_seconds: int = CLAIM_LEASE_SECONDS,
+    ) -> bool:
+        """Take exclusive ownership of one due row. True if we got it.
+
+        **This is the mutual exclusion, and it is one atomic UPDATE.** The
+        `WHERE` clause is the compare; the `SET` is the swap. Two processes
+        issuing it concurrently both reach the database and exactly one matches
+        a row -- the loser's `rowcount` is 0 and it does nothing. No Python
+        lock, no module global, no assumption that one instance exists.
+
+        **Only an ACTIVE row is claimable.** A CLAIMED row is never taken over,
+        however old its lease: elapsed time cannot tell a dead process from a
+        frozen one, and taking over could mean a second automatic DELETE
+        against a date somebody has since re-pinned. Stale claims go to
+        `expired_claims` and reconciliation, which delete nothing.
+        """
+        moment = now or datetime.now(UTC)
+
+        stamp = moment.isoformat()
+
+        expires = (moment + timedelta(seconds=lease_seconds)).isoformat()
+
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                .where(PricingCleanupRecord.state == CleanupState.ACTIVE.value)
+                .values(
+                    state=CleanupState.CLAIMED.value,
+                    claim_token=token,
+                    claimed_at=stamp,
+                    lease_until=expires,
+                )
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
+
+    def expired_claims(
+        self,
+        now: datetime | None = None,
+    ) -> list[PricingCleanupRecord]:
+        """Claims nobody released within their lease. **Not a work queue.**
+
+        Every row here is an unknown execution boundary. It is handed to
+        reconciliation, which resolves it to NEEDS_REVIEW and sends nothing --
+        never back into the claiming path, because a second automatic DELETE is
+        the one outcome that could destroy a person's own pricing decision.
+        """
+        moment = (now or datetime.now(UTC)).isoformat()
+
+        with self._database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(PricingCleanupRecord)
+                    .where(PricingCleanupRecord.state == CleanupState.CLAIMED.value)
+                    .where(PricingCleanupRecord.lease_until <= moment)
+                    .order_by(PricingCleanupRecord.lease_until)
+                )
+            )
+
+            for row in rows:
+                session.expunge(row)
+
+            return rows
+
+    def release(self, record_id: str, token: str) -> bool:
+        """Hand a claimed row back to the queue, unresolved.
+
+        For the paths that end a pass without deciding anything and without
+        sending anything -- the provider could not be read, the kill switch is
+        off. The obligation is unchanged and no DELETE was attempted, so the
+        next pass should pick it up at once rather than wait out a lease.
+
+        This is the live owner putting the row down deliberately. It is not the
+        same thing as a lease expiring, which is why the two have different
+        outcomes: here we know nothing was sent.
+
+        Conditional on still holding the claim.
+        """
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                .where(PricingCleanupRecord.claim_token == token)
+                .values(
+                    state=CleanupState.ACTIVE.value,
+                    claim_token=None,
+                    claimed_at=None,
+                    lease_until=None,
+                )
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
+
+    def resolve_unclaimed(
+        self,
+        record_id: str,
+        state: CleanupState,
+        resolution: str,
+    ) -> bool:
+        """Settle a CLAIMED row that carries no claim token.
+
+        `CLAIMED` is supposed to imply a token: `claim` is the only writer of
+        that state and always sets one. A row without one is an invariant
+        violation, and the safe thing is still to get it in front of a person
+        rather than leave it stuck.
+
+        This is deliberately **not** the unconditional branch of `resolve`. It
+        is its own compare-and-swap -- `state='CLAIMED' AND claim_token IS
+        NULL` -- so a malformed row can be settled without opening a path by
+        which any row could bypass token ownership. A row that has since been
+        claimed properly, or already settled, does not match and is left alone.
+        """
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                .where(PricingCleanupRecord.state == CleanupState.CLAIMED.value)
+                .where(PricingCleanupRecord.claim_token.is_(None))
+                .values(
+                    state=state.value,
+                    resolution=resolution,
+                    resolved_at=datetime.now(UTC).isoformat(),
+                    claim_token=None,
+                    lease_until=None,
+                )
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
+
     def resolve(
         self,
         record_id: str,
         state: CleanupState,
         resolution: str,
-    ) -> None:
-        self._update(
-            record_id,
-            state=state.value,
-            resolution=resolution,
-            resolved_at=datetime.now(UTC).isoformat(),
-        )
+        expected_token: str | None = None,
+    ) -> bool:
+        """Settle a row. False when the claim was lost and nothing was written.
+
+        `expected_token` guards the lease-expiry hazard: a slow process whose
+        claim has since been reconciled must not overwrite that verdict with
+        its own stale one. Given a token, the write is conditional on still
+        holding the claim.
+        """
+        fields = {
+            "state": state.value,
+            "resolution": resolution,
+            "resolved_at": datetime.now(UTC).isoformat(),
+            # A settled row holds no claim. Leaving one would make a terminal
+            # row look like work in progress to anyone reading the table.
+            "claim_token": None,
+            "lease_until": None,
+        }
+
+        if expected_token is None:
+            self._update(record_id, **fields)
+
+            return True
+
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                .where(PricingCleanupRecord.claim_token == expected_token)
+                .values(**fields)
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
 
     def _update(self, record_id: str, **fields: Any) -> None:
         with self._database.session() as session:
@@ -408,7 +606,17 @@ class PricingCleanupStore:
             return record
 
     def due(self, now: datetime | None = None) -> list[PricingCleanupRecord]:
-        """Active rows whose cleanup_at has arrived, oldest first."""
+        """Rows a caller may *attempt*, oldest first. Not rows it may delete.
+
+        Selecting is not claiming: two processes calling this concurrently get
+        the same list, which is exactly why `claim` exists and why the runner
+        claims before it reads the provider. This is the candidate set; `claim`
+        is the gate.
+
+        ACTIVE rows only. A CLAIMED row is never offered here, whatever its
+        lease says -- `expired_claims` is where those go, and they go to a
+        person rather than back into the automatic path.
+        """
         moment = (now or datetime.now(UTC)).isoformat()
 
         with self._database.session() as session:
@@ -444,7 +652,17 @@ class PricingCleanupStore:
             rows = list(
                 session.scalars(
                     select(PricingCleanupRecord)
-                    .where(PricingCleanupRecord.state == CleanupState.ACTIVE.value)
+                    .where(
+                        PricingCleanupRecord.state.in_(
+                            (
+                                CleanupState.ACTIVE.value,
+                                # A row stuck under a claim is *more* overdue,
+                                # not less. Hiding it here would make a crashed
+                                # process invisible.
+                                CleanupState.CLAIMED.value,
+                            )
+                        )
+                    )
                     .where(PricingCleanupRecord.cleanup_at <= cutoff)
                     .order_by(PricingCleanupRecord.cleanup_at)
                 )
@@ -460,6 +678,7 @@ class PricingCleanupStore:
         wanted = [
             CleanupState.PENDING_WRITE.value,
             CleanupState.ACTIVE.value,
+            CleanupState.CLAIMED.value,
             CleanupState.NEEDS_REVIEW.value,
             CleanupState.UNKNOWN_CLEANUP_STATE.value,
         ]

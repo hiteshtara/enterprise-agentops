@@ -707,12 +707,20 @@ class PricingRecommendationPage(BaseModel):
 
 
 class PricingCleanupOut(BaseModel):
-    """One cleanup record as the runner left it."""
+    """One cleanup record as the runner left it.
+
+    `state` is what the pass may honestly claim about the row -- the terminal
+    state when the write committed, `OWNERSHIP_LOST` when this process's claim
+    was gone before its verdict could land. `attempted_state` keeps what it
+    concluded, so a reader can see the difference rather than infer it.
+    """
 
     id: str
     listing_id: str
     stay_date: str
     state: str
+    attempted_state: str | None = None
+    committed: bool = True
     detail: str
 
 
