@@ -29,7 +29,12 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
-from app.pricing_config import MAX_CHANGE_PER_RUN, PricingBands, unverified_reason
+from app.pricing_config import (
+    MAX_CHANGE_PER_RUN,
+    PricingBands,
+    dynamic_floor,
+    unverified_reason,
+)
 
 
 class PriceAction(str, Enum):
@@ -201,21 +206,48 @@ def check_guardrails(
     return None
 
 
-def below_normal_floor(
-    action: PriceAction,
-    proposed: float | None,
-    bands: PricingBands | None,
-) -> bool:
-    """A LOWER between the hard and normal floors. Allowed, but not routine.
+def effective_floor(rec: "Recommendation") -> tuple[float, str] | None:
+    """The owner floor this night is actually judged against.
 
-    It clears the hard floor so it is not refused, and it sits under the
-    preferred minimum, so it is surfaced for an explicit human decision rather
-    than treated as an ordinary adjustment.
+    The dynamic schedule where the property has one, `normal_floor` where it
+    does not. Both sit *above* the hard floor and neither can refuse a write on
+    its own -- crossing this line asks a person, crossing the hard floor is
+    refused outright.
     """
-    if action is not PriceAction.LOWER or bands is None or proposed is None:
-        return False
+    if rec.bands is None:
+        return None
 
-    return bands.hard_floor <= proposed < bands.normal_floor
+    resolved = dynamic_floor(rec.bands, rec.stay_date, rec.days_out)
+
+    if resolved is not None:
+        return resolved
+
+    return rec.bands.normal_floor, "normal floor; no dynamic schedule yet"
+
+
+def below_owner_floor(rec: "Recommendation") -> tuple[float, str] | None:
+    """The floor a LOWER undercuts, or None. Allowed, but not routine.
+
+    Such a proposal clears the hard floor so it is not refused, and it sits
+    under what AgentGuard considers appropriate for this night, so it is
+    surfaced for an explicit human decision rather than applied as an ordinary
+    adjustment.
+    """
+    if (
+        rec.action is not PriceAction.LOWER
+        or rec.bands is None
+        or rec.proposed_price is None
+    ):
+        return None
+
+    resolved = effective_floor(rec)
+
+    if resolved is None or not (
+        rec.bands.hard_floor <= rec.proposed_price < resolved[0]
+    ):
+        return None
+
+    return resolved
 
 
 def finalise(
@@ -255,15 +287,16 @@ def finalise(
                 ),
             )
 
-        if below_normal_floor(
-            candidate.action,
-            candidate.proposed_price,
-            candidate.bands,
-        ):
+        undercut = below_owner_floor(candidate)
+
+        if undercut is not None:
+            floor, basis = undercut
+
             notes = notes + (
                 (
-                    "Below the normal floor but above the hard floor -- needs "
-                    "an explicit decision and a near-term vacancy reason."
+                    f"Below the ${floor:,.0f} owner floor for this night "
+                    f"({basis}) but above the hard floor -- needs an explicit "
+                    "decision and a near-term vacancy reason."
                 ),
             )
 
@@ -348,6 +381,8 @@ def plain_reason(rec: Recommendation) -> str:
 
 def to_payload(rec: Recommendation) -> dict:
     """The console/API projection. Carries evidence, never a credential."""
+    owner_floor = effective_floor(rec)
+
     return {
         "id": f"{rec.listing_id}:{rec.stay_date.isoformat()}",
         "listing_id": rec.listing_id,
@@ -377,11 +412,18 @@ def to_payload(rec: Recommendation) -> dict:
         # Why this action cannot execute yet, even once approved. Surfaced so
         # the console can say so before a person spends a decision on it.
         "blocked_reason": (
-            unverified_reason(rec.action.value) if rec.is_actionable else None
+            unverified_reason(rec.action.value, rec.listing_id)
+            if rec.is_actionable
+            else None
         ),
         "pricelabs_minimum": None,
         "hard_floor": rec.bands.hard_floor if rec.bands else None,
         "normal_floor": rec.bands.normal_floor if rec.bands else None,
+        # The owner dynamic floor for this exact night, and why it is that
+        # number. Separate from `hard_floor`: this one asks a person, the hard
+        # floor refuses.
+        "owner_floor": owner_floor[0] if owner_floor else None,
+        "owner_floor_basis": owner_floor[1] if owner_floor else None,
         "auto_raise_ceiling": rec.bands.auto_raise_ceiling if rec.bands else None,
         "absolute_ceiling": rec.bands.absolute_ceiling if rec.bands else None,
         "market_p25": rec.state.market_p25,

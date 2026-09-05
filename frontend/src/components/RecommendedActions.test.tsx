@@ -33,6 +33,8 @@ function rec(over: Partial<PricingRecommendation> = {}): PricingRecommendation {
     pricelabs_minimum: 143,
     hard_floor: 143,
     normal_floor: 170,
+    owner_floor: 175,
+    owner_floor_basis: 'p10 of realized ADR 15-29 days out (n=10, median $271)',
     auto_raise_ceiling: 252,
     absolute_ceiling: 324,
     market_p25: 240,

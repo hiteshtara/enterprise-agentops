@@ -125,6 +125,13 @@ class PriceLabsPricingTools:
         # action as STALE -- a write path that could never fire.
         bedrooms = listing.get("no_of_bedrooms")
 
+        # Same override as the recommendation path, so the fingerprint is
+        # computed from the same comp band the recommendation used.
+        _band = bands_for(listing_id)
+
+        if _band is not None and _band.bedrooms_override is not None:
+            bedrooms = _band.bedrooms_override
+
         reference: dict[str, float | None] = {}
 
         try:
@@ -280,7 +287,7 @@ class PriceLabsPricingTools:
         # provider behaviour is still unproven does not get to run just because
         # a person approved it. Approval authorises *this change*; it cannot
         # authorise an assumption nobody has tested.
-        blocked = unverified_reason(parsed.value)
+        blocked = unverified_reason(parsed.value, listing_id)
 
         if blocked is not None:
             return _refused("UNVERIFIED_BEHAVIOUR", blocked, stay_date)

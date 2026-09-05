@@ -648,6 +648,13 @@ export interface PricingRecommendation {
   pricelabs_minimum: number | null
   hard_floor: number | null
   normal_floor: number | null
+  /**
+   * The owner dynamic floor for this exact night, and the evidence for it.
+   * Distinct from `hard_floor`: undercutting this asks a person, while the
+   * hard floor refuses outright.
+   */
+  owner_floor: number | null
+  owner_floor_basis: string | null
   auto_raise_ceiling: number | null
   absolute_ceiling: number | null
   market_p25: number | null
