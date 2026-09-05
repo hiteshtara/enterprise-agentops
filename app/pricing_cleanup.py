@@ -305,21 +305,36 @@ class PricingCleanupStore:
         record_id: str,
         provider_created_at: str | None,
         reason_sent: str,
+        provider_updated_at: str | None = None,
     ) -> CleanupState:
         """Confirm a written override, or refuse to call it ACTIVE.
+
+        **This is the only door into ACTIVE, and it is where the confirming
+        checks are enforced** -- not in the caller. A row reaches ACTIVE only
+        when the provider's own re-read supplies a creation time and shows the
+        override untouched since. Anything else resolves to NEEDS_REVIEW with
+        the override still in place, and no cleanup is ever attempted for it
+        automatically.
 
         `provider_created_at` is mandatory for anything this system wrote. A
         row without one could only ever satisfy three of the four ownership
         checks, so admitting it to ACTIVE would create a record held to a
         weaker standard than its neighbours -- and nothing downstream would
-        say so. If the confirming re-read cannot supply it, the row goes
-        straight to NEEDS_REVIEW with the override still in place.
+        say so.
+
+        `updated_at != created_at` on a freshly written override means the
+        POST landed on a row that already existed rather than creating one.
+        That row is somebody else's, or an earlier one of ours; either way its
+        provenance is not what this record claims, so it is not cleanable on
+        this record's authority.
 
         Returns the state actually reached, so a caller cannot assume success.
         """
         record = self.get(record_id)
 
-        if record is not None and not record.adopted and not provider_created_at:
+        owned_by_us = record is not None and not record.adopted
+
+        if owned_by_us and not provider_created_at:
             self.resolve(
                 record_id,
                 CleanupState.NEEDS_REVIEW,
@@ -327,6 +342,23 @@ class PricingCleanupStore:
                     "the confirming re-read returned no creation time, so this "
                     "override cannot be verified as ours later. It is still in "
                     "place and needs a person."
+                ),
+            )
+
+            return CleanupState.NEEDS_REVIEW
+
+        if (
+            owned_by_us
+            and provider_updated_at is not None
+            and provider_updated_at != provider_created_at
+        ):
+            self.resolve(
+                record_id,
+                CleanupState.NEEDS_REVIEW,
+                (
+                    "the override was already present and was modified rather "
+                    "than created, so it cannot be verified as ours later. It "
+                    "is in place and needs a person."
                 ),
             )
 

@@ -83,6 +83,11 @@ class WriteResult:
     #: re-read. Mandatory for a V2 row to reach ACTIVE, so it travels here
     #: rather than being fetched again by the caller.
     provider_created_at: str | None = None
+    #: `updated_at` from the same confirming re-read. A freshly created
+    #: override should carry the two timestamps equal; a difference means the
+    #: POST landed on a row that already existed, which the caller treats as
+    #: unownable rather than as a successful create.
+    provider_updated_at: str | None = None
     #: Whether the stored `reason` came back byte-for-byte. False means the
     #: provider altered it -- truncated, normalised, anything -- which would
     #: break ownership detection later, so it is caught here instead.
@@ -215,6 +220,7 @@ class PriceLabsWriteClient:
                 return WriteResult(
                         outcome=WriteOutcome.CONFIRMED_APPLIED,
                         provider_created_at=(after or {}).get("created_at"),
+                        provider_updated_at=(after or {}).get("updated_at"),
                         reason_intact=intact,
                         message=(
                             "PriceLabs accepted and persisted the override "

@@ -706,6 +706,31 @@ class PricingRecommendationPage(BaseModel):
     bands: list[PricingBandsOut]
 
 
+class PricingCleanupOut(BaseModel):
+    """One cleanup record as the runner left it."""
+
+    id: str
+    listing_id: str
+    stay_date: str
+    state: str
+    detail: str
+
+
+class PricingCleanupRunOut(BaseModel):
+    """What one cleanup pass did.
+
+    There is no request model to pair with this, and that is the point: the
+    route takes no input at all, so a caller cannot name a listing or a date.
+    The only work a pass can do is what the store already records as owed.
+    """
+
+    processed: int
+    deleted: int
+    by_state: dict[str, int] = {}
+    ran_at: str
+    records: list[PricingCleanupOut] = []
+
+
 class PricingActionRequest(BaseModel):
     """A request to submit one recommendation for human approval.
 
