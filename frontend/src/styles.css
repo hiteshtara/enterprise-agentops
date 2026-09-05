@@ -1263,3 +1263,38 @@ a.card.conversation-row:hover {
   margin: 0 0 8px;
   font-size: 13px;
 }
+
+.vac-plain {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 12px 0 0;
+  font-size: 14px;
+}
+
+.vac-plain dt {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding-top: 3px;
+}
+
+.vac-plain dd {
+  margin: 0;
+}
+
+.vac-details {
+  margin-top: 12px;
+}
+
+.vac-details summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.vac-details summary:hover {
+  color: var(--text);
+}

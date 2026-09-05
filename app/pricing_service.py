@@ -219,3 +219,22 @@ def bands_payload() -> list[dict[str, Any]]:
 
 def bands_for_listing(listing_id: str):
     return bands_for(listing_id)
+
+
+def unblocked_actions() -> list[str]:
+    """Which write actions could execute right now, given every gate.
+
+    Computed here rather than re-derived in the console, so the screen cannot
+    disagree with the policy about what is permitted. It reports *permitted*,
+    never *automatic*: each one still needs an individual human approval.
+    """
+    from app.pricing_config import unverified_reason, writes_enabled
+
+    if not writes_enabled():
+        return []
+
+    return [
+        action
+        for action in ("REMOVE_PIN", "LOWER", "RAISE")
+        if unverified_reason(action) is None
+    ]

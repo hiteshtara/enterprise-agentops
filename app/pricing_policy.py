@@ -299,6 +299,53 @@ def asdict_shallow(rec: Recommendation) -> dict:
     return data
 
 
+#: What each action does, said plainly.
+PLAIN_ACTION: dict[PriceAction, str] = {
+    PriceAction.REMOVE_PIN: "Return this date to PriceLabs dynamic pricing",
+    PriceAction.LOWER: "Lower this night's price",
+    PriceAction.RAISE: "Raise this night's price",
+    PriceAction.HOLD: "No change",
+    PriceAction.KEEP_PIN: "Keep the fixed price",
+}
+
+
+def plain_reason(rec: Recommendation) -> str:
+    """The case for this action in an owner's language, not a pricing analyst's.
+
+    Falls back to the technical reason rather than inventing a sentence it
+    cannot support: a plain summary that is not grounded in the same numbers
+    would be a nicer way of being wrong.
+    """
+    price = rec.current_price
+    p25 = rec.state.market_p25
+
+    if rec.action is PriceAction.REMOVE_PIN and price and p25:
+        if price < p25:
+            return (
+                f"Your fixed ${price:,.0f} price is now below the current "
+                f"market range for this date."
+            )
+
+        return (
+            f"Your fixed ${price:,.0f} price no longer reflects the current "
+            f"market for this date."
+        )
+
+    if rec.action is PriceAction.RAISE and price and p25:
+        return (
+            f"Comparable homes are asking more than your ${price:,.0f} for "
+            f"this date."
+        )
+
+    if rec.action is PriceAction.LOWER and price:
+        return (
+            f"This night is still open at ${price:,.0f} and is close enough to "
+            f"arrival to be worth revisiting."
+        )
+
+    return rec.reason
+
+
 def to_payload(rec: Recommendation) -> dict:
     """The console/API projection. Carries evidence, never a credential."""
     return {
@@ -316,6 +363,12 @@ def to_payload(rec: Recommendation) -> dict:
         ),
         "confidence": rec.confidence.value,
         "reason": rec.reason,
+        # The same decision in the owner's terms. The technical `reason` stays
+        # for the details panel; this is what leads the card, because a person
+        # deciding whether to release a date should not have to read a
+        # percentile to understand what they are agreeing to.
+        "plain_reason": plain_reason(rec),
+        "plain_action": PLAIN_ACTION.get(rec.action, rec.action.value),
         "refused": rec.refused.value if rec.refused else None,
         "requires_human": rec.requires_human,
         "notes": list(rec.notes),

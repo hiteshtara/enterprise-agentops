@@ -25,6 +25,8 @@ function rec(over: Partial<PricingRecommendation> = {}): PricingRecommendation {
     refused: null,
     requires_human: false,
     notes: [],
+    plain_reason: 'Your fixed $200 price is now below the current market range.',
+    plain_action: 'Return this date to PriceLabs dynamic pricing',
     fingerprint: 'abc123',
     actionable: true,
     blocked_reason: null,
@@ -52,6 +54,7 @@ function page(
     generated_at: '2026-09-04T12:00:00+00:00',
     horizon_days: 60,
     writes_enabled: true,
+    unblocked_actions: ['REMOVE_PIN'],
     max_change_per_run: 0.1,
     recommendations: [rec()],
     bands: [],
@@ -231,14 +234,100 @@ describe('RecommendedActions', () => {
     expect(await screen.findByText(/Nothing was changed/)).toBeInTheDocument()
   })
 
-  it('says plainly when pricing writes are disabled', async () => {
+  it('says plainly when no pricing action can run', async () => {
     vi.mocked(api.getPricingRecommendations).mockResolvedValue(
-      page({ writes_enabled: false }),
+      page({ writes_enabled: false, unblocked_actions: [] }),
     )
 
     renderWithRouter(<RecommendedActions />)
 
-    expect(await screen.findByText('Pricing writes are disabled.')).toBeInTheDocument()
+    expect(
+      await screen.findByText('Pricing changes are turned off.'),
+    ).toBeInTheDocument()
+  })
+
+  it('does not claim writes are off when a pin removal is actually live', async () => {
+    // The banner used to say "disabled" whenever any gate was shut, which
+    // became untrue the moment one action was released.
+    vi.mocked(api.getPricingRecommendations).mockResolvedValue(
+      page({ writes_enabled: true, unblocked_actions: ['REMOVE_PIN'] }),
+    )
+
+    renderWithRouter(<RecommendedActions />)
+
+    expect(
+      await screen.findByText(/Returning a date to dynamic pricing is enabled/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/turned off\./)).not.toBeInTheDocument()
+    // and it must still say price moves are not available
+    expect(
+      screen.getByText(/Raising and lowering prices remain switched off/),
+    ).toBeInTheDocument()
+  })
+
+  it('uses owner-facing wording and buttons for a pin removal', async () => {
+    vi.mocked(api.getPricingRecommendations).mockResolvedValue(
+      page({
+        recommendations: [
+          rec({
+            action: 'REMOVE_PIN',
+            current_price: 179,
+            proposed_price: null,
+            pct_change: null,
+            plain_action: 'Return this date to PriceLabs dynamic pricing',
+            plain_reason:
+              'Your fixed $179 price is now below the current market range.',
+          }),
+        ],
+      }),
+    )
+    vi.mocked(api.submitPricingAction).mockResolvedValue({
+      run_id: 'run-1',
+      status: 'WAITING_FOR_APPROVAL',
+      answer: '',
+      trace: [],
+      approval_required: approval,
+    } as never)
+
+    renderWithRouter(<RecommendedActions />)
+
+    expect(await screen.findByText('$179 fixed')).toBeInTheDocument()
+    expect(
+      screen.getByText('Return this date to PriceLabs dynamic pricing'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Your fixed $179 price is now below the current market range.'),
+    ).toBeInTheDocument()
+
+    // Technical detail is behind the fold, not on the card.
+    expect(screen.getByText('Show details')).toBeInTheDocument()
+    expect(screen.queryByText('State fingerprint')?.closest('details')).toBeTruthy()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Review' }))
+
+    expect(
+      await screen.findByRole('button', { name: 'Return to dynamic pricing' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Keep $179' })).toBeInTheDocument()
+  })
+
+  it('tells the owner a blocked price change is pending expiry verification', async () => {
+    vi.mocked(api.getPricingRecommendations).mockResolvedValue(
+      page({
+        recommendations: [
+          rec({ action: 'RAISE', blocked_reason: 'lead_time_expiry unverified' }),
+        ],
+      }),
+    )
+
+    renderWithRouter(<RecommendedActions />)
+
+    expect(
+      await screen.findByText(
+        'Price changes are currently disabled pending expiry verification.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument()
   })
 
   it('blocks a recommendation whose provider behaviour is unverified', async () => {
@@ -252,9 +341,16 @@ describe('RecommendedActions', () => {
 
     renderWithRouter(<RecommendedActions />)
 
-    expect(
-      await screen.findByText('Blocked pending live verification.'),
-    ).toBeInTheDocument()
+    // The card face stays owner-facing; the technical reason is available but
+    // folded away, so the reason a control is off is never merely asserted.
+    await screen.findByText(
+      'Price changes are currently disabled pending expiry verification.',
+    )
+
+    const technical = screen.getByText('lead_time_expiry has not been verified')
+
+    expect(technical.closest('details')).toBeTruthy()
+
     // No path to approval exists while it is blocked.
     expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument()
   })
