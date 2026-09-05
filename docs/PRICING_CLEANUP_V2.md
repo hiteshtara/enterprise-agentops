@@ -50,7 +50,8 @@ this feature exists to prevent.
 | `old_price` | What was there before, so a reviewer can see what was displaced. Null when there was no override. |
 | `new_price` | What we wrote. Half of the ownership proof. |
 | `currency` | As sent. |
-| `reason_marker` | The exact `reason` string we sent. The other half of the ownership proof — see §3. |
+| `marker` | The AgentGuard ownership token written into `reason`. See §3. |
+| `reason_sent` | The exact `reason` string sent, marker included, so the confirming re-read can be compared byte-for-byte. |
 | `approval_id`, `run_id` | The human decision that authorised it. |
 | `created_at` | When AgentGuard sent it. |
 | `provider_created_at` | `created_at` as PriceLabs reported it on the confirming re-read. |
@@ -66,19 +67,59 @@ later cannot silently re-date overrides already in flight.
 ## 3. Proving the override is still ours
 
 The hard requirement is **never delete a human-changed override**. PriceLabs
-gives an override no id, so identity has to be reconstructed from its contents.
+gives an override no id, so identity has to be carried in its contents.
 
-Observed on 2026-09-05 across all 55 live overrides:
+### The ownership marker
 
-| Field | What it gives us |
+Every V2 write puts an AgentGuard token at the **front** of `reason`:
+
+```
+AGENTGUARD:<cleanup_record_uuid>: <short human-readable reason>
+```
+
+The token is generated with the row, before the write, and stored on it. It is
+what makes ownership a *match against one specific record* rather than an
+inference from a sentence's uniqueness.
+
+Relying on the natural-language reason alone was the design's weakest point.
+Today it happens to be unique — of 55 live overrides, only the one AgentGuard
+wrote has a populated `reason` — but that is a property of the current data,
+not a guarantee. `reason` is free text; a person could one day type something
+that collides, and the check would silently start matching an override we do
+not own. A namespaced id cannot collide by accident.
+
+The token goes first so that any provider-side truncation removes the
+human-readable tail rather than the identity.
+
+### The four checks
+
+Cleanup proceeds only when **all four** hold against the row:
+
+| Check | Against |
 |---|---|
-| `reason` | **Ours is the only populated one.** All 55 human-created overrides carry `reason: ""`; the one AgentGuard wrote carries its full sentence. Strong and, in practice, unique. |
-| `price` | Must equal `new_price`. |
-| `created_at` | Must equal `provider_created_at`. |
-| `updated_at` | Equals `created_at` on every observed row. |
+| `reason` starts with `AGENTGUARD:<uuid>:` for **this row's** uuid | `marker` |
+| `price` equals what we wrote | `new_price` |
+| `created_at` equals what the confirming re-read reported | `provider_created_at` |
+| `updated_at` equals `created_at` | — |
 
-**Ownership holds only when all four match the record.** Any mismatch means
-someone or something else has touched that date, and cleanup must not proceed.
+Any mismatch → `NEEDS_REVIEW`, and nothing is sent.
+
+### Marker integrity is checked at write time, not at cleanup time
+
+The observed `reason` that round-tripped intact was 106 characters. PriceLabs'
+maximum length for the field is **not known**, and a truncated marker would
+break ownership detection — silently, and only discovered a week later when
+cleanup refused.
+
+So the confirming re-read after every V2 write compares the returned `reason`
+byte-for-byte against `reason_sent`. If it differs — truncated, normalised,
+anything — the write is immediately `NEEDS_REVIEW` with the override still in
+place and a person told, rather than left to fail at `cleanup_at`. That turns
+an unverifiable provider assumption into an error caught within seconds of the
+write that caused it.
+
+The human-readable tail is capped so the whole string stays near the length
+already proven to survive.
 
 ### The `updated_at` trap, stated plainly
 
@@ -88,16 +129,12 @@ have never observed PriceLabs bump `updated_at`, and it may not.
 
 The design therefore does not depend on it. `updated_at` is checked as a
 *positive* signal (it must still equal `created_at`), never as the sole detector
-of tampering. The load-bearing checks are `reason` and `price`, which a human
-editing the date would almost certainly change — a human setting an identical
-price *and* retyping our generated sentence verbatim is not a failure mode
-worth designing around, and if it happened, deleting the override would restore
-the same dynamic pricing they were reaching for anyway.
+of tampering. With the marker in place the load-bearing check is the token,
+which a human editing the date would have to reproduce exactly — including a
+uuid they have never seen — for a false match.
 
-This is the one assumption in the design that could be tightened later, by
-deliberately editing a test override and observing whether `updated_at` moves.
-
----
+This is the one assumption left worth tightening later, by deliberately editing
+a test override and observing whether `updated_at` moves.
 
 ## 4. Lifecycle
 
@@ -197,21 +234,27 @@ trigger is inspectable and repeatable by hand.
 
 ---
 
-## 8. Decisions needed before implementation
+## 8. Decisions — settled 2026-09-05
 
-1. **Default `cleanup_at`.** Proposal: `min(stay_date - 2 days, created_at + 7
-   days)`. Short enough that an unattended override cannot ride into arrival,
-   long enough to give the price time to work. Both terms are arbitrary until
-   you set them.
-2. **Cadence.** Proposal: hourly. Finer buys little, since `cleanup_at` is a
-   date-scale decision.
-3. **Does an override still count as owed once the night is booked?**
-   Proposal: yes, clean it up anyway. The price is moot for that reservation,
-   but leaving it strands a pin if the booking is later cancelled.
-4. **Should cleanup extend to the 2026-09-21 override already live?** It was
-   written before this design, so it has no row. Proposal: adopt it manually by
-   writing a row from the audit record, rather than leaving it to
-   `lead_time_expiry` alone.
+1. **Default `cleanup_at` = `min(stay_date - 2 days, created_at + 7 days)`.**
+   The dual bound is the point: an override cannot linger more than a week, and
+   is always gone before the last two days before arrival. Not to be made
+   cleverer in V1.
+2. **Cadence: hourly.** Cleanup is not latency-sensitive at a date scale, and an
+   hourly runner is easy to reason about.
+3. **A booked night is still owed a cleanup.** The override is economically
+   moot while the reservation stands, but it is technically still stranded: if
+   the booking cancels, that fixed price becomes live again.
+4. **The existing 2026-09-21 override is adopted — manually and explicitly.**
+   No silent backfill. A single adoption path writes one row from the exact
+   audit record and live provider state, marks it `ADOPTED`, and records that it
+   predates V2. The normal lifecycle owns it from there.
+
+   That override was written **without** a marker, so the token check cannot
+   apply to it. Its row records this, and ownership for that one row falls back
+   to price + `created_at` + `updated_at` against the audit record. It is the
+   only row that will ever be exempt from the marker check, and the exemption is
+   stored on the row rather than inferred.
 
 ---
 
@@ -221,8 +264,13 @@ Unit, with invented data:
 
 * a write with no row is impossible
 * `cleanup_at` is stored, not recomputed
-* ownership passes when all four fields match
-* ownership fails on a changed price / changed reason / changed `created_at`
+* the marker is generated per row and written at the front of `reason`
+* a write whose confirming re-read returns a different `reason` becomes
+  `NEEDS_REVIEW` immediately, without waiting for `cleanup_at`
+* ownership passes when all four checks match
+* ownership fails on a changed price / missing or altered marker / a marker
+  belonging to a different row / changed `created_at`
+* the adopted pre-V2 row is exempt from the marker check and nothing else is
 * a failed ownership check sends **zero** requests
 * absent override → `VANISHED`, zero requests
 * successful path → exactly one DELETE, re-read confirms, `CLEANED_UP`
