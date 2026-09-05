@@ -79,6 +79,14 @@ class WriteResult:
     stay_date: str
     old_price: float | None = None
     new_price: float | None = None
+    #: `created_at` exactly as the provider reported it on the confirming
+    #: re-read. Mandatory for a V2 row to reach ACTIVE, so it travels here
+    #: rather than being fetched again by the caller.
+    provider_created_at: str | None = None
+    #: Whether the stored `reason` came back byte-for-byte. False means the
+    #: provider altered it -- truncated, normalised, anything -- which would
+    #: break ownership detection later, so it is caught here instead.
+    reason_intact: bool | None = None
 
     @property
     def needs_human(self) -> bool:
@@ -169,6 +177,7 @@ class PriceLabsWriteClient:
         expected_price: float | None,
         old_price: float | None,
         acknowledged: bool,
+        expected_reason: str | None = None,
     ) -> WriteResult:
         """Re-read and diff. The provider's own answer is never trusted alone."""
         try:
@@ -199,8 +208,14 @@ class PriceLabsWriteClient:
             )
 
             if matched:
+                stored_reason = (after or {}).get("reason")
+
+                intact = expected_reason is None or stored_reason == expected_reason
+
                 return WriteResult(
                         outcome=WriteOutcome.CONFIRMED_APPLIED,
+                        provider_created_at=(after or {}).get("created_at"),
+                        reason_intact=intact,
                         message=(
                             "PriceLabs accepted and persisted the override "
                             "(verified by re-reading it). This is not "
@@ -256,7 +271,14 @@ class PriceLabsWriteClient:
         automation_enabled: bool,
         lead_time_expiry: int = DEFAULT_LEAD_TIME_EXPIRY_DAYS,
     ) -> WriteResult:
-        """Set one night's price. Sent once, verified by re-reading."""
+        """Set one night's price. Sent once, verified by re-reading.
+
+        `reason` is transmitted verbatim and compared byte-for-byte on the
+        confirming re-read. Under V2 it carries the ownership marker, and a
+        provider that altered it would break cleanup's ability to recognise
+        this override a week later -- so the mismatch surfaces here, seconds
+        after the write, rather than at cleanup time.
+        """
         self._guard(automation_enabled)
 
         before = self._override_for(listing_id, pms, stay_date)
@@ -268,7 +290,7 @@ class PriceLabsWriteClient:
                     "price": str(round(price)),
                     "price_type": "fixed",
                     "currency": currency,
-                    "reason": reason[:200],
+                    "reason": reason,
                     # Hands the date back to dynamic pricing on its own.
                     "lead_time_expiry": lead_time_expiry,
                 }
@@ -291,6 +313,7 @@ class PriceLabsWriteClient:
             expected_price=price,
             old_price=_price_of(before),
             acknowledged=acknowledged,
+            expected_reason=body["overrides"][0]["reason"],
         )
 
     def remove_override(

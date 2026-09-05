@@ -394,8 +394,26 @@ class RecordingWriter:
         return self._result(stay_date, 109.0, None)
 
 
-def tools(reader, writer):
-    return PriceLabsPricingTools(reader=reader, writer=writer, pms="lodgify")
+def store(database):
+    from app.pricing_cleanup import PricingCleanupStore
+
+    return PricingCleanupStore(database=database)
+
+
+def tools(reader, writer, cleanups=None):
+    """A price-setting write now needs a cleanup store, by design.
+
+    An override nobody recorded is the stranded pin the whole cleanup design
+    exists to prevent, so the tool refuses to write one. Tests that exercise a
+    LOWER or RAISE therefore pass a store; `test_a_price_write_without_a_cleanup_
+    store_is_refused` covers the absence.
+    """
+    return PriceLabsPricingTools(
+        reader=reader,
+        writer=writer,
+        pms="lodgify",
+        cleanups=cleanups,
+    )
 
 
 def current_fingerprint(reader, stay="2026-09-20"):
@@ -433,7 +451,7 @@ def verified(monkeypatch):
 # -- staleness -------------------------------------------------------------
 
 
-def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch):
+def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch, database):
     verified(monkeypatch)
 
     reader = FakeReader(price=200.0)
@@ -444,7 +462,7 @@ def test_a_price_change_after_the_recommendation_refuses_execution(monkeypatch):
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -480,7 +498,7 @@ def test_a_pin_that_changed_after_the_recommendation_refuses_execution(monkeypat
     assert writer.calls == []
 
 
-def test_stale_pricelabs_data_refuses_execution(monkeypatch):
+def test_stale_pricelabs_data_refuses_execution(monkeypatch, database):
     verified(monkeypatch)
 
     old = (
@@ -491,7 +509,7 @@ def test_stale_pricelabs_data_refuses_execution(monkeypatch):
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -504,14 +522,14 @@ def test_stale_pricelabs_data_refuses_execution(monkeypatch):
     assert writer.calls == []
 
 
-def test_provider_unavailable_refuses_execution(monkeypatch):
+def test_provider_unavailable_refuses_execution(monkeypatch, database):
     verified(monkeypatch)
 
     reader = FakeReader(fail=True)
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -527,7 +545,7 @@ def test_provider_unavailable_refuses_execution(monkeypatch):
 # -- outcomes --------------------------------------------------------------
 
 
-def test_an_approved_action_sends_exactly_one_write(monkeypatch):
+def test_an_approved_action_sends_exactly_one_write(monkeypatch, database):
     enable(monkeypatch)
 
     reader = FakeReader(price=200.0)
@@ -536,7 +554,7 @@ def test_an_approved_action_sends_exactly_one_write(monkeypatch):
 
     writer = RecordingWriter()
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -571,7 +589,7 @@ def test_remove_pin_sends_a_removal_and_nothing_else(monkeypatch):
     assert writer.calls == [("remove", BUNKERS, "2026-09-20")]
 
 
-def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch):
+def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch, database):
     from app.connectors.pricelabs.write_client import WriteResult
 
     enable(monkeypatch)
@@ -588,7 +606,7 @@ def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch):
         )
     )
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -601,7 +619,7 @@ def test_a_provider_refusal_is_a_clean_confirmed_failure(monkeypatch):
     assert result["needs_human"] is False
 
 
-def test_an_ambiguous_send_is_unknown_and_is_never_retried(monkeypatch):
+def test_an_ambiguous_send_is_unknown_and_is_never_retried(monkeypatch, database):
     enable(monkeypatch)
 
     reader = FakeReader()
@@ -610,7 +628,7 @@ def test_an_ambiguous_send_is_unknown_and_is_never_retried(monkeypatch):
 
     writer = RecordingWriter(raises=PriceLabsUnavailable("timeout"))
 
-    result = tools(reader, writer).apply_pricing_action(
+    result = tools(reader, writer, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -658,7 +676,7 @@ def test_every_listing_ships_with_automation_off():
     assert all(not band.automation_enabled for band in BANDS)
 
 
-def test_the_kill_switch_is_off_unless_exactly_true(monkeypatch):
+def test_the_kill_switch_is_off_unless_exactly_true(monkeypatch, database):
     from app.pricing_config import writes_enabled
 
     for value in ("", "false", "1", "yes", "TRUE ", "on"):
@@ -667,7 +685,7 @@ def test_the_kill_switch_is_off_unless_exactly_true(monkeypatch):
         assert writes_enabled() is (value.strip().lower() == "true")
 
 
-def test_a_disabled_switch_surfaces_as_a_refusal_not_a_crash(monkeypatch):
+def test_a_disabled_switch_surfaces_as_a_refusal_not_a_crash(monkeypatch, database):
     verified(monkeypatch)
 
     monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
@@ -678,7 +696,7 @@ def test_a_disabled_switch_surfaces_as_a_refusal_not_a_crash(monkeypatch):
 
     real = PriceLabsWriteClient(reader=reader, api_key_provider=lambda: "k")
 
-    result = tools(reader, real).apply_pricing_action(
+    result = tools(reader, real, store(database)).apply_pricing_action(
         listing_id=BUNKERS,
         stay_date="2026-09-20",
         action="LOWER",
@@ -725,7 +743,7 @@ def test_the_pricing_write_is_dangerous_and_needs_approval(registry):
 # -- the approval flow -----------------------------------------------------
 
 
-def install_pricing_tool(api, writer, reader=None):
+def install_pricing_tool(api, writer, reader=None, cleanups=None):
     """Register a recording pricing tool on the running app.
 
     Mirrors production wiring: DANGEROUS and not model-callable, so approval is
@@ -735,7 +753,9 @@ def install_pricing_tool(api, writer, reader=None):
 
     reader = reader or FakeReader()
 
-    tool = apply_pricing_action_tool(tools(reader, writer))
+    tool = apply_pricing_action_tool(
+        tools(reader, writer, cleanups or store(api.module.database))
+    )
 
     api.module.tool_registry.register(tool)
 
@@ -1278,3 +1298,62 @@ def test_once_the_pin_is_gone_the_card_is_gone():
 
     assert after.action is not PriceAction.REMOVE_PIN
     assert not after.is_actionable or after.action is not PriceAction.REMOVE_PIN
+
+
+def test_a_price_write_without_a_cleanup_store_is_refused(monkeypatch):
+    """No store means no way to record the obligation, so no write happens.
+
+    An override nobody recorded is exactly the stranded pin the cleanup design
+    exists to prevent, so the absence of a store is a refusal rather than a
+    write that quietly skips its bookkeeping.
+    """
+    enable(monkeypatch)
+
+    reader = FakeReader()
+
+    stamp = current_fingerprint(reader)
+
+    writer = RecordingWriter()
+
+    result = tools(reader, writer, cleanups=None).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="LOWER",
+        fingerprint=stamp,
+        reason="test",
+        proposed_price=190.0,
+    )
+
+    assert result["refusal"] == "NO_CLEANUP_STORE"
+    assert writer.calls == []
+
+
+def test_a_price_write_records_its_cleanup_row_before_sending(monkeypatch, database):
+    """The row must exist first, not be written after a successful send."""
+    enable(monkeypatch)
+
+    cleanups = store(database)
+
+    reader = FakeReader()
+
+    stamp = current_fingerprint(reader)
+
+    seen: list[int] = []
+
+    class Watching(RecordingWriter):
+        def set_override(self, *args, **kwargs):
+            # How many rows exist at the moment the write is attempted.
+            seen.append(len(cleanups.open_records()))
+
+            return super().set_override(*args, **kwargs)
+
+    tools(reader, Watching(), cleanups).apply_pricing_action(
+        listing_id=BUNKERS,
+        stay_date="2026-09-20",
+        action="LOWER",
+        fingerprint=stamp,
+        reason="test",
+        proposed_price=190.0,
+    )
+
+    assert seen == [1], "the cleanup row must already exist when the write goes out"
