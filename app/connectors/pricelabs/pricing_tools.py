@@ -16,12 +16,24 @@ model can price a night.
 
 Refusal order
 -------------
-Every check that can refuse without side effects runs before anything that has
-one. Bands, the action name, the verification gate and both kill switches are
-settled first; only then does this tool read PriceLabs, recompute the
-fingerprint, or write a cleanup row. A refusal therefore leaves no record and
-makes no provider call -- which was not true when the switches were enforced
-only inside the write client.
+Not every refusal can be reached without touching the provider, and the
+distinction is worth stating precisely rather than claiming more than is true.
+
+*Locally decidable* refusals -- owner bands, the action name, the verification
+gates, and both runtime kill switches -- are settled from configuration alone.
+They all run first: before any provider access, before the credential is
+resolved, and before a cleanup row is created. An action refused for one of
+these reasons does nothing whatsoever.
+
+*Later* refusals -- STALE, STALE_DATA, PROVIDER_UNAVAILABLE -- follow read-only
+provider access, and could not be reached any other way. Whether the market
+moved since the recommendation, and how old the provider's data is, are only
+knowable from fresh provider state; there is no deciding them without asking.
+
+What holds across both: **no refusal may leave behind a cleanup obligation for
+a write that was never attempted.** The cleanup row is created immediately
+before the write and after every check that could refuse, so a refusal never
+produces a record of an obligation that does not exist.
 
 Staleness
 ---------

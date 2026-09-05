@@ -1975,16 +1975,11 @@ def test_the_verified_cleanup_gate_does_not_by_itself_permit_a_raise(
 
     This is the whole meaning of the flag. `CLEANUP_STRATEGY_VERIFIED = True`
     says one provider behaviour was proven; it does not say a price may move.
-    With `ENABLE_PRICING_WRITES` unset and an empty allowlist -- the shipped
-    defaults -- a perfectly valid RAISE reaches no write, and the credential
-    resolver is never even called.
 
-    **It does reach reads.** The switches are enforced at the moment of
-    writing, so a disabled RAISE still re-reads listings, prices, overrides and
-    market data before being refused. That is unchanged by this flag -- the
-    cleanup gate used to refuse RAISE earlier, so those reads never happened --
-    and it is safe, because they alter nothing. The guarantee defended here is
-    *no write*, not *no contact*.
+    With `ENABLE_PRICING_WRITES` unset and an empty allowlist -- the shipped
+    defaults -- a perfectly valid RAISE is refused **before any provider read
+    or write, before the credential is resolved, and before a cleanup row is
+    created**. A disabled action does nothing at all.
     """
     monkeypatch.delenv("ENABLE_PRICING_WRITES", raising=False)
     monkeypatch.delenv("PRICELABS_AUTOMATION_ENABLED", raising=False)
