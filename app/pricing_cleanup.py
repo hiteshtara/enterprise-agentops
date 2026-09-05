@@ -184,6 +184,15 @@ def check_ownership(
 
     created = override.get("created_at")
 
+    # Mandatory for anything this system wrote. Without it only three of the
+    # four checks could run, and a row that reached ACTIVE without one would be
+    # quietly held to a weaker standard than every other row.
+    if not record.adopted and not record.provider_created_at:
+        return OwnershipCheck(
+            False,
+            "the record has no provider creation time to verify against",
+        )
+
     if record.provider_created_at and created != record.provider_created_at:
         return OwnershipCheck(
             False,
@@ -296,13 +305,41 @@ class PricingCleanupStore:
         record_id: str,
         provider_created_at: str | None,
         reason_sent: str,
-    ) -> None:
+    ) -> CleanupState:
+        """Confirm a written override, or refuse to call it ACTIVE.
+
+        `provider_created_at` is mandatory for anything this system wrote. A
+        row without one could only ever satisfy three of the four ownership
+        checks, so admitting it to ACTIVE would create a record held to a
+        weaker standard than its neighbours -- and nothing downstream would
+        say so. If the confirming re-read cannot supply it, the row goes
+        straight to NEEDS_REVIEW with the override still in place.
+
+        Returns the state actually reached, so a caller cannot assume success.
+        """
+        record = self.get(record_id)
+
+        if record is not None and not record.adopted and not provider_created_at:
+            self.resolve(
+                record_id,
+                CleanupState.NEEDS_REVIEW,
+                (
+                    "the confirming re-read returned no creation time, so this "
+                    "override cannot be verified as ours later. It is still in "
+                    "place and needs a person."
+                ),
+            )
+
+            return CleanupState.NEEDS_REVIEW
+
         self._update(
             record_id,
             state=CleanupState.ACTIVE.value,
             provider_created_at=provider_created_at,
             reason_sent=reason_sent,
         )
+
+        return CleanupState.ACTIVE
 
     def resolve(
         self,

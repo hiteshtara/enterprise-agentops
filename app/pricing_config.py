@@ -54,6 +54,14 @@ MAX_CHANGE_PER_RUN = 0.10
 #: Whether `lead_time_expiry` has been *empirically* shown to expire an
 #: override.
 #:
+#: **Informational only. This is not a permission.** It once served as an
+#: alternate unlock for LOWER and RAISE and no longer does: provider-side
+#: expiry is unowned, unobservable in the moment, and leaves no per-override
+#: audit trail. Even proven, it would tell us the mechanism worked once, not
+#: that it worked for a given override on a given day. Explicit cleanup is the
+#: real safety mechanism, so `CLEANUP_STRATEGY_VERIFIED` is the sole unlock.
+#: A positive result here is a second belt, never the braces.
+#:
 #: 2026-09-04: the first live write (Modern Condo, 2026-09-21, $239 -> $246)
 #: sent `lead_time_expiry: 3`. PriceLabs accepted it and echoed it back
 #: unchanged on re-read, which proves acceptance and persistence and nothing
@@ -195,16 +203,11 @@ def unverified_reason(action: str) -> str | None:
     rest on different unproven assumptions and will be unblocked at different
     times.
     """
-    if action in {"LOWER", "RAISE"} and not (
-        EXPIRY_SEMANTICS_VERIFIED or CLEANUP_STRATEGY_VERIFIED
-    ):
+    if action in {"LOWER", "RAISE"} and not CLEANUP_STRATEGY_VERIFIED:
         return (
-            "A fixed-price write is blocked: it has no proven way to expire. "
-            "PriceLabs accepted and stored lead_time_expiry but its expiration "
-            "behaviour has never been observed, and AgentGuard's own explicit "
-            "cleanup has not yet completed a full live lifecycle. Either would "
-            "unblock this; neither has happened, so the write could strand a "
-            "permanent pin."
+            "A fixed-price write is blocked: AgentGuard's explicit cleanup "
+            "lifecycle has not completed a full live proof, so this write has "
+            "no expiry it owns and could strand a permanent pin."
         )
 
     if action == "REMOVE_PIN" and not DELETE_ENDPOINT_VERIFIED:

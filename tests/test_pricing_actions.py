@@ -425,6 +425,7 @@ def verified(monkeypatch):
     """Treat the provider behaviours as proven, for tests about other things."""
     import app.pricing_config as config
 
+    monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
     monkeypatch.setattr(config, "EXPIRY_SEMANTICS_VERIFIED", True)
     monkeypatch.setattr(config, "DELETE_ENDPOINT_VERIFIED", True)
 
@@ -1074,7 +1075,7 @@ def test_a_fixed_price_write_is_blocked_while_expiry_is_unverified(monkeypatch):
         )
 
         assert result["refusal"] == "UNVERIFIED_BEHAVIOUR"
-        assert "lead_time_expiry" in result["message"]
+        assert "explicit cleanup lifecycle" in result["message"]
 
     assert writer.calls == [], "no write may reach PriceLabs while this is open"
 
@@ -1157,7 +1158,7 @@ def test_the_block_is_surfaced_on_the_recommendation(monkeypatch):
 
     assert payload["actionable"] is True
     assert payload["blocked_reason"] is not None
-    assert "lead_time_expiry" in payload["blocked_reason"]
+    assert "explicit cleanup lifecycle" in payload["blocked_reason"]
 
 
 def test_an_informational_recommendation_carries_no_block():

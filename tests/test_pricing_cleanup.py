@@ -408,15 +408,95 @@ def test_the_cleanup_strategy_ships_unverified():
         assert unverified_reason(action) is not None
 
 
-def test_either_proven_expiry_route_would_unblock_a_price_write(monkeypatch):
-    """Two independent routes exist; neither is taken yet."""
+def test_explicit_cleanup_is_the_sole_unlock_for_a_price_write(monkeypatch):
+    """Provider-side expiry is not an alternate permission path.
+
+    It is unowned, unobservable in the moment, and leaves no per-override audit
+    trail. Even proven it would show the mechanism worked once, not that it
+    worked for a given override on a given day.
+    """
     import app.pricing_config as config
-
-    monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
-
-    assert config.unverified_reason("RAISE") is None
 
     monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", False)
     monkeypatch.setattr(config, "EXPIRY_SEMANTICS_VERIFIED", True)
 
-    assert config.unverified_reason("RAISE") is None
+    for action in ("LOWER", "RAISE"):
+        assert config.unverified_reason(action) is not None, (
+            "proven lead_time_expiry must not unlock a fixed-price write"
+        )
+
+    monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
+    monkeypatch.setattr(config, "EXPIRY_SEMANTICS_VERIFIED", False)
+
+    for action in ("LOWER", "RAISE"):
+        assert config.unverified_reason(action) is None
+
+
+# -- provider_created_at is mandatory -------------------------------------
+
+
+def test_a_row_without_a_provider_creation_time_never_becomes_active(store):
+    """Three of four checks is a weaker standard nothing downstream announces."""
+    record = store.record_intent(
+        listing_id=BUNKERS,
+        pms="lodgify",
+        stay_date=STAY,
+        old_price=None,
+        new_price=246.0,
+        currency="USD",
+        cleanup_at=NOW.isoformat(),
+    )
+
+    state = store.mark_active(record.id, None, "reason")
+
+    assert state is CleanupState.NEEDS_REVIEW
+
+    stored = store.get(record.id)
+
+    assert stored.state == CleanupState.NEEDS_REVIEW.value
+    assert "no creation time" in stored.resolution
+
+
+def test_a_row_with_a_creation_time_becomes_active(store):
+    record = store.record_intent(
+        listing_id=BUNKERS,
+        pms="lodgify",
+        stay_date=STAY,
+        old_price=None,
+        new_price=246.0,
+        currency="USD",
+        cleanup_at=NOW.isoformat(),
+    )
+
+    assert (
+        store.mark_active(record.id, "2026-09-05T09:00:00.000Z", "r")
+        is CleanupState.ACTIVE
+    )
+
+
+def test_ownership_refuses_a_v2_row_missing_its_creation_time(store):
+    """Defence in depth: even if such a row existed, cleanup would not act."""
+    record = active_record(store)
+
+    record.provider_created_at = None
+
+    check = check_ownership(record, provider_override(record))
+
+    assert check.refused
+    assert "no provider creation time" in check.reason
+
+
+def test_a_row_refused_at_confirmation_is_never_due_for_cleanup(store):
+    record = store.record_intent(
+        listing_id=BUNKERS,
+        pms="lodgify",
+        stay_date=STAY,
+        old_price=None,
+        new_price=246.0,
+        currency="USD",
+        cleanup_at=NOW.isoformat(),
+    )
+
+    store.mark_active(record.id, None, "reason")
+
+    assert store.due(now=NOW) == []

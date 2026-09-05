@@ -54,7 +54,7 @@ this feature exists to prevent.
 | `reason_sent` | The exact `reason` string sent, marker included, so the confirming re-read can be compared byte-for-byte. |
 | `approval_id`, `run_id` | The human decision that authorised it. |
 | `created_at` | When AgentGuard sent it. |
-| `provider_created_at` | `created_at` as PriceLabs reported it on the confirming re-read. |
+| `provider_created_at` | `created_at` as PriceLabs reported it on the confirming re-read. **Mandatory** for anything V2 wrote — see below. |
 | `cleanup_at` | When the override must be removed. Explicit, not derived at read time. |
 | `state` | See §4. |
 | `resolved_at`, `resolution` | How it ended. |
@@ -90,6 +90,20 @@ not own. A namespaced id cannot collide by accident.
 
 The token goes first so that any provider-side truncation removes the
 human-readable tail rather than the identity.
+
+### `provider_created_at` is mandatory before a row may become ACTIVE
+
+A row without one could only ever satisfy three of the four checks. Admitting
+it to `ACTIVE` would create a record held to a quietly weaker standard than its
+neighbours, with nothing downstream saying so.
+
+So if the confirming re-read cannot supply a creation time, the row goes
+straight to `NEEDS_REVIEW` with the override still in place, and `mark_active`
+returns the state actually reached so a caller cannot assume success. Cleanup
+refuses such a row too, as defence in depth.
+
+The adopted pre-V2 row is exempt from the *marker*, not from this: it carries a
+`provider_created_at` taken from the audit record.
 
 ### The four checks
 
@@ -224,11 +238,16 @@ trigger is inspectable and repeatable by hand.
 
 ## 7. What this does not change
 
-* `EXPIRY_SEMANTICS_VERIFIED` stays `False`.
 * `LOWER` and `RAISE` stay blocked.
-* Unblocking them requires a **separate** flag, `CLEANUP_STRATEGY_VERIFIED`,
-  set only after this design is approved, implemented, unit-tested, and
-  exercised live end to end: write → active → cleanup → confirmed removal.
+* **`CLEANUP_STRATEGY_VERIFIED` is the sole unlock.** It is set only after this
+  design is implemented, unit-tested, and exercised live end to end: write →
+  active → cleanup → confirmed removal.
+* `EXPIRY_SEMANTICS_VERIFIED` is **informational only and is not a permission**.
+  It was briefly an alternate unlock and no longer is. Provider-side expiry is
+  unowned, unobservable in the moment, and leaves no per-override audit trail;
+  even proven it would show the mechanism worked once, not that it worked for a
+  given override on a given day. A positive result is a second belt, never the
+  braces.
 * Nothing here is unattended pricing. A price still moves only when a human
   approves that exact change.
 
