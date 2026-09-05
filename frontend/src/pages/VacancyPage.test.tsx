@@ -60,10 +60,34 @@ function board(overrides: Partial<VacancyBoard> = {}): VacancyBoard {
         provider_flag: null,
         provider_recommendations: [],
         calendar: [
-          { stay_date: '2026-09-07', state: 'BOOKED', price: 200, minimum_stay: 3, is_weekend: false },
-          { stay_date: '2026-09-08', state: 'OPEN', price: 220, minimum_stay: 3, is_weekend: false },
-          { stay_date: '2026-09-09', state: 'UNBOOKABLE', price: 740, minimum_stay: 3, is_weekend: false },
-          { stay_date: '2026-09-10', state: 'UNKNOWN', price: null, minimum_stay: null, is_weekend: false },
+          {
+            stay_date: '2026-09-07',
+            state: 'BOOKED',
+            price: 200,
+            minimum_stay: 3,
+            is_weekend: false,
+          },
+          {
+            stay_date: '2026-09-08',
+            state: 'OPEN',
+            price: 220,
+            minimum_stay: 3,
+            is_weekend: false,
+          },
+          {
+            stay_date: '2026-09-09',
+            state: 'UNBOOKABLE',
+            price: 740,
+            minimum_stay: 3,
+            is_weekend: false,
+          },
+          {
+            stay_date: '2026-09-10',
+            state: 'UNKNOWN',
+            price: null,
+            minimum_stay: null,
+            is_weekend: false,
+          },
         ],
       },
     ],
@@ -141,9 +165,7 @@ describe('VacancyPage', () => {
 
     // Scoped to the summary tiles. The same figures reappear per property
     // below, which is the point -- one number described twice, never summed.
-    const tiles = within(
-      container.querySelector('.grid-stats') as HTMLElement,
-    )
+    const tiles = within(container.querySelector('.grid-stats') as HTMLElement)
 
     expect(tiles.getByText('Unbookable nights')).toBeInTheDocument()
     expect(tiles.getByText('Value trapped')).toBeInTheDocument()

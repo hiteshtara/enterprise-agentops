@@ -45,7 +45,9 @@ function rec(over: Partial<PricingRecommendation> = {}): PricingRecommendation {
   }
 }
 
-function page(over: Partial<PricingRecommendationPage> = {}): PricingRecommendationPage {
+function page(
+  over: Partial<PricingRecommendationPage> = {},
+): PricingRecommendationPage {
   return {
     generated_at: '2026-09-04T12:00:00+00:00',
     horizon_days: 60,
@@ -73,7 +75,12 @@ describe('RecommendedActions', () => {
       page({
         recommendations: [
           rec(),
-          rec({ id: 'x', action: 'HOLD', actionable: false, display_name: 'Held Home' }),
+          rec({
+            id: 'x',
+            action: 'HOLD',
+            actionable: false,
+            display_name: 'Held Home',
+          }),
         ],
       }),
     )
@@ -92,9 +99,7 @@ describe('RecommendedActions', () => {
     await screen.findByText('Invented Cottage')
 
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: /Approve/ }),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Approve/ })).not.toBeInTheDocument()
   })
 
   it('reveals every guardrail before approval is possible', async () => {
@@ -154,9 +159,7 @@ describe('RecommendedActions', () => {
     await user.click(await screen.findByRole('button', { name: /Approve & Apply/ }))
 
     expect(await screen.findByText('Override stored.')).toBeInTheDocument()
-    expect(
-      screen.getByText(/not confirmation that it has/),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/not confirmation that it has/)).toBeInTheDocument()
   })
 
   it('an unknown write state offers no retry and says to check PriceLabs', async () => {

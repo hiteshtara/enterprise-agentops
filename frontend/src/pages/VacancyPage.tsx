@@ -120,9 +120,7 @@ function freshnessLine(properties: VacancyProperty[]): {
       })
 
   const label =
-    properties.length > 1
-      ? 'Oldest PriceLabs refresh'
-      : 'PriceLabs data last refreshed'
+    properties.length > 1 ? 'Oldest PriceLabs refresh' : 'PriceLabs data last refreshed'
 
   return {
     text: `${label}: ${when}`,
@@ -190,8 +188,7 @@ function Legend() {
 }
 
 function OrphanRow({ window: gap }: { window: VacancyWindow }) {
-  const tone =
-    gap.orphan_class === 'one_night' ? 'tone-warn' : 'tone-neutral'
+  const tone = gap.orphan_class === 'one_night' ? 'tone-warn' : 'tone-neutral'
 
   return (
     <div className="card vac-orphan">
@@ -273,7 +270,12 @@ function OpportunityRow({ window: entry }: { window: VacancyWindow }) {
       </td>
       <td className="mono">
         {range(entry)}
-        {entry.truncated ? <span className="faint" title="Window continues past the horizon"> *</span> : null}
+        {entry.truncated ? (
+          <span className="faint" title="Window continues past the horizon">
+            {' '}
+            *
+          </span>
+        ) : null}
       </td>
       <td className="mono vac-num">{entry.nights}</td>
       <td className="mono vac-num">{money(entry.gross_value)}</td>
@@ -315,9 +317,7 @@ function PropertyCard({ property }: { property: VacancyProperty }) {
           </div>
           <div>
             <div className="stat-label">Open value</div>
-            <div className="vac-figure">
-              {money(property.sellable_gross_value)}
-            </div>
+            <div className="vac-figure">{money(property.sellable_gross_value)}</div>
           </div>
         </div>
       </div>
@@ -405,8 +405,8 @@ function Board({ board }: { board: VacancyBoard }) {
       <section className="vac-section">
         <h2 className="card-title">Unbookable gaps</h2>
         <p className="page-subtitle">
-          Vacant nights a guest cannot book, because a stay restriction blocks
-          them. Surfaced only — nothing here changes a minimum stay.
+          Vacant nights a guest cannot book, because a stay restriction blocks them.
+          Surfaced only — nothing here changes a minimum stay.
         </p>
         {board.unbookable_windows.length ? (
           <div className="grid">
@@ -422,8 +422,8 @@ function Board({ board }: { board: VacancyBoard }) {
       <section className="vac-section">
         <h2 className="card-title">Needs attention</h2>
         <p className="page-subtitle">
-          Drawn from PriceLabs pacing and market data. Any pricing advice shown
-          here is PriceLabs' own recommendation, quoted.
+          Drawn from PriceLabs pacing and market data. Any pricing advice shown here is
+          PriceLabs' own recommendation, quoted.
         </p>
         {board.needs_attention.length ? (
           <div className="grid">
@@ -439,9 +439,9 @@ function Board({ board }: { board: VacancyBoard }) {
       <section className="vac-section">
         <h2 className="card-title">Top opportunities</h2>
         <p className="page-subtitle">
-          Ranked by a fixed formula over open value, weekend nights,
-          property-relative high-value nights, booking-window pacing and
-          market position. No model scores these.
+          Ranked by a fixed formula over open value, weekend nights, property-relative
+          high-value nights, booking-window pacing and market position. No model scores
+          these.
         </p>
         {board.opportunities.length ? (
           <div className="vac-table-wrap">
@@ -500,13 +500,13 @@ function NotConnected({ message }: { message: string | null }) {
         {message ?? 'PriceLabs is not connected to AgentGuard yet.'}
       </h2>
       <p>
-        This page reads open inventory, nightly pricing and pacing from
-        PriceLabs. Until an account is connected there is nothing to show, and
-        AgentGuard will not stand in sample properties for real ones.
+        This page reads open inventory, nightly pricing and pacing from PriceLabs. Until
+        an account is connected there is nothing to show, and AgentGuard will not stand
+        in sample properties for real ones.
       </p>
       <p className="faint">
-        Set <code className="mono">PRICELABS_API_KEY</code> from PriceLabs
-        Account Settings → API Details, then restart AgentGuard.
+        Set <code className="mono">PRICELABS_API_KEY</code> from PriceLabs Account
+        Settings → API Details, then restart AgentGuard.
       </p>
     </div>
   )
