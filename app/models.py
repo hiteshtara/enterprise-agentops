@@ -654,6 +654,9 @@ class PricingRecommendation(BaseModel):
     pct_change: float | None = None
     confidence: str
     reason: str
+    #: The same decision in the owner's terms; `reason` keeps the detail.
+    plain_reason: str | None = None
+    plain_action: str | None = None
     refused: str | None = None
     requires_human: bool = False
     notes: list[str] = []
@@ -695,6 +698,9 @@ class PricingRecommendationPage(BaseModel):
     generated_at: str
     horizon_days: int
     writes_enabled: bool
+    #: Write actions that could execute right now. Permitted, never automatic:
+    #: each still requires an individual human approval.
+    unblocked_actions: list[str] = []
     max_change_per_run: float
     recommendations: list[PricingRecommendation]
     bands: list[PricingBandsOut]

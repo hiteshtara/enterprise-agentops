@@ -769,9 +769,40 @@ def test_an_unconfigured_runtime_reports_not_connected(api, monkeypatch):
     assert body["message"] == "PriceLabs is not connected to AgentGuard yet."
 
 
-def test_the_default_wiring_ships_no_provider(api):
-    """The app as imported has no vacancy provider at all."""
-    assert api.module.vacancy_provider is None
+def test_no_provider_is_wired_without_a_credential(api, monkeypatch):
+    """Absent a credential, the app wires no provider at all.
+
+    The environment is cleared and the module reloaded inside the test rather
+    than relying on the ambient one. This assertion previously passed or failed
+    depending on whether the developer running it happened to have
+    PRICELABS_API_KEY exported, which made it evidence of nothing.
+    """
+    import importlib
+
+    monkeypatch.delenv("PRICELABS_API_KEY", raising=False)
+
+    reloaded = importlib.reload(api.module)
+
+    assert reloaded.vacancy_provider is None
+    assert reloaded.pricelabs_recommendations is None
+    assert reloaded.pricelabs_pricing_tools is None
+
+
+def test_a_provider_is_wired_when_a_credential_is_present(api, monkeypatch):
+    """And the converse, so the test above cannot pass for the wrong reason."""
+    import importlib
+
+    monkeypatch.setenv("PRICELABS_API_KEY", "test-only-not-a-real-key")
+
+    reloaded = importlib.reload(api.module)
+
+    assert reloaded.vacancy_provider is not None
+    assert reloaded.pricelabs_recommendations is not None
+
+    # Restore a keyless module so no later test inherits a configured one.
+    monkeypatch.delenv("PRICELABS_API_KEY", raising=False)
+
+    importlib.reload(api.module)
 
 
 def test_a_configured_key_without_a_connector_says_so_distinctly(api, monkeypatch):

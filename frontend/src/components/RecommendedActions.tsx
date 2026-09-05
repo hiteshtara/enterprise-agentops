@@ -96,11 +96,60 @@ function Evidence({ rec }: { rec: PricingRecommendation }) {
         ))}
       </dl>
       <p className="vac-reason">{rec.reason}</p>
+      {rec.blocked_reason ? <p className="vac-note">{rec.blocked_reason}</p> : null}
       {rec.notes.map((note) => (
         <p key={note} className="vac-note">
           {note}
         </p>
       ))}
+    </div>
+  )
+}
+
+/**
+ * What is actually permitted right now, said accurately.
+ *
+ * The page used to say "pricing writes are disabled" whenever any gate was
+ * shut, which became untrue the moment one action type was released: an owner
+ * reading it would have believed a control was off while it was on. It now
+ * reports each action separately, and never describes a permitted action as
+ * automatic -- every one still stops for an individual approval.
+ */
+function PolicyBanner({
+  writesEnabled,
+  unblocked,
+}: {
+  writesEnabled: boolean
+  unblocked: string[]
+}) {
+  if (!writesEnabled || unblocked.length === 0) {
+    return (
+      <div className="card demo-note" role="note">
+        <strong>Pricing changes are turned off.</strong> Recommendations are shown for
+        review only. Nothing here can change a price.
+      </div>
+    )
+  }
+
+  const canRemovePin = unblocked.includes('REMOVE_PIN')
+  const priceMovesOff = !unblocked.includes('LOWER') && !unblocked.includes('RAISE')
+
+  return (
+    <div className="card demo-note" role="note">
+      {canRemovePin ? (
+        <>
+          <strong>Returning a date to dynamic pricing is enabled</strong> — and still
+          asks you every time. Nothing is applied until you approve that exact date.
+        </>
+      ) : (
+        <strong>Some pricing actions are enabled, each requiring approval.</strong>
+      )}
+      {priceMovesOff ? (
+        <>
+          {' '}
+          Raising and lowering prices remain switched off pending expiry verification.
+        </>
+      ) : null}
     </div>
   )
 }
@@ -112,12 +161,17 @@ function ActionCard({
   rec: PricingRecommendation
   writesEnabled: boolean
 }) {
-  const [open, setOpen] = useState(false)
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [outcome, setOutcome] = useState<PricingOutcome | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [rejected, setRejected] = useState(false)
+
+  const isRemovePin = rec.action === 'REMOVE_PIN'
+
+  const keepLabel = isRemovePin ? `Keep ${money(rec.current_price)}` : 'Reject'
+
+  const applyLabel = isRemovePin ? 'Return to dynamic pricing' : 'Approve & Apply'
 
   async function onReview() {
     setBusy(true)
@@ -127,7 +181,6 @@ function ActionCard({
       const response = await submitPricingAction(rec)
 
       setApproval(response.approval_required ?? null)
-      setOpen(true)
     } catch (caught) {
       setError(caught)
     } finally {
@@ -178,26 +231,26 @@ function ActionCard({
         </div>
       </div>
 
-      <div className="vac-action-prices">
-        <span className="mono">{money(rec.current_price)}</span>
-        <span aria-hidden="true"> → </span>
-        <span className="mono vac-figure">
-          {rec.proposed_price === null ? 'dynamic' : money(rec.proposed_price)}
-        </span>
-        {rec.pct_change !== null ? (
-          <span className="faint mono">
-            {' '}
-            ({rec.pct_change > 0 ? '+' : ''}
-            {rec.pct_change}%)
-          </span>
-        ) : null}
-      </div>
+      <dl className="vac-plain">
+        <dt>Current</dt>
+        <dd className="mono">
+          {money(rec.current_price)}
+          {isRemovePin ? ' fixed' : null}
+        </dd>
+        <dt>Recommendation</dt>
+        <dd>{rec.plain_action ?? rec.action}</dd>
+        <dt>Reason</dt>
+        <dd>{rec.plain_reason ?? rec.reason}</dd>
+      </dl>
 
       {rec.requires_human ? (
         <p className="vac-note">Always requires a human decision.</p>
       ) : null}
 
-      {open ? <Evidence rec={rec} /> : null}
+      <details className="vac-details">
+        <summary>Show details</summary>
+        <Evidence rec={rec} />
+      </details>
 
       {error ? (
         <div className="state state-error" role="alert">
@@ -227,21 +280,22 @@ function ActionCard({
       ) : approval ? (
         <div className="vac-approve">
           <p className="faint">
-            Approving applies this one change in PriceLabs. The server re-reads first
-            and refuses if anything moved.
+            {isRemovePin
+              ? 'This releases the date back to PriceLabs dynamic pricing. No booking or guest rate is affected. The server re-reads first and refuses if anything moved.'
+              : 'Approving applies this one change in PriceLabs. The server re-reads first and refuses if anything moved.'}
           </p>
           <div className="row" style={{ gap: 8 }}>
             <button type="button" disabled={busy} onClick={() => onDecide(true)}>
-              Approve &amp; Apply
+              {applyLabel}
             </button>
             <button type="button" disabled={busy} onClick={() => onDecide(false)}>
-              Reject
+              {keepLabel}
             </button>
           </div>
         </div>
       ) : rec.blocked_reason ? (
         <div className="state state-warn" role="note">
-          <strong>Blocked pending live verification.</strong> {rec.blocked_reason}
+          Price changes are currently disabled pending expiry verification.
         </div>
       ) : (
         <div className="row" style={{ gap: 8 }}>
@@ -249,7 +303,7 @@ function ActionCard({
             {busy ? 'Preparing…' : 'Review'}
           </button>
           {!writesEnabled ? (
-            <span className="faint">Pricing writes are disabled — review only.</span>
+            <span className="faint">Pricing changes are turned off — review only.</span>
           ) : null}
         </div>
       )}
@@ -275,14 +329,10 @@ export function RecommendedActions() {
         individually.
       </p>
 
-      {!data.writes_enabled ? (
-        <div className="card demo-note" role="note">
-          <strong>Pricing writes are disabled.</strong> Recommendations are shown for
-          review. Applying one requires{' '}
-          <span className="mono">ENABLE_PRICING_WRITES</span> and that listing&rsquo;s
-          own switch.
-        </div>
-      ) : null}
+      <PolicyBanner
+        writesEnabled={data.writes_enabled}
+        unblocked={data.unblocked_actions}
+      />
 
       {actionable.length ? (
         <div className="grid">

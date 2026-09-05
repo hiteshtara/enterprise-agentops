@@ -157,6 +157,7 @@ from app.pricing_service import (
     HORIZON_DAYS,
     PricingRecommendationService,
     bands_payload,
+    unblocked_actions,
 )
 from app.reconciliation import (
     DEFAULT_STALE_AFTER_SECONDS,
@@ -1840,6 +1841,7 @@ def get_pricing_recommendations(
         generated_at=datetime.now(UTC).isoformat(),
         horizon_days=HORIZON_DAYS,
         writes_enabled=pricing_writes_enabled(),
+        unblocked_actions=unblocked_actions(),
         max_change_per_run=MAX_CHANGE_PER_RUN,
         recommendations=[
             PricingRecommendation(**row) for row in pricing_payloads(recommendations)

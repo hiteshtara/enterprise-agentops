@@ -635,6 +635,9 @@ export interface PricingRecommendation {
   pct_change: number | null
   confidence: 'HIGH' | 'MEDIUM' | 'LOW'
   reason: string
+  /** The same decision in the owner's terms; `reason` keeps the detail. */
+  plain_reason: string | null
+  plain_action: string | null
   refused: string | null
   requires_human: boolean
   notes: string[]
@@ -673,6 +676,8 @@ export interface PricingRecommendationPage {
   generated_at: string
   horizon_days: number
   writes_enabled: boolean
+  /** Write actions that could execute now. Permitted, never automatic. */
+  unblocked_actions: string[]
   max_change_per_run: number
   recommendations: PricingRecommendation[]
   bands: PricingBandsOut[]
