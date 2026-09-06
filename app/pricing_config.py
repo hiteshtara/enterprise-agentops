@@ -193,14 +193,21 @@ OBSERVED_COMMISSION_RATES: dict[str, float] = {
     "allston": 18.0,
 }
 
-#: Which invoice group each listing belongs to. Absent means no invoice
-#: evidence has been attached to that listing yet, and its card shows no
-#: commission rather than a guessed one.
+#: Which invoice group each listing belongs to.
+#:
+#: The grouping is the owner's, not a guess from listing names -- an earlier
+#: draft inferred it from wording and put Modern Condo under Roslindale and
+#: Arboretum nowhere, both wrong. A listing absent from this map has no
+#: invoice evidence attached and shows no commission rather than borrowing
+#: another group's rate; there is deliberately no portfolio-wide fallback.
 LISTING_INVOICE_GROUP: dict[str, str] = {
     "roslindale-3rd-floor": "roslindale",
     "renovated-2nd-floor": "roslindale",
     "boston-bunkers": "roslindale",
-    "modern-condo": "roslindale",
+    "arboretum": "roslindale",
+    "modern-condo": "jp-forest-hill",
+    "boston-condo-second-floor": "jp-forest-hill",
+    "harvard": "allston",
 }
 
 

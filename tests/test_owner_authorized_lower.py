@@ -184,27 +184,59 @@ def test_the_warning_never_claims_the_exposure_is_verified():
 # -- observed commission, not contractual ----------------------------------
 
 
-def test_a_commission_rate_is_only_reported_where_an_invoice_exists():
-    """A property group with no invoice shows nothing, not another's rate."""
-    assert observed_commission_rate(BUNKERS) == 23.0
+#: The owner's own grouping. Not inferable from listing names -- an earlier
+#: draft guessed from wording and put Modern Condo under Roslindale and left
+#: Arboretum unmapped, both wrong.
+EXPECTED_GROUPS = {
+    "roslindale-3rd-floor": ("roslindale", 23.0),
+    "renovated-2nd-floor": ("roslindale", 23.0),
+    "boston-bunkers": ("roslindale", 23.0),
+    "arboretum": ("roslindale", 23.0),
+    "modern-condo": ("jp-forest-hill", 18.0),
+    "boston-condo-second-floor": ("jp-forest-hill", 18.0),
+    "harvard": ("allston", 18.0),
+}
 
-    assert observed_commission_rate(CONDO_2F) is None
-    assert observed_commission_rate(ARBORETUM) is None
-    assert observed_commission_rate("not-a-listing") is None
-    assert observed_commission_rate(None) is None
 
-
-def test_no_commission_rate_is_invented_for_an_unmapped_listing():
-    """Absence stays absence.
-
-    Every listing without an invoice group must report None, so a rate can
-    never be borrowed from a group it was not billed under.
-    """
-    mapped = set(config.LISTING_INVOICE_GROUP)
+def test_every_listing_maps_to_its_invoice_group_and_observed_rate():
+    """All seven, by slug, against the rate its group's invoice actually billed."""
+    assert set(config.LISTING_INVOICE_GROUP) == set(EXPECTED_GROUPS)
 
     for band in BANDS:
-        if band.slug not in mapped:
-            assert observed_commission_rate(band.listing_id) is None, band.slug
+        group, rate = EXPECTED_GROUPS[band.slug]
+
+        assert config.LISTING_INVOICE_GROUP[band.slug] == group, band.slug
+        assert observed_commission_rate(band.listing_id) == rate, band.slug
+
+
+def test_the_roslindale_four_share_one_invoice_rate():
+    roslindale = [s for s, (g, _) in EXPECTED_GROUPS.items() if g == "roslindale"]
+
+    assert len(roslindale) == 4
+    assert "arboretum" in roslindale, "Arboretum is billed under Roslindale"
+    assert "modern-condo" not in roslindale, "Modern Condo is JP / Forest Hill"
+
+
+def test_an_unknown_listing_has_no_rate():
+    """No portfolio-wide fallback: absence stays absence."""
+    assert observed_commission_rate("not-a-listing") is None
+    assert observed_commission_rate(None) is None
+    assert observed_commission_rate("") is None
+
+
+def test_there_is_no_default_commission_rate():
+    """A lookup miss must not resolve to any group's rate.
+
+    Guarded because a `.get(group, SOMETHING)` added later would silently
+    attach a billed rate to an account nobody has an invoice for.
+    """
+    import inspect
+
+    source = inspect.getsource(config.observed_commission_rate)
+
+    assert "OBSERVED_COMMISSION_RATES.get(group)" in source
+    assert "OBSERVED_COMMISSION_RATES.get(group," not in source
+    assert config.OBSERVED_COMMISSION_RATES.get("no-such-group") is None
 
 
 def test_observed_rates_are_recorded_as_observations():
