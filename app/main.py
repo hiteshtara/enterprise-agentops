@@ -97,6 +97,8 @@ from app.knowledge import KnowledgeStatus, KnowledgeStore
 from app.knowledge_conflicts import find_conflicts
 from app.knowledge_topics import GUEST_FACING, INTERNAL_OPERATION
 from app.lodgify_webhooks import WebhookLog, handle_event, parse_webhook_body
+from app.lower_priority import rank as rank_lower_opportunities
+from app.lower_priority import select_lower, summarise_lower
 from app.migration_store import MigrationBatchStore
 from app.model_provider import OpenAIModelProvider
 from app.models import (
@@ -125,6 +127,7 @@ from app.models import (
     KnowledgeSupersede,
     LoginRequest,
     LoginResponse,
+    LowerOpportunity,
     Overview,
     PricingActionRequest,
     PricingBandsOut,
@@ -1973,7 +1976,13 @@ def get_revenue_opportunities(
     # Selection first, then triage. The priority layer only ever sees rows the
     # pricing engine already produced, and adds presentation fields to them --
     # it can neither admit a row the selector rejected nor change one.
-    rows = rank_opportunities(select_opportunities(pricing_payloads(recommendations)))
+    payloads = pricing_payloads(recommendations)
+
+    rows = rank_opportunities(select_opportunities(payloads))
+
+    # Kept separate the whole way down. A reduction and an increase answer
+    # different questions, rank on different things, and must never be summed.
+    lower_rows = rank_lower_opportunities(select_lower(payloads))
 
     return RevenueOpportunityPage(
         generated_at=datetime.now(UTC).isoformat(),
@@ -1983,6 +1992,8 @@ def get_revenue_opportunities(
             **summarise_priorities(rows),
         },
         opportunities=[RevenueOpportunity(**row) for row in rows],
+        lower_summary=summarise_lower(lower_rows),
+        lower_opportunities=[LowerOpportunity(**row) for row in lower_rows],
     )
 
 

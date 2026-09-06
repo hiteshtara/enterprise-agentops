@@ -1,5 +1,5 @@
 import { getRevenueOpportunities } from '../api/agentguard'
-import type { Priority, RevenueOpportunity } from '../api/types'
+import type { LowerOpportunity, Priority, RevenueOpportunity } from '../api/types'
 import { useAsync } from '../hooks/useAsync'
 import { useUrlFilter } from '../hooks/useUrlFilter'
 import { PageHeader } from '../components/Layout'
@@ -178,6 +178,103 @@ function Row({ row }: { row: RevenueOpportunity }) {
   )
 }
 
+/**
+ * Vacancy-fill reductions, kept visually and structurally apart from RAISE.
+ *
+ * They answer a different question -- "which empty nights am I about to lose"
+ * rather than "where is money being left on the table" -- rank on proximity to
+ * arrival rather than dollars, and rest on different evidence. Summing or
+ * interleaving them would invite reading a reduction as a loss.
+ *
+ * Read-only, like the rest of this page. Applying a reduction happens under
+ * Recommended actions on the Vacancy page, one date at a time, with an
+ * approval that shows the same Booking.com warning.
+ */
+function LowerRow({ row }: { row: LowerOpportunity }) {
+  const reduction =
+    row.current_price !== null && row.proposed_price !== null
+      ? row.current_price - row.proposed_price
+      : null
+
+  const reductionPct =
+    reduction !== null && row.current_price
+      ? (reduction / row.current_price) * 100
+      : null
+
+  return (
+    <tr>
+      <td>
+        <span className={`badge ${PRIORITY_TONE[row.priority]}`}>
+          <span className="badge-dot" aria-hidden="true" />
+          {PRIORITY_LABELS[row.priority]}
+        </span>
+        {row.below_owner_floor ? (
+          <div className="faint tone-warn">Below owner floor</div>
+        ) : null}
+        {row.market_signal_conflict ? (
+          <div className="faint">Signal conflict</div>
+        ) : null}
+      </td>
+      <td>
+        <strong>{row.display_name}</strong>
+        <div className="faint mono">{row.stay_date}</div>
+      </td>
+      <td className="mono">{row.days_out}d</td>
+      <td className="mono">{money(row.current_price)}</td>
+      <td className="mono">{money(row.proposed_price)}</td>
+      <td className="mono">
+        <strong>−{money(reduction)}</strong>
+        <div className="faint">
+          {reductionPct === null ? '—' : `−${reductionPct.toFixed(1)}%`}
+        </div>
+      </td>
+      <td className="mono">
+        {money(row.historical_lead_band_adr)}
+        <div className="faint">n={row.history_sample_count}</div>
+      </td>
+      <td className="mono">
+        {money(row.historical_reference_gap_dollars)}
+        <div className="faint">
+          {row.historical_reference_gap_pct === null
+            ? '—'
+            : `${row.historical_reference_gap_pct.toFixed(0)}%`}
+        </div>
+      </td>
+      <td className="mono">
+        {money(row.hard_floor)}
+        <div className="faint">owner {money(row.owner_floor ?? row.normal_floor)}</div>
+      </td>
+      <td className="mono">
+        {money(row.market_p25)}
+        <div className="faint">{percent(row.market_occupancy)} mkt</div>
+      </td>
+      <td>
+        {row.demand ?? '—'}
+        <div className="faint">unit {percent(row.listing_occupancy)}</div>
+      </td>
+      <td className="mono">
+        {row.observed_commission_rate === null
+          ? 'not observed'
+          : `${row.observed_commission_rate.toFixed(0)}%`}
+      </td>
+      <td className="faint">
+        {row.why_now}
+        {row.market_signal_conflict ? (
+          <div className="vac-note">
+            <strong>Market raise evidence:</strong> comparable listings at{' '}
+            {money(row.market_p25)} p25.{' '}
+            <strong>Property-history lower evidence:</strong>{' '}
+            {money(row.historical_lead_band_adr)} realized at this lead time (n=
+            {row.history_sample_count}). Because this night is close to arrival and
+            demand is weak, the property&rsquo;s realized lead-time history takes
+            precedence.
+          </div>
+        ) : null}
+      </td>
+    </tr>
+  )
+}
+
 export function OpportunitiesPage() {
   const { data, error, loading } = useAsync(getRevenueOpportunities, [])
 
@@ -349,6 +446,8 @@ export function OpportunitiesPage() {
         </p>
       ) : null}
 
+      <h2 className="card-title">Raise opportunities</h2>
+
       {shown.length ? (
         <div className="card" style={{ overflowX: 'auto' }}>
           <table>
@@ -385,6 +484,87 @@ export function OpportunitiesPage() {
               : 'No raise is recommended in the next 60 days.'
           }
         />
+      )}
+
+      <h2 className="card-title">Lower / vacancy-fill opportunities</h2>
+
+      {data.lower_summary ? (
+        <div className="grid-stats">
+          <div className="card">
+            <div className="stat-label">Reductions</div>
+            <div className="stat-value">{data.lower_summary.opportunities}</div>
+          </div>
+          <div className="card">
+            <div className="stat-label">Review now</div>
+            <div className="stat-value tone-ok">{data.lower_summary.review_now}</div>
+          </div>
+          <div className="card">
+            <div className="stat-label">Watch</div>
+            <div className="stat-value tone-warn">{data.lower_summary.watch}</div>
+          </div>
+          <div className="card">
+            <div className="stat-label">Below owner floor</div>
+            <div className="stat-value">{data.lower_summary.below_owner_floor}</div>
+          </div>
+          <div className="card">
+            <div className="stat-label">Signal conflicts</div>
+            <div className="stat-value">
+              {data.lower_summary.market_signal_conflict}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/*
+        Unconditional, above the table, never behind a fold. The exposure is
+        unmeasured whether or not the owner has authorised acting on it, so
+        this is not conditional on any flag -- and it is the one thing a
+        reviewer must read before deciding to lower a published price.
+      */}
+      {data.lower_opportunities.length ? (
+        <div className="card state-warn" role="note">
+          <strong>Booking.com exposure is not fully verified.</strong> Actual
+          reservations have shown stacked promotional/Genius discounts, and the maximum
+          effective guest discount is unknown. Lowering the PriceLabs published price
+          may therefore result in an even lower guest-facing rate.
+          <div className="faint">
+            Commission percentages shown below are{' '}
+            <strong>observed on an actual August 2026 invoice</strong> for that property
+            group — not a contract rate, not guaranteed, and not a prediction.
+            Properties with no invoice attached show “not observed”.
+          </div>
+        </div>
+      ) : null}
+
+      {data.lower_opportunities.length ? (
+        <div className="card" style={{ overflowX: 'auto' }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>Property / date</th>
+                <th>Days out</th>
+                <th>Current</th>
+                <th>Proposed</th>
+                <th>Reduction</th>
+                <th>Hist. lead-band ADR</th>
+                <th>Gap vs history</th>
+                <th>Floors</th>
+                <th>Market p25</th>
+                <th>Demand</th>
+                <th>Observed commission</th>
+                <th>Why now</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.lower_opportunities.map((row) => (
+                <LowerRow key={row.id} row={row} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Empty message="No price reduction is recommended in the next 60 days." />
       )}
     </>
   )

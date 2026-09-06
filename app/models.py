@@ -687,6 +687,20 @@ class PricingRecommendation(BaseModel):
     #: This night satisfied both the history-backed LOWER rule and the
     #: market-based RAISE rule. Explanation only; it changed nothing.
     market_signal_conflict: bool = False
+    #: What this property has actually converted at in this lead band, and how
+    #: many bookings that rests on. Evidence, never a target price.
+    historical_lead_band_adr: float | None = None
+    history_sample_count: int = 0
+    historical_reference_gap_dollars: float | None = None
+    historical_reference_gap_pct: float | None = None
+    #: Below the owner floor but above the hard floor: reviewable, never an
+    #: ordinary reduction.
+    below_owner_floor: bool = False
+    #: Shown on every LOWER, unconditionally and never behind a fold.
+    booking_com_warning: str | None = None
+    #: Billed on an actual invoice for this listing's group. None means no
+    #: invoice has been attached, not that the rate is zero.
+    observed_commission_rate: float | None = None
     last_refreshed_at: str | None = None
     #: Whether the evidence is too old to act on. Unknown age counts as stale.
     stale: bool = False
@@ -751,6 +765,31 @@ class RevenueOpportunitySummary(BaseModel):
     low_priority: int = 0
 
 
+class LowerOpportunity(PricingRecommendation):
+    """One vacancy-fill reduction worth a person's attention."""
+
+    priority: str
+    priority_reasons: list[str] = []
+    why_now: str = ""
+    lower_flags: list[str] = []
+
+
+class LowerOpportunitySummary(BaseModel):
+    """Counts over the rows shown.
+
+    `total_reduction` is the sum of the per-night price differences. It is not
+    lost revenue and not expected revenue: these nights are unsold, so there is
+    no revenue to lose, and lowering a price is not a booking.
+    """
+
+    opportunities: int
+    review_now: int
+    watch: int
+    below_owner_floor: int
+    market_signal_conflict: int
+    total_reduction: float
+
+
 class RevenueOpportunityPage(BaseModel):
     """The 60-day opportunity view. Read-only: nothing here can change a price.
 
@@ -763,6 +802,10 @@ class RevenueOpportunityPage(BaseModel):
     horizon_days: int
     summary: RevenueOpportunitySummary
     opportunities: list[RevenueOpportunity] = []
+    #: Vacancy-fill reductions, kept separate from RAISE throughout: a
+    #: different question, a different priority rule, different evidence.
+    lower_summary: LowerOpportunitySummary | None = None
+    lower_opportunities: list[LowerOpportunity] = []
 
 
 class PricingCleanupOut(BaseModel):

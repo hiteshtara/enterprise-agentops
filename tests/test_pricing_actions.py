@@ -1072,16 +1072,22 @@ def test_the_console_reports_the_real_switch_state_not_the_table(monkeypatch):
 # -- unverified provider behaviour ----------------------------------------
 
 
-def test_a_lower_is_still_blocked_after_the_cleanup_gate_opened(
+def test_a_lower_is_blocked_when_neither_verified_nor_authorized(
     monkeypatch, database
 ):
-    """Approval authorises a change; it cannot authorise an untested assumption.
+    """Two independent ways past the channel gate, and neither is present here.
 
-    The cleanup lifecycle was live-verified on 2026-09-05, which released
-    RAISE. LOWER is untouched by that: it sets a published price, and a
-    published price minus an unknown Booking.com discount is an unknown
-    guest-facing rate that cannot be shown to respect any floor.
+    `BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED` would mean the exposure was
+    measured. `OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE` means
+    it was not and the owner accepted the risk anyway. With both off, a
+    published price minus an unknown discount is an unknown guest-facing rate
+    that cannot be shown to respect any floor.
     """
+    import app.pricing_config as config
+
+    monkeypatch.setattr(
+        config, "OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE", False
+    )
     monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
 
@@ -1122,6 +1128,9 @@ def test_lowering_is_blocked_separately_by_channel_discount_exposure(
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
     monkeypatch.setattr(config, "CLEANUP_STRATEGY_VERIFIED", True)
     monkeypatch.setattr(config, "BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED", False)
+    monkeypatch.setattr(
+        config, "OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE", False
+    )
 
     reader = FakeReader()
 
@@ -1176,6 +1185,11 @@ def test_remove_pin_is_unblocked_now_that_delete_is_verified(monkeypatch):
 
 def test_the_gate_is_checked_before_anything_is_read(monkeypatch):
     """A blocked action must not even touch the provider."""
+    import app.pricing_config as config
+
+    monkeypatch.setattr(
+        config, "OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE", False
+    )
     monkeypatch.setenv("ENABLE_PRICING_WRITES", "true")
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", BUNKERS)
 
@@ -1220,15 +1234,26 @@ def test_only_the_verified_behaviour_is_unlocked():
 
     assert unverified_reason("REMOVE_PIN", BUNKERS) is None
     assert unverified_reason("RAISE", BUNKERS) is None
-    assert unverified_reason("LOWER", BUNKERS) is not None
+
+    # LOWER is open, but not because anything was verified: the owner
+    # authorized acting under the known uncertainty. The verification flag
+    # above is still False and still means what it says.
+    from app.pricing_config import (
+        OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE as AUTHORIZED,
+    )
+
+    assert AUTHORIZED is True
+    assert unverified_reason("LOWER", BUNKERS) is None
 
 
-def test_the_block_is_surfaced_on_the_recommendation():
-    """The console must say so before a person spends a decision on it.
+def test_the_block_is_surfaced_on_the_recommendation(monkeypatch):
+    """The console must say so before a person spends a decision on it."""
+    import app.pricing_config as config
 
-    LOWER is the action still gated, and the reason names the Booking.com
-    exposure rather than a generic refusal.
-    """
+    monkeypatch.setattr(
+        config, "OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE", False
+    )
+
     from app.pricing_policy import to_payload
 
     payload = to_payload(
@@ -1238,6 +1263,19 @@ def test_the_block_is_surfaced_on_the_recommendation():
     assert payload["actionable"] is True
     assert payload["blocked_reason"] is not None
     assert "Booking.com" in payload["blocked_reason"]
+
+
+def test_an_authorized_lower_carries_the_warning_instead_of_a_block():
+    """Authorized is not silent. The uncertainty travels with the card."""
+    from app.pricing_config import BOOKING_COM_UNCERTAINTY_WARNING
+    from app.pricing_policy import to_payload
+
+    payload = to_payload(
+        rec(PriceAction.LOWER, 185.0, band=bands(listing_id=BUNKERS))
+    )
+
+    assert payload["blocked_reason"] is None
+    assert payload["booking_com_warning"] == BOOKING_COM_UNCERTAINTY_WARNING
 
 
 def test_an_informational_recommendation_carries_no_block():
@@ -2196,6 +2234,10 @@ def test_lower_is_blocked_for_every_property_before_any_provider_access(
     monkeypatch.setenv("PRICELABS_AUTOMATION_ENABLED", "")
 
     import app.pricing_config as config
+
+    monkeypatch.setattr(
+        config, "OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE", False
+    )
 
     assert config.BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED is False
     assert len(config.BANDS) == 7

@@ -32,9 +32,11 @@ from datetime import date
 from enum import Enum
 
 from app.pricing_config import (
+    BOOKING_COM_UNCERTAINTY_WARNING,
     MAX_CHANGE_PER_RUN,
     PricingBands,
     dynamic_floor,
+    observed_commission_rate,
     unverified_reason,
 )
 
@@ -128,6 +130,11 @@ class Recommendation:
     #: which action was chosen, and exists so a reader can see that the
     #: precedence was a decision rather than an accident.
     market_signal_conflict: bool = False
+    #: The lead-band median this property has actually converted at, and how
+    #: many bookings it rests on. Evidence about the property, never a target
+    #: price -- the executable proposal is always the cap-safe single step.
+    history_adr: float | None = None
+    history_count: int = 0
 
     @property
     def is_actionable(self) -> bool:
@@ -478,6 +485,21 @@ def to_payload(rec: Recommendation) -> dict:
     """The console/API projection. Carries evidence, never a credential."""
     owner_floor = effective_floor(rec)
 
+    gap_dollars = gap_pct = None
+
+    if rec.history_adr and rec.current_price:
+        gap_dollars = round(rec.current_price - rec.history_adr, 2)
+        gap_pct = round(100.0 * gap_dollars / rec.current_price, 1)
+
+    is_lower = rec.action is PriceAction.LOWER
+
+    under_floor = bool(
+        is_lower
+        and owner_floor
+        and rec.proposed_price is not None
+        and rec.proposed_price < owner_floor[0]
+    )
+
     return {
         "id": f"{rec.listing_id}:{rec.stay_date.isoformat()}",
         "listing_id": rec.listing_id,
@@ -528,6 +550,24 @@ def to_payload(rec: Recommendation) -> dict:
         "demand": rec.state.demand,
         "pickup_7_days": rec.state.pickup_7_days,
         "market_signal_conflict": rec.market_signal_conflict,
+        # Evidence about this property, never a target. The executable price
+        # is `proposed_price`; this is what the gap is measured against.
+        "historical_lead_band_adr": rec.history_adr,
+        "history_sample_count": rec.history_count,
+        "historical_reference_gap_dollars": gap_dollars,
+        "historical_reference_gap_pct": gap_pct,
+        # Below the owner floor but above the hard floor: allowed to reach a
+        # person, never applied as an ordinary reduction.
+        "below_owner_floor": under_floor,
+        # Unconditional on every LOWER, and never behind a fold. The exposure
+        # is unmeasured whether or not the owner has authorised acting anyway,
+        # so the warning does not depend on the authorization flag.
+        "booking_com_warning": BOOKING_COM_UNCERTAINTY_WARNING if is_lower else None,
+        # What an actual invoice billed for this listing's group. None means no
+        # invoice has been attached, not that the rate is zero.
+        "observed_commission_rate": (
+            observed_commission_rate(rec.listing_id) if is_lower else None
+        ),
         "pinned_price": rec.state.pinned_price,
         "events": rec.state.events,
         "last_refreshed_at": rec.state.last_refreshed_at,
