@@ -18,6 +18,7 @@ import pytest
 from app.connectors.pricelabs.client import PriceLabsClient
 from app.connectors.pricelabs.errors import PriceLabsUnavailable
 from app.pricing_history import (
+    _date,
     build_history,
     history_sample,
     load_history,
@@ -125,6 +126,63 @@ def test_a_repeated_page_does_not_create_duplicate_records():
     assert len(rows) == 1
 
 
+# -- reservation ids: the key pagination de-duplication rests on ----------
+
+
+def test_a_valid_reservation_id_is_retained():
+    client = FakeTransport([page([reservation(reservation_id="keep-me")])])
+
+    rows = client.reservations(BUNKERS, "lodgify", "2025-01-01", "2026-12-31")
+
+    assert [r["reservation_id"] for r in rows] == ["keep-me"]
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_a_row_without_a_reservation_id_is_excluded(missing):
+    """It cannot be de-duplicated, so it is not trustworthy history.
+
+    An id is never synthesised from dates, prices or any guest field: that
+    would both invent identity and propagate exactly what this method exists
+    not to carry.
+    """
+    client = FakeTransport(
+        [page([reservation(reservation_id=missing), reservation(reservation_id="ok")])]
+    )
+
+    rows = client.reservations(BUNKERS, "lodgify", "2025-01-01", "2026-12-31")
+
+    assert [r["reservation_id"] for r in rows] == ["ok"]
+
+
+def test_several_rows_without_ids_do_not_collapse_into_one_history_row():
+    """The failure this prevents, stated as its own case.
+
+    Treating None as a de-duplication key would fold four distinct
+    reservations into one, silently thinning the sample distribution a median
+    is computed from -- a quiet change to the evidence, not a visible error.
+    """
+    client = FakeTransport(
+        [
+            page(
+                [reservation(reservation_id=None, rental_revenue=f"{100 + i}.0")
+                 for i in range(4)]
+                + [reservation(reservation_id="real")]
+            )
+        ]
+    )
+
+    rows = client.reservations(BUNKERS, "lodgify", "2025-01-01", "2026-12-31")
+
+    assert len(rows) == 1
+    assert rows[0]["reservation_id"] == "real"
+
+
+def test_a_non_string_reservation_id_is_excluded():
+    client = FakeTransport([page([reservation(reservation_id=12345)])])
+
+    assert client.reservations(BUNKERS, "lodgify", "2025-01-01", "2026-12-31") == []
+
+
 def test_a_cursor_that_never_stops_is_refused_rather_than_walked_forever():
     client = FakeTransport([page([reservation(reservation_id="x")], True)] * 2)
 
@@ -220,6 +278,60 @@ def test_a_reservation_with_no_revenue_is_excluded(revenue):
 @pytest.mark.parametrize("nights", [0, -1, None, "7", 7.5])
 def test_a_reservation_without_whole_nights_is_excluded(nights):
     assert history_sample(reservation(no_of_days=nights)) is None
+
+
+# -- date parsing: two accepted forms, and no salvage ---------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-06-15",                      # plain date
+        "2026-06-15T16:46:04.000Z",        # ISO timestamp, Zulu
+        "2026-06-15T16:46:04+00:00",       # ISO timestamp, explicit offset
+        "2026-06-15T16:46:04-04:00",       # ISO timestamp, non-zero offset
+        "2026-06-15T16:46:04",             # ISO timestamp, naive
+        # Genuinely ISO-8601, in its basic (separator-less) form. Accepted
+        # because it parses in full, not because a prefix was rescued -- the
+        # provider sends extended format, and rejecting a valid ISO date to
+        # look stricter would be inventing a rule rather than keeping one.
+        "20260615",
+    ],
+)
+def test_the_accepted_date_forms_parse(value):
+    assert _date(value) == datetime.date(2026, 6, 15)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-09-10BROKEN",       # a valid date with garbage welded on
+        "2026-06-15 not a time",  # valid prefix, invalid remainder
+        "2026-06-15Textra",
+        "2026-13-45",             # impossible month and day
+        "2026-02-30",             # impossible day for the month
+        "not-a-date",
+        "15/06/2026",             # a real format, not an accepted one
+        "",
+        None,
+        12345,
+        datetime.date(2026, 6, 15),   # already a date: still not a string
+    ],
+)
+def test_anything_else_is_rejected_rather_than_salvaged(value):
+    """No ten-character prefix is rescued from a malformed value.
+
+    An earlier version fell back to `date.fromisoformat(value[:10])`, which
+    turned "2026-09-10BROKEN" into 2026-09-10 -- a malformed value repaired
+    into a plausible one, inside the input to a price-lowering decision.
+    """
+    assert _date(value) is None
+
+
+def test_a_malformed_date_never_becomes_a_sample():
+    """The parser's strictness, carried through to the exclusion."""
+    for field in ("booked_date", "check_in"):
+        assert history_sample(reservation(**{field: "2026-09-10BROKEN"})) is None
 
 
 @pytest.mark.parametrize("bad", [None, "", "not-a-date", "2026-13-45", 12345])

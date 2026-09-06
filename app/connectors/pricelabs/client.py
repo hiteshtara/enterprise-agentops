@@ -202,6 +202,18 @@ class PriceLabsClient:
 
                 reservation_id = row.get("reservation_id")
 
+                # A row with no id is dropped rather than kept.
+                #
+                # It cannot be de-duplicated across pages, and treating None as
+                # a key is worse than useless: several such rows would collapse
+                # into one, silently thinning the sample distribution a median
+                # is computed from. Excluding them is the honest failure -- and
+                # an id is never synthesised from dates, prices, or any guest
+                # field, which would both invent identity and propagate exactly
+                # what this method exists not to carry.
+                if not isinstance(reservation_id, str) or not reservation_id:
+                    continue
+
                 # The same reservation appearing twice would double its weight
                 # in a median. Cheap to prevent, hard to notice if it happened.
                 if reservation_id in seen:

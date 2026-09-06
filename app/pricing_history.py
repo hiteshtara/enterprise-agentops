@@ -64,19 +64,26 @@ HISTORY_LOOKAHEAD_DAYS = 400
 
 
 def _date(value: Any) -> datetime.date | None:
-    """A date from either a plain date or an ISO timestamp. None if neither."""
+    """A date from a plain `YYYY-MM-DD` or a valid ISO-8601 timestamp.
+
+    Exactly those two forms. Anything else is None -- the whole string has to
+    parse, and no prefix of it is salvaged.
+
+    That last part was a real hole. An earlier version fell back to
+    `date.fromisoformat(value[:10])` when the full parse failed, which turned
+    `"2026-09-10BROKEN"` into 2026-09-10: a malformed value repaired into a
+    plausible one, in the input to a price-lowering decision. The promise is
+    that malformed dates are *excluded*, and a ten-character prefix that
+    happens to look like a date is not evidence that the rest was noise.
+
+    `datetime.fromisoformat` accepts both accepted forms on 3.11+, including a
+    trailing `Z`, so one call is the whole rule.
+    """
     if not isinstance(value, str) or not value:
         return None
 
     try:
-        # `fromisoformat` accepts the trailing Z directly on 3.11+.
         return datetime.datetime.fromisoformat(value).date()
-
-    except ValueError:
-        pass
-
-    try:
-        return datetime.date.fromisoformat(value[:10])
 
     except ValueError:
         return None
