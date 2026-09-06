@@ -50,6 +50,10 @@ function opportunity(over: Partial<RevenueOpportunity> = {}): RevenueOpportunity
     stale: false,
     uplift: 20,
     uplift_pct: 10,
+    priority: 'REVIEW_NOW',
+    priority_reasons: ['$20 a night', 'Normal Demand rather than soft demand'],
+    why_now: 'Normal Demand; $220 remains at or below market p25 of $240.',
+    is_change_clamped: false,
     ...over,
   }
 }
@@ -66,6 +70,9 @@ function page(over: Partial<RevenueOpportunityPage> = {}): RevenueOpportunityPag
       high_confidence: opportunities.filter((r) => r.confidence === 'HIGH').length,
       medium_confidence: opportunities.filter((r) => r.confidence === 'MEDIUM').length,
       properties: new Set(opportunities.map((r) => r.listing_id)).size,
+      review_now: opportunities.filter((r) => r.priority === 'REVIEW_NOW').length,
+      watch: opportunities.filter((r) => r.priority === 'WATCH').length,
+      low_priority: opportunities.filter((r) => r.priority === 'LOW_PRIORITY').length,
     },
     ...over,
     opportunities,
@@ -82,7 +89,8 @@ function table(container: HTMLElement) {
 }
 
 function names(container: HTMLElement): (string | null)[] {
-  return [...container.querySelectorAll('tbody tr td:first-child strong')].map(
+  // Property name is the second cell; priority leads the row.
+  return [...container.querySelectorAll('tbody tr td:nth-child(2) strong')].map(
     (cell) => cell.textContent,
   )
 }
@@ -147,7 +155,7 @@ describe('OpportunitiesPage', () => {
     expect(cell.getByText('30d')).toBeInTheDocument()
   })
 
-  it('sorts by dollar uplift, largest first, by default', async () => {
+  it('sorts by dollar uplift within a priority band', async () => {
     vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
       page({
         opportunities: [
@@ -265,5 +273,192 @@ describe('OpportunitiesPage', () => {
     expect(
       await screen.findByText('Pricing recommendations could not be built.'),
     ).toBeInTheDocument()
+  })
+
+  it('renders a priority badge on every row', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [
+          opportunity({ id: 'a', display_name: 'Now', priority: 'REVIEW_NOW' }),
+          opportunity({ id: 'b', display_name: 'Later', priority: 'WATCH' }),
+          opportunity({ id: 'c', display_name: 'Filed', priority: 'LOW_PRIORITY' }),
+        ],
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    const badges = [...container.querySelectorAll('tbody tr td:first-child .badge')]
+
+    expect(badges.map((b) => b.textContent)).toEqual([
+      'Review now',
+      'Watch',
+      'Low priority',
+    ])
+  })
+
+  it('counts each priority band in the summary tiles', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [
+          opportunity({ id: 'a', priority: 'REVIEW_NOW' }),
+          opportunity({ id: 'b', priority: 'WATCH', stay_date: '2026-10-06' }),
+          opportunity({ id: 'c', priority: 'WATCH', stay_date: '2026-10-07' }),
+        ],
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    const tiles = within(container.querySelector('.grid-stats') as HTMLElement)
+
+    expect(tiles.getByText('Review now')).toBeInTheDocument()
+    expect(tiles.getByText('Watch')).toBeInTheDocument()
+    expect(tiles.getByText('Low priority')).toBeInTheDocument()
+  })
+
+  it('orders REVIEW_NOW then WATCH then LOW_PRIORITY by default', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [
+          opportunity({
+            id: 'a',
+            display_name: 'Filed',
+            priority: 'LOW_PRIORITY',
+            uplift: 90,
+          }),
+          opportunity({
+            id: 'b',
+            display_name: 'Later',
+            priority: 'WATCH',
+            uplift: 80,
+          }),
+          opportunity({
+            id: 'c',
+            display_name: 'Now',
+            priority: 'REVIEW_NOW',
+            uplift: 20,
+          }),
+        ],
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    // Band beats dollars: the biggest number is filed last.
+    expect(names(container)).toEqual(['Now', 'Later', 'Filed'])
+  })
+
+  it('sorts by uplift descending inside a priority band', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [
+          opportunity({
+            id: 'a',
+            display_name: 'Small',
+            priority: 'REVIEW_NOW',
+            uplift: 15,
+          }),
+          opportunity({
+            id: 'b',
+            display_name: 'Large',
+            priority: 'REVIEW_NOW',
+            uplift: 60,
+          }),
+          opportunity({
+            id: 'c',
+            display_name: 'Watched',
+            priority: 'WATCH',
+            uplift: 99,
+          }),
+        ],
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    expect(names(container)).toEqual(['Large', 'Small', 'Watched'])
+  })
+
+  it('filters by priority', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [
+          opportunity({ id: 'a', display_name: 'Now', priority: 'REVIEW_NOW' }),
+          opportunity({ id: 'b', display_name: 'Later', priority: 'WATCH' }),
+        ],
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    await userEvent
+      .setup()
+      .selectOptions(screen.getByLabelText(/Priority/), 'REVIEW_NOW')
+
+    expect(names(container)).toEqual(['Now'])
+    expect(locationSearch()).toContain('priority=REVIEW_NOW')
+  })
+
+  it('shows why now, and the cap indicator only when the move was capped', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [
+          opportunity({
+            id: 'a',
+            display_name: 'Capped',
+            why_now: 'Low Demand; unit occupancy is 58% vs market 21%.',
+            is_change_clamped: true,
+          }),
+          opportunity({
+            id: 'b',
+            display_name: 'Free',
+            stay_date: '2026-10-09',
+            why_now: 'Normal Demand; the case rests on the uplift alone.',
+            is_change_clamped: false,
+          }),
+        ],
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    expect(
+      screen.getByText('Low Demand; unit occupancy is 58% vs market 21%.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Normal Demand; the case rests on the uplift alone.'),
+    ).toBeInTheDocument()
+
+    // Exactly one row is marked capped.
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(2)
+    expect(screen.getAllByText('capped at 10%')).toHaveLength(1)
+  })
+
+  it('still offers no control that could change a price', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(page())
+
+    renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Total nightly uplift')
+
+    for (const label of [/Review/, /Approve/, /Apply/, /Reject/]) {
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
+    }
+
+    expect(api.submitPricingAction).not.toHaveBeenCalled()
+    expect(api.resolveApproval).not.toHaveBeenCalled()
   })
 })

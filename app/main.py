@@ -148,6 +148,8 @@ from app.observability_store import (
 )
 from app.opportunities import select as select_opportunities
 from app.opportunities import summarise as summarise_opportunities
+from app.opportunity_priority import rank as rank_opportunities
+from app.opportunity_priority import summarise_priorities
 from app.overview import OverviewService
 from app.pricing_cleanup import PricingCleanupStore
 from app.pricing_cleanup_runner import PricingCleanupRunner, summarise
@@ -1922,12 +1924,18 @@ def get_revenue_opportunities(
             detail="Pricing recommendations could not be built from the provider.",
         ) from exc
 
-    rows = select_opportunities(pricing_payloads(recommendations))
+    # Selection first, then triage. The priority layer only ever sees rows the
+    # pricing engine already produced, and adds presentation fields to them --
+    # it can neither admit a row the selector rejected nor change one.
+    rows = rank_opportunities(select_opportunities(pricing_payloads(recommendations)))
 
     return RevenueOpportunityPage(
         generated_at=datetime.now(UTC).isoformat(),
         horizon_days=HORIZON_DAYS,
-        summary=summarise_opportunities(rows),
+        summary={
+            **summarise_opportunities(rows),
+            **summarise_priorities(rows),
+        },
         opportunities=[RevenueOpportunity(**row) for row in rows],
     )
 

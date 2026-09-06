@@ -672,9 +672,17 @@ export interface PricingRecommendation {
 }
 
 /** One RAISE worth attention. `uplift` is a price difference, not revenue. */
+export type Priority = 'REVIEW_NOW' | 'WATCH' | 'LOW_PRIORITY'
+
 export interface RevenueOpportunity extends PricingRecommendation {
   uplift: number
   uplift_pct: number
+  /** Triage only. Never affects whether the action may run. */
+  priority: Priority
+  priority_reasons: string[]
+  why_now: string
+  /** The proposal sat exactly at the per-run cap, which was the binding limit. */
+  is_change_clamped: boolean
 }
 
 export interface RevenueOpportunitySummary {
@@ -684,6 +692,9 @@ export interface RevenueOpportunitySummary {
   high_confidence: number
   medium_confidence: number
   properties: number
+  review_now: number
+  watch: number
+  low_priority: number
 }
 
 export interface RevenueOpportunityPage {
