@@ -33,8 +33,13 @@ class Priority(str, Enum):
 #: the owner spends more attention on the decision than the night can return.
 REVIEW_NOW_MIN_UPLIFT = 15.0
 
-#: How far a unit's own occupancy must lead its market before that lead counts
-#: as evidence in its own right rather than noise between two small samples.
+#: How far a unit's own occupancy must lead its market before that lead is
+#: worth stating rather than noise between two small samples.
+#:
+#: It is evidence, not a promoter. A lead of any size cannot lift a Low Demand
+#: night to REVIEW_NOW -- see `rank_opportunity`. Raising this number would not
+#: change that, and lowering it would only make more WATCH rows mention their
+#: lead.
 OCCUPANCY_LEAD_POINTS = 15.0
 
 #: At or below this, the night is filed rather than raised. Deliberately below
@@ -51,7 +56,10 @@ LOW_PRIORITY_MAX_PCT = 5.0
 #: is a statement of intent rather than a filter that fires.
 REVIEW_NOW_CONFIDENCE = frozenset({"HIGH", "MEDIUM"})
 
-#: Demand labels treated as a stronger environment for the *priority* layer.
+#: Demand labels that can reach REVIEW_NOW. **Required**, not one of several
+#: qualifying signals: a soft market is a soft market however well this unit is
+#: filling, and an interruption on a Low Demand night is the interruption a
+#: triage layer exists to prevent.
 #:
 #: Note this is deliberately **not** `pricing_recommendations.STRONG_DEMAND`,
 #: which counts only "High Demand" and "Good Demand" and files "Normal Demand"
@@ -142,8 +150,12 @@ def why_now(row: dict[str, Any]) -> str:
     The same row always produces the same sentence, which is what makes it
     quotable in a decision and checkable in a test.
 
-    It states the demand environment, then whatever is actually carrying the
-    case: an occupancy lead, headroom to the comp set, or neither.
+    It states the demand environment, how this unit is filling against its
+    market, and where the proposed price sits against the comp set -- then, on
+    a soft-demand night carrying a wide lead, says plainly that the case is
+    occupancy-led. That last sentence exists because such a row reads like a
+    strong case and is not one: it is exactly the row an earlier draft of the
+    ranking promoted to REVIEW_NOW.
     """
     demand = row.get("demand")
 
@@ -153,7 +165,11 @@ def why_now(row: dict[str, Any]) -> str:
 
     parts: list[str] = []
 
-    if lead is not None and lead >= OCCUPANCY_LEAD_POINTS:
+    # Stated whenever both figures are known, not only past the threshold.
+    # How this unit is filling relative to its market is context a reader wants
+    # for any row; `OCCUPANCY_LEAD_POINTS` governs only whether the lead is
+    # large enough to be called the case -- see the caveat appended below.
+    if lead is not None:
         parts.append(
             f"unit occupancy is {_percent(row.get('listing_occupancy'))} "
             f"vs market {_percent(row.get('market_occupancy'))}"
@@ -171,14 +187,11 @@ def why_now(row: dict[str, Any]) -> str:
         # verify -- and leave the exact comparison to `below_market_p25`, where
         # it decides the priority band.
         if round(float(proposed)) == round(float(reference)):
-            parts.append(
-                f"{_money(proposed)} is level with market p25"
-            )
+            parts.append(f"{_money(proposed)} is level with market p25")
 
         elif below_market_p25(row):
             parts.append(
-                f"{_money(proposed)} remains at or below "
-                f"market p25 of {_money(reference)}"
+                f"{_money(proposed)} remains below market p25 of {_money(reference)}"
             )
 
         else:
@@ -196,7 +209,21 @@ def why_now(row: dict[str, Any]) -> str:
     if not parts:
         return f"{opening}; the case rests on the uplift alone."
 
-    return f"{opening}; {', and '.join(parts)}."
+    sentence = f"{opening}; {', and '.join(parts)}."
+
+    # Say the limitation out loud rather than leaving a wide lead to read as a
+    # strong case. This is the row that would have been REVIEW_NOW under the
+    # earlier rule, so the reason it is not says so in words.
+    occupancy_led = (
+        row.get("demand") not in STRONGER_DEMAND
+        and lead is not None
+        and lead >= OCCUPANCY_LEAD_POINTS
+    )
+
+    if occupancy_led:
+        sentence += " The case is occupancy-led rather than demand-led."
+
+    return sentence
 
 
 def rank_opportunity(row: dict[str, Any]) -> PriorityAssessment:
@@ -209,16 +236,24 @@ def rank_opportunity(row: dict[str, Any]) -> PriorityAssessment:
       `LOW_PRIORITY_MAX_PCT`. Tested first because a gain this small is not
       worth a decision however good the evidence behind it is.
 
-      **REVIEW_NOW** -- uplift at or above `REVIEW_NOW_MIN_UPLIFT`, confidence
-      MEDIUM or HIGH, *and* at least one stronger signal: a demand label that
-      is not soft, or an occupancy lead of at least
-      `OCCUPANCY_LEAD_POINTS` while the proposed price still sits at or below
-      market p25. Uplift alone never reaches REVIEW_NOW -- a big number on no
-      evidence is exactly the case that wastes an owner's attention.
+      **REVIEW_NOW** -- *all three* of: uplift at or above
+      `REVIEW_NOW_MIN_UPLIFT`, confidence MEDIUM or HIGH, and a demand label in
+      `STRONGER_DEMAND`. Uplift alone never qualifies, and neither does an
+      occupancy lead.
+
+      The occupancy lead deliberately does **not** promote. An earlier draft
+      let a wide lead under market p25 stand in for demand, and on live data
+      that put 15 of 23 rows in REVIEW_NOW -- a triage layer that flags two
+      thirds of the board has not triaged anything. A unit filling ahead of a
+      soft market is still selling into a soft market; that is a reason to
+      watch it, not a reason to interrupt someone. The lead stays visible in
+      `why_now` and in the WATCH reasons, where it distinguishes the stronger
+      WATCH cases from the weaker ones.
 
       **WATCH** -- everything else: a legitimate opportunity whose case is
-      weaker. Soft demand doing the work, a lead below the threshold, a price
-      that would cross p25, or evidence that is merely adequate.
+      weaker. Soft demand, however wide the occupancy lead; a lead below the
+      threshold; a price that would cross p25; or evidence that is merely
+      adequate.
 
     Every band records why, in the order the checks ran, so the verdict can be
     argued with rather than trusted.
@@ -261,26 +296,21 @@ def rank_opportunity(row: dict[str, Any]) -> PriorityAssessment:
             ],
         )
 
-    if uplift >= REVIEW_NOW_MIN_UPLIFT and confidence in REVIEW_NOW_CONFIDENCE:
-        if strong_demand:
-            return assess(
-                Priority.REVIEW_NOW,
-                [
-                    f"${uplift:,.0f} a night",
-                    f"{row.get('demand')} rather than soft demand",
-                    f"{confidence} confidence",
-                ],
-            )
+    if (
+        uplift >= REVIEW_NOW_MIN_UPLIFT
+        and confidence in REVIEW_NOW_CONFIDENCE
+        and strong_demand
+    ):
+        reasons = [
+            f"${uplift:,.0f} a night",
+            f"{row.get('demand')} rather than soft demand",
+            f"{confidence} confidence",
+        ]
 
         if strong_lead:
-            return assess(
-                Priority.REVIEW_NOW,
-                [
-                    f"${uplift:,.0f} a night",
-                    f"occupancy leads the market by {lead:.0f} points",
-                    "the proposed price stays at or below market p25",
-                ],
-            )
+            reasons.append(f"occupancy also leads the market by {lead:.0f} points")
+
+        return assess(Priority.REVIEW_NOW, reasons)
 
     # Everything that is a real opportunity but has a weaker case.
     reasons = [f"${uplift:,.0f} a night at {confidence} confidence"]
@@ -288,8 +318,16 @@ def rank_opportunity(row: dict[str, Any]) -> PriorityAssessment:
     if not strong_demand:
         reasons.append(f"{row.get('demand') or 'demand unknown'} environment")
 
-    if lead is not None and not strong_lead:
-        if lead < OCCUPANCY_LEAD_POINTS:
+    if lead is not None:
+        if strong_lead:
+            # The strongest thing a WATCH row can say for itself, and the
+            # reason these are worth keeping distinct from the rest of WATCH.
+            reasons.append(
+                f"occupancy leads the market by {lead:.0f} points, but the "
+                "case is occupancy-led rather than demand-led"
+            )
+
+        elif lead < OCCUPANCY_LEAD_POINTS:
             reasons.append(f"occupancy lead of {lead:.0f} points is modest")
 
         elif not under_p25:

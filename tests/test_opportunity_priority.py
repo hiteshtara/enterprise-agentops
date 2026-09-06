@@ -116,17 +116,30 @@ def test_strong_demand_with_real_money_is_review_now():
     assert any("Normal Demand" in reason for reason in verdict.reasons)
 
 
-def test_a_wide_occupancy_lead_under_p25_is_review_now_even_on_soft_demand():
-    """The second qualifying signal, standing on its own.
+@pytest.mark.parametrize("demand", ["Normal Demand", "Good Demand", "High Demand"])
+def test_every_non_soft_demand_label_can_reach_review_now(demand):
+    verdict = rank_opportunity(
+        opportunity(uplift=20.0, uplift_pct=10.0, demand=demand, confidence="MEDIUM")
+    )
 
-    A unit filling far ahead of its market while still priced under the comp
-    set's p25 is evidence regardless of what the demand label says.
+    assert verdict.priority is Priority.REVIEW_NOW
+    assert any(demand in r for r in verdict.reasons)
+
+
+def test_a_wide_occupancy_lead_on_soft_demand_is_watch_not_review_now():
+    """The conservative resolution, and the reason the layer exists.
+
+    An earlier draft let a wide lead under market p25 stand in for demand, and
+    on live data that put 15 of 23 rows in REVIEW_NOW -- a triage layer that
+    flags two thirds of the board has not triaged anything. A unit filling
+    ahead of a soft market is still selling into a soft market: worth watching,
+    not worth interrupting someone for.
     """
     verdict = rank_opportunity(
         opportunity(
             demand="Low Demand",
             listing_occupancy=58.0,
-            market_occupancy=29.0,
+            market_occupancy=18.0,  # a 40-point lead
             proposed_price=253.0,
             market_p25=264.0,
             uplift=23.0,
@@ -134,8 +147,31 @@ def test_a_wide_occupancy_lead_under_p25_is_review_now_even_on_soft_demand():
         )
     )
 
-    assert verdict.priority is Priority.REVIEW_NOW
-    assert any("leads the market by 29 points" in r for r in verdict.reasons)
+    assert verdict.priority is Priority.WATCH
+
+    # The lead is not discarded -- it is what makes this a stronger WATCH.
+    assert any("leads the market by 40 points" in r for r in verdict.reasons)
+    assert any("occupancy-led rather than demand-led" in r for r in verdict.reasons)
+    assert "occupancy-led rather than demand-led" in verdict.why_now
+
+
+@pytest.mark.parametrize("lead", [15.0, 40.0, 70.0])
+def test_no_occupancy_lead_of_any_size_promotes_a_soft_demand_night(lead):
+    """Not a threshold question. No lead is large enough."""
+    verdict = rank_opportunity(
+        opportunity(
+            demand="Low Demand",
+            market_occupancy=20.0,
+            listing_occupancy=20.0 + lead,
+            proposed_price=200.0,
+            market_p25=400.0,
+            uplift=50.0,
+            uplift_pct=25.0,
+            confidence="HIGH",
+        )
+    )
+
+    assert verdict.priority is Priority.WATCH
 
 
 def test_soft_demand_with_a_modest_lead_is_watch():
@@ -153,6 +189,24 @@ def test_soft_demand_with_a_modest_lead_is_watch():
     assert verdict.priority is Priority.WATCH
     assert any("Low Demand" in r for r in verdict.reasons)
     assert any("modest" in r for r in verdict.reasons)
+
+
+def test_a_strong_demand_row_mentions_a_wide_lead_as_supporting_evidence():
+    """The lead is not ignored when demand already qualifies -- it is added."""
+    verdict = rank_opportunity(
+        opportunity(
+            demand="Normal Demand",
+            listing_occupancy=67.0,
+            market_occupancy=42.0,
+            proposed_price=180.0,
+            market_p25=198.0,
+            uplift=16.0,
+            uplift_pct=9.8,
+        )
+    )
+
+    assert verdict.priority is Priority.REVIEW_NOW
+    assert any("occupancy also leads the market by 25 points" in r for r in verdict.reasons)
 
 
 def test_a_wide_lead_above_p25_is_watch_not_review_now():
@@ -237,24 +291,35 @@ def test_the_band_edges_are_where_the_constants_say(uplift, expected):
 
 
 @pytest.mark.parametrize(
-    ("lead", "expected"),
+    ("lead", "mentioned"),
     [
-        (OCCUPANCY_LEAD_POINTS - 0.1, Priority.WATCH),
-        (OCCUPANCY_LEAD_POINTS, Priority.REVIEW_NOW),
+        (OCCUPANCY_LEAD_POINTS - 0.1, False),
+        (OCCUPANCY_LEAD_POINTS, True),
     ],
 )
-def test_the_occupancy_lead_edge_is_where_the_constant_says(lead, expected):
+def test_the_occupancy_lead_constant_decides_only_whether_it_is_worth_stating(
+    lead,
+    mentioned,
+):
+    """The threshold governs wording, not the band.
+
+    Both sides of it are WATCH on soft demand; what changes is whether the row
+    gets to cite its lead as the strongest thing it has.
+    """
     verdict = rank_opportunity(
         opportunity(
             demand="Low Demand",
             market_occupancy=30.0,
             listing_occupancy=30.0 + lead,
+            proposed_price=220.0,
+            market_p25=260.0,
             uplift=20.0,
             uplift_pct=10.0,
         )
     )
 
-    assert verdict.priority is expected
+    assert verdict.priority is Priority.WATCH
+    assert any("occupancy-led" in r for r in verdict.reasons) is mentioned
 
 
 # -- the clamp signal -----------------------------------------------------
@@ -353,7 +418,8 @@ def test_why_now_is_deterministic_and_built_only_from_the_row():
 
     assert first == why_now(row), "the same row must always read the same"
     assert first == (
-        "Normal Demand; $188 remains at or below market p25 of $205."
+        "Normal Demand; unit occupancy is 67% vs market 54%, and $188 remains "
+        "below market p25 of $205."
     )
 
 
@@ -367,8 +433,9 @@ def test_why_now_names_the_occupancy_lead_when_that_is_the_case():
     )
 
     assert why_now(row) == (
-        "Low Demand; unit occupancy is 58% vs market 21%, and $253 remains at "
-        "or below market p25 of $260."
+        "Low Demand; unit occupancy is 58% vs market 21%, and $253 remains "
+        "below market p25 of $260. The case is occupancy-led rather than "
+        "demand-led."
     )
 
 
