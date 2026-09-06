@@ -725,6 +725,14 @@ class RevenueOpportunity(PricingRecommendation):
 
     uplift: float
     uplift_pct: float
+    #: Triage only. Never affects `actionable`, `proposed_price`, or whether
+    #: the action may run -- see `app.opportunity_priority`.
+    priority: str
+    priority_reasons: list[str] = []
+    why_now: str = ""
+    #: True only when the proposal sits exactly at the per-run cap *and* the
+    #: market reference it aimed at is above that cap. Presentation only.
+    is_change_clamped: bool = False
 
 
 class RevenueOpportunitySummary(BaseModel):
@@ -735,6 +743,9 @@ class RevenueOpportunitySummary(BaseModel):
     high_confidence: int
     medium_confidence: int
     properties: int
+    review_now: int = 0
+    watch: int = 0
+    low_priority: int = 0
 
 
 class RevenueOpportunityPage(BaseModel):
