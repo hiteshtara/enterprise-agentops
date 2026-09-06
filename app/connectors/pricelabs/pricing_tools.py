@@ -64,14 +64,22 @@ from app.pricing_cleanup import (
     default_cleanup_at,
 )
 from app.pricing_config import bands_for, unverified_reason, writes_enabled
-from app.pricing_policy import MarketState, PriceAction, fingerprint
+from app.pricing_policy import (
+    MAX_DATA_AGE_HOURS as _MAX_DATA_AGE_HOURS,
+)
+from app.pricing_policy import (
+    MarketState,
+    PriceAction,
+    fingerprint,
+)
 from app.tool_registry import ExecutionContext
 
 APPLY_PRICING_ACTION_TOOL = "apply_pricing_action"
 
-#: PriceLabs mirrors a PMS on a sync cycle. Older than this and the reading is
-#: not a basis for changing a price.
-MAX_DATA_AGE_HOURS = 24
+#: Re-exported from `app.pricing_policy`, which owns it: the write path and
+#: the opportunity view must agree on what "too old to act on" means, and two
+#: constants would eventually disagree.
+MAX_DATA_AGE_HOURS = _MAX_DATA_AGE_HOURS
 
 APPLY_PRICING_ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -186,6 +194,9 @@ class PriceLabsPricingTools:
             pickup_7_days=None,
             pinned_price=number(override.get("price")) if override else None,
             last_refreshed_at=refreshed,
+            events=str(night.get("events")).strip() or None
+            if night.get("events")
+            else None,
         )
 
         return state, str(listing.get("currency") or "USD")

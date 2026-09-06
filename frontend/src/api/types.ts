@@ -664,7 +664,33 @@ export interface PricingRecommendation {
   demand: string | null
   pickup_7_days: number | null
   pinned_price: number | null
+  /** The provider's event label for the night, when it reports one. */
+  events: string | null
   last_refreshed_at: string | null
+  /** Evidence too old to act on. Unknown age counts as stale. */
+  stale: boolean
+}
+
+/** One RAISE worth attention. `uplift` is a price difference, not revenue. */
+export interface RevenueOpportunity extends PricingRecommendation {
+  uplift: number
+  uplift_pct: number
+}
+
+export interface RevenueOpportunitySummary {
+  opportunities: number
+  /** The exact sum of the rows shown. Never a revenue forecast. */
+  total_uplift: number
+  high_confidence: number
+  medium_confidence: number
+  properties: number
+}
+
+export interface RevenueOpportunityPage {
+  generated_at: string
+  horizon_days: number
+  summary: RevenueOpportunitySummary
+  opportunities: RevenueOpportunity[]
 }
 
 export interface PricingBandsOut {

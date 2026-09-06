@@ -161,6 +161,7 @@ class PricingRecommendationService:
                         _number(row.get("price")) if day in overrides else None
                     ),
                     last_refreshed_at=entry.get("last_refreshed_at"),
+                    events=_text(row.get("events")),
                 )
 
                 out.append(
@@ -185,6 +186,16 @@ class PricingRecommendationService:
                 )
 
         return out
+
+
+def _text(raw: Any) -> str | None:
+    """A non-empty display string, or None. The provider sends both."""
+    if raw is None:
+        return None
+
+    value = str(raw).strip()
+
+    return value or None
 
 
 def _number(raw: Any) -> float | None:

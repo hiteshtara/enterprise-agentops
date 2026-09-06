@@ -682,7 +682,11 @@ class PricingRecommendation(BaseModel):
     demand: str | None = None
     pickup_7_days: float | None = None
     pinned_price: float | None = None
+    #: The provider's event label for the night, when it reports one.
+    events: str | None = None
     last_refreshed_at: str | None = None
+    #: Whether the evidence is too old to act on. Unknown age counts as stale.
+    stale: bool = False
 
 
 class PricingBandsOut(BaseModel):
@@ -709,6 +713,42 @@ class PricingRecommendationPage(BaseModel):
     max_change_per_run: float
     recommendations: list[PricingRecommendation]
     bands: list[PricingBandsOut]
+
+
+class RevenueOpportunity(PricingRecommendation):
+    """One RAISE worth a person's attention, with its arithmetic.
+
+    Everything above `uplift` is the recommendation exactly as the engine
+    produced it. `uplift` is `proposed_price - current_price` for this one
+    night -- a price difference, never a revenue forecast.
+    """
+
+    uplift: float
+    uplift_pct: float
+
+
+class RevenueOpportunitySummary(BaseModel):
+    """Headline counts. `total_uplift` is the exact sum of the rows shown."""
+
+    opportunities: int
+    total_uplift: float
+    high_confidence: int
+    medium_confidence: int
+    properties: int
+
+
+class RevenueOpportunityPage(BaseModel):
+    """The 60-day opportunity view. Read-only: nothing here can change a price.
+
+    There is deliberately no action, token or approval id in this payload. The
+    page that renders it is decision support, and giving it something to submit
+    would make it a control surface.
+    """
+
+    generated_at: str
+    horizon_days: int
+    summary: RevenueOpportunitySummary
+    opportunities: list[RevenueOpportunity] = []
 
 
 class PricingCleanupOut(BaseModel):

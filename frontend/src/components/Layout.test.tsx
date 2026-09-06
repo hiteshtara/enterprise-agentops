@@ -21,6 +21,7 @@ describe('Layout navigation', () => {
       'Inbox',
       'Enquiries',
       'Vacancy',
+      'Opportunities',
       'Knowledge',
       'Runs',
       'Approvals',

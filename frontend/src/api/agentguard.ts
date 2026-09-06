@@ -24,6 +24,7 @@ import type {
   Overview,
   PricingRecommendation,
   PricingRecommendationPage,
+  RevenueOpportunityPage,
   ReconcileResponse,
   RunDetail,
   RunMetrics,
@@ -288,6 +289,17 @@ export function getVacancyBoard(days: number): Promise<VacancyResponse> {
 /** Today's pricing recommendations. Read-only: this changes no price. */
 export function getPricingRecommendations(): Promise<PricingRecommendationPage> {
   return request<PricingRecommendationPage>('/vacancy/recommendations')
+}
+
+/**
+ * The 60-day revenue-opportunity view. **Read-only.**
+ *
+ * Deliberately has no companion write function: the page that consumes this
+ * is decision support, and changing a price still goes through
+ * `submitPricingAction` and an individual approval.
+ */
+export function getRevenueOpportunities(): Promise<RevenueOpportunityPage> {
+  return request<RevenueOpportunityPage>('/vacancy/opportunities')
 }
 
 /**

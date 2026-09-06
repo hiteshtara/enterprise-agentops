@@ -16,6 +16,12 @@ const NAV: NavItem[] = [
   { to: '/inbox', label: 'Inbox', end: false, permission: 'VIEW_RUNS' },
   { to: '/enquiries', label: 'Enquiries', end: false, permission: 'VIEW_RUNS' },
   { to: '/vacancy', label: 'Vacancy', end: false, permission: 'VIEW_RUNS' },
+  {
+    to: '/opportunities',
+    label: 'Opportunities',
+    end: false,
+    permission: 'VIEW_RUNS',
+  },
   { to: '/knowledge', label: 'Knowledge', end: false, permission: 'VIEW_RUNS' },
   { to: '/runs', label: 'Runs', end: false, permission: 'VIEW_RUNS' },
   { to: '/approvals', label: 'Approvals', end: false, permission: 'VIEW_APPROVALS' },

@@ -23,6 +23,7 @@ closes over several days of real evidence rather than three chained executions
 against one stale reading.
 """
 
+import datetime
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -35,6 +36,13 @@ from app.pricing_config import (
     dynamic_floor,
     unverified_reason,
 )
+
+#: How old a PriceLabs reading may be and still be a basis for a decision.
+#: PriceLabs mirrors a PMS on a sync cycle; past this, the reading describes a
+#: calendar that may have moved. Lives here rather than in the connector
+#: because it is a policy about evidence, and both the write path and the
+#: opportunity view have to agree on it.
+MAX_DATA_AGE_HOURS = 24
 
 
 class PriceAction(str, Enum):
@@ -86,6 +94,11 @@ class MarketState:
     pickup_7_days: float | None
     pinned_price: float | None
     last_refreshed_at: str | None
+    #: The provider's event label for the night, when it reports one.
+    #: Deliberately *not* a gate -- it fires on roughly a third of all nights,
+    #: which makes it a label rather than evidence -- but a person reading an
+    #: opportunity wants to see it.
+    events: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +163,35 @@ def fingerprint(listing_id: str, stay_date: date, state: MarketState) -> str:
 
 def _round(value: float | None) -> float | None:
     return None if value is None else round(float(value))
+
+
+def data_age_hours(stamp: str | None) -> float | None:
+    """Hours since a provider reading, or None if that cannot be established."""
+    if not stamp:
+        return None
+
+    try:
+        when = datetime.datetime.fromisoformat(stamp)
+
+    except ValueError:
+        return None
+
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.UTC)
+
+    return (datetime.datetime.now(datetime.UTC) - when).total_seconds() / 3600.0
+
+
+def is_stale(stamp: str | None) -> bool:
+    """Whether a reading is too old to decide on. Unknown age counts as stale.
+
+    An unreadable or absent timestamp is treated as stale rather than fresh:
+    not knowing how old the evidence is is not the same as knowing it is
+    current, and the safe direction is to withhold.
+    """
+    age = data_age_hours(stamp)
+
+    return age is None or age > MAX_DATA_AGE_HOURS
 
 
 def clamp_move(current: float, proposed: float) -> float:
@@ -433,5 +475,10 @@ def to_payload(rec: Recommendation) -> dict:
         "demand": rec.state.demand,
         "pickup_7_days": rec.state.pickup_7_days,
         "pinned_price": rec.state.pinned_price,
+        "events": rec.state.events,
         "last_refreshed_at": rec.state.last_refreshed_at,
+        # Whether the evidence under this recommendation is current enough to
+        # act on. Computed here so the console and the write path cannot
+        # disagree about what "too old" means.
+        "stale": is_stale(rec.state.last_refreshed_at),
     }
