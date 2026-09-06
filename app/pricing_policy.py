@@ -26,6 +26,7 @@ against one stale reading.
 import datetime
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -195,13 +196,60 @@ def is_stale(stamp: str | None) -> bool:
 
 
 def clamp_move(current: float, proposed: float) -> float:
-    """Pull `proposed` inside the per-run cap, keeping its direction."""
+    """Pull `proposed` inside the per-run cap, keeping its direction.
+
+    Returns a real number. Prices are written to the provider as whole
+    dollars, so the result still has to be rounded -- and rounding is where
+    this cap used to be lost. Use `cap_safe_price` for anything that will
+    become a proposal.
+    """
     cap = current * MAX_CHANGE_PER_RUN
 
     if proposed > current:
         return min(proposed, current + cap)
 
     return max(proposed, current - cap)
+
+
+def cap_safe_price(current: float, proposed: float) -> int:
+    """Clamp to the per-run cap, then round to whole dollars *inside* it.
+
+    Nearest-dollar rounding can push a proposal back across the boundary
+    `clamp_move` just placed it on, and it does so on roughly half of all
+    prices -- whichever way the cents happen to fall.
+
+    A $228 night lowered by the cap lands on $205.20. `round()` gives $205,
+    which is a 10.09% move, and `check_guardrails` then refuses the whole
+    recommendation. $206 is 9.65% and is the largest whole-dollar step that
+    actually respects the cap. Nothing about the underlying gap changed; the
+    proposal was simply expressed in a way the guardrail could not accept.
+
+    So rounding is directional: **toward the current price** whenever
+    nearest-dollar would cross. Symmetric by construction -- a RAISE rounds
+    down onto its ceiling, a LOWER rounds up onto its floor -- because the
+    bound that matters is whichever side of `current` the proposal is on.
+
+    This is not a relaxation of the cap. `check_guardrails` is unchanged and
+    remains the independent verifier; this function's job is to hand it a
+    number that can pass. A tolerance in the guardrail would have been the
+    other fix, and the wrong one: it would let a genuinely oversized move
+    through by the same margin it lets a rounding artefact through.
+    """
+    bounded = clamp_move(current, proposed)
+
+    nearest = round(bounded)
+
+    lower = current * (1.0 - MAX_CHANGE_PER_RUN)
+    upper = current * (1.0 + MAX_CHANGE_PER_RUN)
+
+    if nearest < lower:
+        # Rounded past the floor: take the next whole dollar above it.
+        return math.ceil(lower)
+
+    if nearest > upper:
+        return math.floor(upper)
+
+    return nearest
 
 
 def check_guardrails(
