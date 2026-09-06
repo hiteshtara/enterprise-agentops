@@ -671,6 +671,17 @@ export interface PricingRecommendation {
    * market-based RAISE rule. Explanation only; it changed nothing.
    */
   market_signal_conflict: boolean
+  /** What this property has converted at in this lead band. Evidence, not a target. */
+  historical_lead_band_adr: number | null
+  history_sample_count: number
+  historical_reference_gap_dollars: number | null
+  historical_reference_gap_pct: number | null
+  /** Below the owner floor but above the hard floor: reviewable, never ordinary. */
+  below_owner_floor: boolean
+  /** Shown on every LOWER, unconditionally and never behind a fold. */
+  booking_com_warning: string | null
+  /** Billed on an actual invoice. Null means none attached, not zero. */
+  observed_commission_rate: number | null
   last_refreshed_at: string | null
   /** Evidence too old to act on. Unknown age counts as stale. */
   stale: boolean
@@ -702,11 +713,30 @@ export interface RevenueOpportunitySummary {
   low_priority: number
 }
 
+export interface LowerOpportunity extends PricingRecommendation {
+  priority: Priority
+  priority_reasons: string[]
+  why_now: string
+  lower_flags: string[]
+}
+
+export interface LowerOpportunitySummary {
+  opportunities: number
+  review_now: number
+  watch: number
+  below_owner_floor: number
+  market_signal_conflict: number
+  /** Sum of per-night price differences. Not lost or expected revenue. */
+  total_reduction: number
+}
+
 export interface RevenueOpportunityPage {
   generated_at: string
   horizon_days: number
   summary: RevenueOpportunitySummary
   opportunities: RevenueOpportunity[]
+  lower_summary: LowerOpportunitySummary | null
+  lower_opportunities: LowerOpportunity[]
 }
 
 export interface PricingBandsOut {

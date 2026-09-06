@@ -5,7 +5,11 @@ import { OpportunitiesPage } from './OpportunitiesPage'
 import { renderWithRouter } from '../test/render'
 import { locationSearch } from '../test/location'
 import * as api from '../api/agentguard'
-import type { RevenueOpportunity, RevenueOpportunityPage } from '../api/types'
+import type {
+  LowerOpportunity,
+  RevenueOpportunity,
+  RevenueOpportunityPage,
+} from '../api/types'
 
 vi.mock('../api/agentguard')
 
@@ -47,6 +51,13 @@ function opportunity(over: Partial<RevenueOpportunity> = {}): RevenueOpportunity
     pinned_price: null,
     events: null,
     market_signal_conflict: false,
+    historical_lead_band_adr: null,
+    history_sample_count: 0,
+    historical_reference_gap_dollars: null,
+    historical_reference_gap_pct: null,
+    below_owner_floor: false,
+    booking_com_warning: null,
+    observed_commission_rate: null,
     last_refreshed_at: '2026-09-06T10:00:00+00:00',
     stale: false,
     uplift: 20,
@@ -75,8 +86,51 @@ function page(over: Partial<RevenueOpportunityPage> = {}): RevenueOpportunityPag
       watch: opportunities.filter((r) => r.priority === 'WATCH').length,
       low_priority: opportunities.filter((r) => r.priority === 'LOW_PRIORITY').length,
     },
+    lower_summary: null,
+    lower_opportunities: [],
     ...over,
     opportunities,
+  }
+}
+
+function lower(over: Partial<LowerOpportunity> = {}): LowerOpportunity {
+  return {
+    ...opportunity(),
+    id: 'inv-1:2026-09-10',
+    stay_date: '2026-09-10',
+    days_out: 4,
+    action: 'LOWER',
+    current_price: 182,
+    proposed_price: 164,
+    historical_lead_band_adr: 149.5,
+    history_sample_count: 9,
+    historical_reference_gap_dollars: 32.5,
+    historical_reference_gap_pct: 17.9,
+    below_owner_floor: false,
+    booking_com_warning:
+      'Booking.com exposure is not fully verified. Actual reservations have shown stacked promotional/Genius discounts, and the maximum effective guest discount is unknown.',
+    observed_commission_rate: 23,
+    priority: 'WATCH',
+    priority_reasons: ['4d to arrival and still open'],
+    why_now: '4d to arrival, normal demand.',
+    lower_flags: [],
+    uplift: 0,
+    uplift_pct: 0,
+    ...over,
+  } as LowerOpportunity
+}
+
+function lowerSummary(rows: LowerOpportunity[]) {
+  return {
+    opportunities: rows.length,
+    review_now: rows.filter((r) => r.priority === 'REVIEW_NOW').length,
+    watch: rows.filter((r) => r.priority === 'WATCH').length,
+    below_owner_floor: rows.filter((r) => r.below_owner_floor).length,
+    market_signal_conflict: rows.filter((r) => r.market_signal_conflict).length,
+    total_reduction: rows.reduce(
+      (t, r) => t + ((r.current_price ?? 0) - (r.proposed_price ?? 0)),
+      0,
+    ),
   }
 }
 
@@ -461,5 +515,182 @@ describe('OpportunitiesPage', () => {
 
     expect(api.submitPricingAction).not.toHaveBeenCalled()
     expect(api.resolveApproval).not.toHaveBeenCalled()
+  })
+
+  // -- LOWER / vacancy-fill ------------------------------------------------
+
+  it('shows the Booking.com uncertainty warning above the table, not folded away', async () => {
+    const rows = [lower()]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: rows, lower_summary: lowerSummary(rows) }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Lower / vacancy-fill opportunities')
+
+    const warning = screen.getByText(/Booking.com exposure is not fully verified/)
+
+    expect(warning).toBeInTheDocument()
+
+    // Not inside a <details>: a reviewer must not have to expand anything.
+    expect(warning.closest('details')).toBeNull()
+    expect(container.querySelectorAll('details')).toHaveLength(0)
+
+    expect(
+      screen.getByText(/maximum effective guest discount is unknown/),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/may therefore result in an even lower guest-facing rate/),
+    ).toBeInTheDocument()
+  })
+
+  it('never describes the Booking.com exposure as verified', async () => {
+    const rows = [lower()]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: rows, lower_summary: lowerSummary(rows) }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Lower / vacancy-fill opportunities')
+
+    const text = container.textContent ?? ''
+
+    expect(text).toContain('not fully verified')
+    expect(text).not.toMatch(/exposure (is|has been) verified/i)
+    expect(text).not.toMatch(/discount (is )?(now )?known/i)
+  })
+
+  it('labels commission as observed, and says so when none is attached', async () => {
+    const rows = [
+      lower({ id: 'a', display_name: 'Has invoice', observed_commission_rate: 23 }),
+      lower({
+        id: 'b',
+        display_name: 'No invoice',
+        stay_date: '2026-09-11',
+        observed_commission_rate: null,
+      }),
+    ]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: rows, lower_summary: lowerSummary(rows) }),
+    )
+
+    renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Lower / vacancy-fill opportunities')
+
+    expect(screen.getByText('Observed commission')).toBeInTheDocument()
+    expect(
+      screen.getByText(/observed on an actual August 2026 invoice/),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/not a contract rate, not guaranteed/)).toBeInTheDocument()
+
+    expect(screen.getByText('23%')).toBeInTheDocument()
+
+    // A property with no invoice says so rather than borrowing another's rate.
+    expect(screen.getByText('not observed')).toBeInTheDocument()
+    expect(screen.queryAllByText('23%')).toHaveLength(1)
+  })
+
+  it('names a below-owner-floor reduction rather than showing it as ordinary', async () => {
+    const rows = [
+      lower({ below_owner_floor: true, current_price: 217, proposed_price: 196 }),
+    ]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: rows, lower_summary: lowerSummary(rows) }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Lower / vacancy-fill opportunities')
+
+    // Named twice on purpose: counted in the summary, and called out on the
+    // row itself so it cannot be mistaken for an ordinary reduction.
+    expect(screen.getAllByText('Below owner floor')).toHaveLength(2)
+
+    // The second table is the LOWER one; the first is RAISE.
+    const tables = container.querySelectorAll('table')
+
+    const row = tables[tables.length - 1].querySelector('tbody tr') as HTMLElement
+
+    expect(within(row).getByText('Below owner floor')).toBeInTheDocument()
+  })
+
+  it('shows both sides of a market-signal conflict', async () => {
+    const rows = [lower({ market_signal_conflict: true })]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: rows, lower_summary: lowerSummary(rows) }),
+    )
+
+    renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Lower / vacancy-fill opportunities')
+
+    expect(screen.getByText(/Market raise evidence:/)).toBeInTheDocument()
+    expect(screen.getByText(/Property-history lower evidence:/)).toBeInTheDocument()
+    expect(screen.getByText(/takes precedence/)).toBeInTheDocument()
+  })
+
+  it('keeps raise and lower separate and never sums them', async () => {
+    const rows = [lower()]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({
+        opportunities: [opportunity({ uplift: 20 })],
+        lower_opportunities: rows,
+        lower_summary: lowerSummary(rows),
+      }),
+    )
+
+    const { container } = renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Raise opportunities')
+
+    expect(screen.getByText('Lower / vacancy-fill opportunities')).toBeInTheDocument()
+
+    // Two separate tables, never one merged list.
+    expect(container.querySelectorAll('table')).toHaveLength(2)
+
+    const text = container.textContent ?? ''
+
+    expect(text).not.toMatch(/lost revenue/i)
+    expect(text).not.toMatch(/expected revenue/i)
+  })
+
+  it('offers no way to apply a reduction from this page', async () => {
+    const rows = [lower(), lower({ id: 'b', stay_date: '2026-09-11' })]
+
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: rows, lower_summary: lowerSummary(rows) }),
+    )
+
+    renderWithRouter(<OpportunitiesPage />)
+
+    await screen.findByText('Lower / vacancy-fill opportunities')
+
+    for (const label of [/Review/, /Approve/, /Apply/, /Lower/i, /Approve all/i]) {
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
+    }
+
+    expect(api.submitPricingAction).not.toHaveBeenCalled()
+    expect(api.resolveApproval).not.toHaveBeenCalled()
+  })
+
+  it('says plainly when no reduction is recommended', async () => {
+    vi.mocked(api.getRevenueOpportunities).mockResolvedValue(
+      page({ lower_opportunities: [], lower_summary: lowerSummary([]) }),
+    )
+
+    renderWithRouter(<OpportunitiesPage />)
+
+    expect(
+      await screen.findByText('No price reduction is recommended in the next 60 days.'),
+    ).toBeInTheDocument()
   })
 })

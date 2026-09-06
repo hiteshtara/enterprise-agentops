@@ -173,6 +173,8 @@ def recommend_night(
                 reason=reason,
                 state=state,
                 bands=bands,
+                history_adr=history_adr,
+                history_count=history_count,
             )
         )
 

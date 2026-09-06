@@ -125,6 +125,102 @@ EXPIRY_SEMANTICS_VERIFIED = False
 #: price, so an unknown discount cannot carry it below a floor.
 BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED = False
 
+#: Whether the owner accepts the *business risk* of lowering a published price
+#: while the Booking.com discount exposure remains unmeasured.
+#:
+#: **This is an authorization, not a verification, and the distinction is the
+#: whole point of it being a separate flag.**
+#: `BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED` says what is known and stays False
+#: because nothing has been measured. This says what the owner has decided to
+#: do anyway:
+#:
+#:   "The owner knowingly authorizes individually reviewed LOWER actions even
+#:   though the maximum effective Booking.com guest discount and stacking
+#:   exposure remain unverified."
+#:
+#: Setting the verification flag True to open LOWER would have been the easy
+#: route and a lie: it would tell every future reader the exposure had been
+#: established. Two flags keep the fact and the decision apart, so the record
+#: still says the maximum is unknown.
+#:
+#: It releases LOWER from *this* gate only. Every other guardrail stands --
+#: hard floor, owner floor review, per-run cap, fresh fingerprint, individual
+#: human approval, cleanup row first, both write switches -- and every LOWER
+#: review must carry `BOOKING_COM_UNCERTAINTY_WARNING` where a person will see
+#: it before deciding.
+#:
+#: Removing this authorization re-blocks LOWER immediately.
+OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE = True
+
+#: Shown on every LOWER review, unconditionally and never behind a fold.
+#:
+#: Deliberately states the asymmetry rather than a number: real reservations
+#: have shown a promotional rate and a Genius discount appearing together, so
+#: the floor on the effective discount is known to be substantial while the
+#: ceiling is not known at all.
+BOOKING_COM_UNCERTAINTY_WARNING = (
+    "Booking.com exposure is not fully verified. Actual reservations have "
+    "shown stacked promotional/Genius discounts, and the maximum effective "
+    "guest discount is unknown. Lowering the PriceLabs published price may "
+    "therefore result in an even lower guest-facing rate."
+)
+
+#: Discount components seen together on real Booking.com reservations.
+#:
+#: Evidence, kept as text on purpose. These are **not** combined into a
+#: maximum: the stacking arithmetic is unknown, and multiplying or adding them
+#: would manufacture a ceiling nobody has measured. There is deliberately no
+#: `MAX_CHANNEL_DISCOUNT` anywhere in this codebase, and nothing divides a
+#: floor by `(1 - discount)`.
+OBSERVED_DISCOUNT_COMBINATIONS: tuple[str, ...] = (
+    "Mobile/App rate -10% with Genius Dynamic -11%",
+    "International rate -10% with Genius Dynamic -12%",
+    "International rate -10% with Genius Dynamic -15%",
+    "International rate -10% with Genius Dynamic -20%",
+)
+
+#: Commission rates read off actual August 2026 Booking.com invoices, by the
+#: property group each invoice covered.
+#:
+#: **Observed, not contractual.** They describe what was billed on one
+#: statement; they are not a rate card, not guaranteed, and not a prediction.
+#: A property group with no invoice in hand is absent rather than defaulted --
+#: inventing a rate for an unmeasured account is exactly the error the
+#: Booking.com work exists to avoid.
+OBSERVED_COMMISSION_RATES: dict[str, float] = {
+    "roslindale": 23.0,
+    "jp-forest-hill": 18.0,
+    "allston": 18.0,
+}
+
+#: Which invoice group each listing belongs to. Absent means no invoice
+#: evidence has been attached to that listing yet, and its card shows no
+#: commission rather than a guessed one.
+LISTING_INVOICE_GROUP: dict[str, str] = {
+    "roslindale-3rd-floor": "roslindale",
+    "renovated-2nd-floor": "roslindale",
+    "boston-bunkers": "roslindale",
+    "modern-condo": "roslindale",
+}
+
+
+def observed_commission_rate(listing_id: str | None) -> float | None:
+    """The commission actually billed for this listing's group, or None.
+
+    None is a real answer and is rendered as such. It means no invoice has
+    been attached to this listing, not that the rate is zero or that one of
+    the other groups' rates probably applies.
+    """
+    band = BANDS_BY_LISTING.get(listing_id or "")
+
+    if band is None:
+        return None
+
+    group = LISTING_INVOICE_GROUP.get(band.slug)
+
+    return OBSERVED_COMMISSION_RATES.get(group) if group else None
+
+
 #: Whether a one-night reservation may ever be recommended.
 #:
 #: False, as an owner business rule rather than a technical limit: turnover
@@ -476,8 +572,14 @@ def unverified_reason(action: str, listing_id: str | None = None) -> str | None:
     if (
         action == "LOWER"
         and not BOOKING_COM_DISCOUNT_EXPOSURE_VERIFIED
+        and not OWNER_AUTHORIZES_LOWER_WITH_UNVERIFIED_BOOKING_EXPOSURE
         and _sells_on_booking_com(listing_id)
     ):
+        # Two ways past this gate, and they mean different things. The
+        # verification flag would mean the exposure was measured; the
+        # authorization flag means it was not, and the owner accepted the risk
+        # anyway. Neither removes the warning a reviewer sees, and the second
+        # can be withdrawn at any time -- clearing it re-blocks LOWER here.
         return (
             "Lowering a price is blocked for this property: it sells through "
             "Booking.com, and the maximum effective guest discount there and "
