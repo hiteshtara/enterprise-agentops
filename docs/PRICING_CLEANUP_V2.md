@@ -307,9 +307,9 @@ While a row is in that state:
   backfill.
 - **AgentGuard must never offer an automatic cleanup or retry control for it.**
   Not a button, not a menu item, not an API parameter. (There is no such
-  control today: the console has no cleanup surface at all, and
-  `POST /pricing/cleanup/run` takes no input, so nothing can be aimed at a
-  specific row.)
+  control today: `POST /pricing/cleanup/run` takes no input, so nothing can be
+  aimed at a specific row, and `GET /pricing/cleanup` — see
+  [The workload view](#the-workload-view) — only reads.)
 - **A human reviewing a stranded `DELETE_STARTED` record must treat that stay
   date as "hands off"** until the original worker or request is known to have
   finished. Editing the date at the provider while a DELETE may still land is
@@ -449,6 +449,34 @@ cloud routine mechanism already used for the 2026-09-18 check. No in-process
 scheduler, no background thread — AgentGuard stays request-driven, and the
 trigger is inspectable and repeatable by hand.
 
+### The workload view
+
+`GET /pricing/cleanup` reports what cleanup owes, so an administrator can see
+the queue before deciding to run a pass: `PENDING_WRITE` / `ACTIVE` /
+`CLAIMED` / `DELETE_STARTED` / `NEEDS_REVIEW` counts, how many rows are due
+now, the age of the oldest overdue obligation, and the rows automation will
+never resolve on its own.
+
+Four properties keep it from becoming a control surface.
+
+* **It is a separate GET, not a dry-run flag on the POST.** A parameter that
+  switches between "report" and "act" is one typo away from acting.
+* **It takes no input.** No id, listing or date — the same reason the POST
+  takes none. It cannot be used to hunt for one night's record.
+* **It mutates nothing.** It does not claim, reconcile, expire a lease, or
+  return a row to the queue. Reading an expired claim through this view leaves
+  it `CLAIMED` for `expired_claims` to fail closed on, exactly as before.
+  Tests assert the whole store is byte-identical across a read.
+* **It carries no claim token and no lease.** An operator needs to know a row
+  is stuck, not to be handed the fence that is holding it.
+
+`due_now` is asserted in tests against `due()` itself rather than re-derived,
+so the number shown before a manual run cannot drift from the candidate set
+that run will attempt. It remains a candidate count: `claim` is still the gate.
+
+**Any role may read it.** Running a pass still requires `ADMINISTER`; that
+separation — everyone may see, few may cause — is the point.
+
 ---
 
 ## 7. What this does not change
@@ -514,8 +542,18 @@ Unit, with invented data:
 * cleanup respects both kill switches
 * the model cannot invoke cleanup
 
+For the workload view, the counts matter less than the property that reading
+changes nothing — so those tests snapshot every open row's state, claim token,
+lease and resolution across a read, in each state a reader might plausibly be
+tempted to reconcile.
+
 Live, once unit tests pass: one temporary write on a low-risk date with a short
 `cleanup_at`, then observe the full lifecycle through to confirmed removal.
+**Both live proofs have now been run and are recorded in
+[PRICING_LIVE_PROOFS.md](PRICING_LIVE_PROOFS.md)** — RAISE on 2026-09-05, LOWER
+on 2026-09-06, the latter with full evidence including the row-before-write
+ordering, the `DELETE_STARTED` boundary, single-DELETE terminality and audit
+linkage back to the originating approval.
 
 ---
 

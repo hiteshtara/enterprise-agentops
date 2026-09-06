@@ -826,6 +826,57 @@ class PricingCleanupOut(BaseModel):
     detail: str
 
 
+class PricingCleanupRecordOut(BaseModel):
+    """One stored cleanup obligation, as `pricing_cleanup.to_payload` builds it.
+
+    Distinct from `PricingCleanupOut`, which is what one *pass* concluded about
+    a row. This is the row itself. Carries no claim token and no lease: an
+    operator needs to know a row is stuck, not to be handed the means to take
+    it over.
+    """
+
+    id: str
+    listing_id: str
+    stay_date: str
+    old_price: float | None = None
+    new_price: float
+    currency: str
+    state: str
+    adopted: bool
+    approval_id: str | None = None
+    created_at: str
+    cleanup_at: str
+    resolved_at: str | None = None
+    resolution: str | None = None
+
+
+class PricingCleanupWorkloadOut(BaseModel):
+    """What cleanup owes right now, before anyone runs a pass.
+
+    Read-only. Looking at the queue must never be a way of changing it, so
+    there is no id, no listing and no date to supply, and nothing here claims,
+    reconciles or ages out a row.
+
+    `due_now` is what a pass would attempt; it is a candidate count, not a
+    promise, because `claim` is still the gate. `oldest_overdue_hours` stays
+    `None` when nothing is overdue -- zero would read as "current".
+    """
+
+    counted_at: str
+    pending_write: int
+    active: int
+    due_now: int
+    claimed: int
+    delete_started: int
+    needs_review: int
+    unknown_cleanup_state: int
+    oldest_overdue_at: str | None = None
+    oldest_overdue_hours: float | None = None
+    #: The rows automation will never resolve. A count alone would say a person
+    #: is needed without saying which night.
+    needs_attention: list[PricingCleanupRecordOut] = []
+
+
 class PricingCleanupRunOut(BaseModel):
     """What one cleanup pass did.
 

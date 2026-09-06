@@ -753,6 +753,119 @@ class PricingCleanupStore:
 
             return rows
 
+    def workload(self, now: datetime | None = None) -> dict[str, Any]:
+        """What cleanup currently owes, for a person about to run a pass.
+
+        Read-only and deliberately inert: it counts rows and changes none of
+        them. Nothing here claims, reconciles, ages a lease out, or moves a
+        row between states -- an operator looking at the queue must not be a
+        way of altering it.
+
+        `due_now` is the same ACTIVE-and-arrived predicate `due` selects on, so
+        the number shown before a manual run is the work that run will attempt.
+        It is not a promise: `due` is the candidate set, and `claim` is still
+        the gate.
+
+        `needs_attention` carries the rows automation will never resolve --
+        `DELETE_STARTED` most of all, which is hands-off by design. A count
+        alone would say a person is needed without saying which night, so the
+        rows come with it.
+        """
+        moment = (now or datetime.now(UTC)).isoformat()
+
+        counts = {state.value: 0 for state in CleanupState}
+        due_now = 0
+        oldest_overdue: str | None = None
+
+        # One pass over the open rows: this queue is small by construction
+        # (one row per temporary override, all of them expiring within
+        # MAX_LIFETIME_DAYS), so a group-by would buy nothing and would still
+        # need a second query for the rows themselves.
+        records = self.open_records()
+
+        for record in records:
+            counts[record.state] = counts.get(record.state, 0) + 1
+
+            arrived = record.cleanup_at <= moment
+
+            if record.state == CleanupState.ACTIVE.value and arrived:
+                due_now += 1
+
+            # A claimed or abandoned row is *more* overdue, not less, so the
+            # age is measured over every state automation could be stuck in.
+            stuck = arrived and record.state in _OVERDUE_STATES
+
+            if stuck and (
+                oldest_overdue is None or record.cleanup_at < oldest_overdue
+            ):
+                oldest_overdue = record.cleanup_at
+
+        return {
+            "counted_at": moment,
+            "pending_write": counts[CleanupState.PENDING_WRITE.value],
+            "active": counts[CleanupState.ACTIVE.value],
+            "due_now": due_now,
+            "claimed": counts[CleanupState.CLAIMED.value],
+            "delete_started": counts[CleanupState.DELETE_STARTED.value],
+            "needs_review": counts[CleanupState.NEEDS_REVIEW.value],
+            "unknown_cleanup_state": counts[
+                CleanupState.UNKNOWN_CLEANUP_STATE.value
+            ],
+            "oldest_overdue_at": oldest_overdue,
+            "oldest_overdue_hours": _age_hours(oldest_overdue, moment),
+            "needs_attention": [
+                to_payload(record)
+                for record in records
+                if record.state in _NEEDS_A_PERSON
+            ],
+        }
+
+
+#: States whose age counts as cleanup running late. `PENDING_WRITE` is absent
+#: on purpose: it is the moment between the row and the provider call, not a
+#: cleanup that failed to happen.
+_OVERDUE_STATES: frozenset[str] = frozenset(
+    {
+        CleanupState.ACTIVE.value,
+        CleanupState.CLAIMED.value,
+        CleanupState.DELETE_STARTED.value,
+    }
+)
+
+#: Rows automation will never resolve on its own.
+_NEEDS_A_PERSON: frozenset[str] = frozenset(
+    {
+        CleanupState.DELETE_STARTED.value,
+        CleanupState.NEEDS_REVIEW.value,
+        CleanupState.UNKNOWN_CLEANUP_STATE.value,
+    }
+)
+
+
+def _age_hours(stamp: str | None, moment: str) -> float | None:
+    """Hours between two ISO stamps, or None when there is nothing to age.
+
+    Unknown stays unknown: an unparsable timestamp returns None rather than
+    zero, which would read as "nothing is overdue".
+    """
+    if stamp is None:
+        return None
+
+    try:
+        then = datetime.fromisoformat(stamp)
+        now = datetime.fromisoformat(moment)
+
+    except ValueError:
+        return None
+
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+
+    return round((now - then).total_seconds() / 3600.0, 2)
+
 
 def to_payload(record: PricingCleanupRecord) -> dict[str, Any]:
     """Console projection. Carries no credential and no provider internals."""
