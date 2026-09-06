@@ -1,0 +1,315 @@
+import { getRevenueOpportunities } from '../api/agentguard'
+import type { RevenueOpportunity } from '../api/types'
+import { useAsync } from '../hooks/useAsync'
+import { useUrlFilter } from '../hooks/useUrlFilter'
+import { PageHeader } from '../components/Layout'
+import { Empty, ErrorState, Loading } from '../components/States'
+
+/**
+ * The 60-day revenue-opportunity board. **Read-only, by construction.**
+ *
+ * This page imports no write function. There is no Review button, no submit,
+ * no approval: changing a price still goes through the Recommended actions
+ * card on /vacancy and an individual approval. What lives here is the
+ * question "where is money being left on the table", answered from the same
+ * engine, so the two views can never disagree about what is actionable.
+ *
+ * An opportunity is a RAISE that already cleared every deterministic
+ * guardrail, is not blocked by a verification gate, and rests on evidence
+ * fresh enough to act on. HOLD is the engine saying no and never appears
+ * here; LOWER stays blocked by the Booking.com exposure gate and is not
+ * presented as something to act on.
+ *
+ * Uplift is `proposed - current` for one night. It is **not** expected
+ * revenue -- it assumes every night books at the higher price, which is the
+ * assumption this whole feature exists to question -- and the wording on the
+ * page says so rather than leaving a reader to infer it.
+ */
+const SORTS = ['uplift', 'date', 'property', 'confidence', 'days'] as const
+
+type Sort = (typeof SORTS)[number]
+
+const SORT_LABELS: Record<Sort, string> = {
+  uplift: 'Uplift',
+  date: 'Date',
+  property: 'Property',
+  confidence: 'Confidence',
+  days: 'Days out',
+}
+
+const CONFIDENCES = ['HIGH', 'MEDIUM'] as const
+
+type ConfidenceFilter = (typeof CONFIDENCES)[number]
+
+const WINDOWS = ['0-7', '8-14', '15-30', '31-60'] as const
+
+type WindowFilter = (typeof WINDOWS)[number]
+
+const WINDOW_BOUNDS: Record<WindowFilter, [number, number]> = {
+  '0-7': [0, 7],
+  '8-14': [8, 14],
+  '15-30': [15, 30],
+  '31-60': [31, 60],
+}
+
+function money(value: number | null | undefined): string {
+  return value === null || value === undefined
+    ? '—'
+    : `$${Math.round(value).toLocaleString()}`
+}
+
+function percent(value: number | null | undefined): string {
+  return value === null || value === undefined ? '—' : `${value.toFixed(0)}%`
+}
+
+/** Confidence order for sorting: the most trusted first. */
+const CONFIDENCE_RANK: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 }
+
+function compare(a: RevenueOpportunity, b: RevenueOpportunity, sort: Sort): number {
+  if (sort === 'date') return a.stay_date.localeCompare(b.stay_date)
+  if (sort === 'days') return a.days_out - b.days_out
+  if (sort === 'property') {
+    return (
+      a.display_name.localeCompare(b.display_name) ||
+      a.stay_date.localeCompare(b.stay_date)
+    )
+  }
+  if (sort === 'confidence') {
+    return (
+      (CONFIDENCE_RANK[a.confidence] ?? 9) - (CONFIDENCE_RANK[b.confidence] ?? 9) ||
+      b.uplift - a.uplift
+    )
+  }
+
+  // Default: the largest dollar difference first, matching the server order.
+  return b.uplift - a.uplift || a.stay_date.localeCompare(b.stay_date)
+}
+
+function Row({ row }: { row: RevenueOpportunity }) {
+  return (
+    <tr>
+      <td>
+        <strong>{row.display_name}</strong>
+        <div className="faint mono">{row.stay_date}</div>
+      </td>
+      <td className="mono">{row.days_out}d</td>
+      <td className="mono">{money(row.current_price)}</td>
+      <td className="mono">{money(row.proposed_price)}</td>
+      <td className="mono">
+        <strong>+{money(row.uplift)}</strong>
+        <div className="faint">+{row.uplift_pct.toFixed(1)}%</div>
+      </td>
+      <td>
+        <span className="badge tone-neutral">
+          <span className="badge-dot" aria-hidden="true" />
+          {row.confidence}
+        </span>
+      </td>
+      <td className="mono">
+        {money(row.market_p25)}
+        <div className="faint">med {money(row.market_booked_median)}</div>
+      </td>
+      <td className="mono">
+        {percent(row.market_occupancy)}
+        <div className="faint">unit {percent(row.listing_occupancy)}</div>
+      </td>
+      <td>
+        {row.demand ?? '—'}
+        {row.events ? <div className="faint">{row.events}</div> : null}
+      </td>
+      <td className="mono">
+        {money(row.owner_floor)}
+        {row.owner_floor_basis ? (
+          <div className="faint">{row.owner_floor_basis}</div>
+        ) : null}
+      </td>
+      <td className="mono">{money(row.auto_raise_ceiling)}</td>
+      <td className="mono">
+        {row.pinned_price === null ? 'none' : `fixed ${money(row.pinned_price)}`}
+      </td>
+      <td className="faint">{row.reason}</td>
+    </tr>
+  )
+}
+
+export function OpportunitiesPage() {
+  const { data, error, loading } = useAsync(getRevenueOpportunities, [])
+
+  const [sort, setSort] = useUrlFilter<Sort>('sort', SORTS)
+  const [property, setProperty] = useUrlFilter('property')
+  const [confidence, setConfidence] = useUrlFilter<ConfidenceFilter>(
+    'confidence',
+    CONFIDENCES,
+  )
+  const [window, setWindow] = useUrlFilter<WindowFilter>('window', WINDOWS)
+
+  if (loading) return <Loading label="Scanning the next 60 days" />
+  if (error) return <ErrorState error={error} />
+  if (!data) return null
+
+  const properties = [
+    ...new Map(data.opportunities.map((row) => [row.listing_id, row.display_name])),
+  ].sort((a, b) => a[1].localeCompare(b[1]))
+
+  const shown = data.opportunities
+    .filter((row) => !property || row.listing_id === property)
+    .filter((row) => !confidence || row.confidence === confidence)
+    .filter((row) => {
+      if (!window) return true
+
+      const [low, high] = WINDOW_BOUNDS[window]
+
+      return row.days_out >= low && row.days_out <= high
+    })
+    .sort((a, b) => compare(a, b, (sort || 'uplift') as Sort))
+
+  // Recomputed from the rows on screen, so the headline always reconciles with
+  // the column beneath it even when a filter is on.
+  const shownUplift = shown.reduce((total, row) => total + row.uplift, 0)
+
+  const filtered = shown.length !== data.opportunities.length
+
+  return (
+    <>
+      <PageHeader
+        title="Revenue opportunities"
+        subtitle={`Open nights in the next ${data.horizon_days} days where the pricing engine would raise the price. Read-only: nothing here changes a price.`}
+      />
+
+      <div className="grid-stats">
+        <div className="card">
+          <div className="stat-label">Opportunities</div>
+          <div className="stat-value">{data.summary.opportunities}</div>
+        </div>
+        <div className="card">
+          <div className="stat-label">Total nightly uplift</div>
+          <div className="stat-value">{money(data.summary.total_uplift)}</div>
+          <div className="faint">
+            Sum of per-night price differences. Not a revenue forecast — it assumes
+            every night books at the higher price.
+          </div>
+        </div>
+        <div className="card">
+          <div className="stat-label">High confidence</div>
+          <div className="stat-value">{data.summary.high_confidence}</div>
+        </div>
+        <div className="card">
+          <div className="stat-label">Medium confidence</div>
+          <div className="stat-value">{data.summary.medium_confidence}</div>
+        </div>
+        <div className="card">
+          <div className="stat-label">Properties</div>
+          <div className="stat-value">{data.summary.properties}</div>
+        </div>
+      </div>
+
+      <div className="card demo-note" role="note">
+        <strong>Decision support only.</strong> Nothing on this page can change a price.
+        Applying one still happens under Recommended actions on the Vacancy page, one
+        date at a time, with an approval.
+      </div>
+
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <label>
+          Property{' '}
+          <select value={property} onChange={(e) => setProperty(e.target.value)}>
+            <option value="">All</option>
+            {properties.map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Confidence{' '}
+          <select
+            value={confidence}
+            onChange={(e) => setConfidence(e.target.value as ConfidenceFilter | '')}
+          >
+            <option value="">All</option>
+            {CONFIDENCES.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Days out{' '}
+          <select
+            value={window}
+            onChange={(e) => setWindow(e.target.value as WindowFilter | '')}
+          >
+            <option value="">All</option>
+            {WINDOWS.map((value) => (
+              <option key={value} value={value}>
+                {value} days
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Sort by{' '}
+          <select
+            value={sort || 'uplift'}
+            onChange={(e) => setSort(e.target.value as Sort)}
+          >
+            {SORTS.map((value) => (
+              <option key={value} value={value}>
+                {SORT_LABELS[value]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {filtered ? (
+        <p className="faint">
+          Showing {shown.length} of {data.opportunities.length} — {money(shownUplift)}{' '}
+          of {money(data.summary.total_uplift)} nightly uplift.
+        </p>
+      ) : null}
+
+      {shown.length ? (
+        <div className="card" style={{ overflowX: 'auto' }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Property / date</th>
+                <th>Days out</th>
+                <th>Current</th>
+                <th>Proposed</th>
+                <th>Uplift</th>
+                <th>Confidence</th>
+                <th>Market p25</th>
+                <th>Occupancy</th>
+                <th>Demand</th>
+                <th>Owner floor</th>
+                <th>Auto-raise ceiling</th>
+                <th>Override</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((row) => (
+                <Row key={row.id} row={row} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Empty
+          message={
+            data.opportunities.length
+              ? 'No opportunity matches these filters.'
+              : 'No raise is recommended in the next 60 days.'
+          }
+        />
+      )}
+    </>
+  )
+}

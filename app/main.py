@@ -132,6 +132,8 @@ from app.models import (
     PricingRecommendation,
     PricingRecommendationPage,
     ReconcileResponse,
+    RevenueOpportunity,
+    RevenueOpportunityPage,
     RunDetail,
     RunMetrics,
     RunSummary,
@@ -144,6 +146,8 @@ from app.observability_store import (
     RunMetricsService,
     ToolExecutionStore,
 )
+from app.opportunities import select as select_opportunities
+from app.opportunities import summarise as summarise_opportunities
 from app.overview import OverviewService
 from app.pricing_cleanup import PricingCleanupStore
 from app.pricing_cleanup_runner import PricingCleanupRunner, summarise
@@ -1880,6 +1884,51 @@ def get_pricing_recommendations(
             PricingRecommendation(**row) for row in pricing_payloads(recommendations)
         ],
         bands=[PricingBandsOut(**row) for row in bands_payload()],
+    )
+
+
+@app.get(
+    "/vacancy/opportunities",
+    response_model=RevenueOpportunityPage,
+)
+def get_revenue_opportunities(
+    user: User = Depends(require_view_runs),
+) -> RevenueOpportunityPage:
+    """The next 60 days of RAISE opportunities. **Read-only, always.**
+
+    Built from the same `PricingRecommendationService` as
+    `/vacancy/recommendations` -- there is one pricing engine and this is a
+    view over it, not a second opinion. Selection is `app.opportunities`, which
+    decides nothing about price: it keeps the RAISEs that already cleared every
+    deterministic guardrail, are not blocked by a verification gate, and rest
+    on evidence current enough to act on.
+
+    Nothing in the response can be submitted. There is no action token and no
+    approval id, because this is decision support: changing a price still goes
+    through `/vacancy/recommendations/submit` and an individual approval.
+    """
+    if pricelabs_recommendations is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PRICING_UNAVAILABLE,
+        )
+
+    try:
+        recommendations = pricelabs_recommendations.build()
+
+    except PriceLabsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Pricing recommendations could not be built from the provider.",
+        ) from exc
+
+    rows = select_opportunities(pricing_payloads(recommendations))
+
+    return RevenueOpportunityPage(
+        generated_at=datetime.now(UTC).isoformat(),
+        horizon_days=HORIZON_DAYS,
+        summary=summarise_opportunities(rows),
+        opportunities=[RevenueOpportunity(**row) for row in rows],
     )
 
 

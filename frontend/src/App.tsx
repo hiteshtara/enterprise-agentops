@@ -16,6 +16,7 @@ import { OverviewPage } from './pages/OverviewPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { RunsPage } from './pages/RunsPage'
 import { ToolsPage } from './pages/ToolsPage'
+import { OpportunitiesPage } from './pages/OpportunitiesPage'
 import { VacancyPage } from './pages/VacancyPage'
 
 function Console() {
@@ -32,6 +33,7 @@ function Console() {
         <Route path="/inbox/:conversationRef" element={<ConversationPage />} />
         <Route path="/enquiries" element={<EnquiriesPage />} />
         <Route path="/vacancy" element={<VacancyPage />} />
+        <Route path="/opportunities" element={<OpportunitiesPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:runId" element={<RunDetailPage />} />
