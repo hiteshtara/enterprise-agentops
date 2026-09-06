@@ -303,7 +303,7 @@ def test_the_route_is_read_only_and_reaches_no_write_path(api, monkeypatch):
     )
 
     class OnlyReads:
-        def build(self):
+        def build(self, history=None):
             return []
 
     api.module.pricelabs_recommendations = OnlyReads()
@@ -365,7 +365,7 @@ def test_the_route_never_offers_a_lower_or_a_hold(api, monkeypatch):
         )
 
     class Fixed:
-        def build(self):
+        def build(self, history=None):
             return [
                 make(PriceAction.RAISE, 215.0),
                 make(PriceAction.LOWER, 185.0),

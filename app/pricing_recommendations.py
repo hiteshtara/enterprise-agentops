@@ -22,6 +22,40 @@ than chosen:
     strength cannot raise a price; only the date's own strength can, and a
     price above what that property historically converts at in that lead band
     is lowered toward it.
+
+Near-term precedence: history-backed LOWER pre-empts RAISE
+----------------------------------------------------------
+Inside `NEAR_TERM_DAYS`, one night can satisfy both rules at once, and it
+happens often. "Priced below the comp set's p25" and "priced above what this
+unit itself converts at" are not contradictory -- they mean the market is
+asking more than this property has ever actually achieved.
+
+The two answer different questions:
+
+    market p25                  what are comparable listings asking?
+    historical lead-band ADR    what has *this* property actually converted
+                                at, this close to arrival?
+
+Close to arrival and under weak demand, the property's own realized history
+wins. Filling the night is worth more than holding a position the unit has not
+historically been able to sell.
+
+This is deliberate policy, not statement order. It was written when the LOWER
+branch was unreachable -- nothing supplied `history`, so `history_adr` was
+always None and the question never arose -- and it is recorded here because
+supplying real history made it live: on the live board it flipped four
+near-term nights from RAISE to LOWER.
+
+The precedence is narrow. LOWER may pre-empt RAISE **only** when every one of
+its own conditions already holds: inside `NEAR_TERM_DAYS`, enough samples in
+the matching lead band for a median, a current price exceeding that median by
+`HIST_OVER`, and demand in `WEAK_DEMAND`. The guardrails then still apply --
+hard floor, owner floor, `MAX_CHANGE_PER_RUN`. If any of that is absent,
+history does not suppress the RAISE.
+
+And it does not make historical ADR a target. The executable proposal remains
+the cap-safe single step; the ADR is evidence about this property, nothing
+more.
 """
 
 import datetime
@@ -118,9 +152,15 @@ def recommend_night(
 
     signals = date_strength(state.market_occupancy, state.pickup_7_days, state.demand)
 
-    def build(action: PriceAction, proposed: float | None, reason: str):
+    def build(
+        action: PriceAction,
+        proposed: float | None,
+        reason: str,
+        conflict: bool = False,
+    ):
         return finalise(
             Recommendation(
+                market_signal_conflict=conflict,
                 listing_id=listing_id,
                 slug=slug,
                 display_name=display_name,
@@ -174,23 +214,43 @@ def recommend_night(
     price = state.current_price
 
     if days_out <= NEAR_TERM_DAYS:
-        if (
+        lowers_on_history = bool(
             history_adr
             and price > history_adr * HIST_OVER
             and state.demand in WEAK_DEMAND
-        ):
+        )
+
+        raises_on_market = bool(price < state.market_p25 and signals)
+
+        # Both rules qualifying is a real state, not an error: the market is
+        # asking more than this property has achieved. Recorded so a reader
+        # can see it was a decision; it never changes which branch runs.
+        conflict = lowers_on_history and raises_on_market
+
+        if lowers_on_history:
+            reason = (
+                f"{days_out}d out and still open; asking ${price:.0f} against "
+                f"${history_adr:.0f} that this property converts at "
+                f"{lead_band} out (n={history_count}); "
+                f"{(state.demand or '').lower()}."
+            )
+
+            if conflict:
+                reason += (
+                    " Near-term property history supports lowering, while the "
+                    "market comparison also supports a higher rate. Because "
+                    "this night is close to arrival and demand is weak, the "
+                    "property's realized lead-time history takes precedence."
+                )
+
             return build(
                 PriceAction.LOWER,
                 cap_safe_price(price, max(history_adr, price * 0.90)),
-                (
-                    f"{days_out}d out and still open; asking ${price:.0f} against "
-                    f"${history_adr:.0f} that this property converts at "
-                    f"{lead_band} out (n={history_count}); "
-                    f"{(state.demand or '').lower()}."
-                ),
+                reason,
+                conflict=conflict,
             )
 
-        if price < state.market_p25 and signals:
+        if raises_on_market:
             return build(
                 PriceAction.RAISE,
                 cap_safe_price(price, min(state.market_p25, price * 1.10)),
