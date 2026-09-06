@@ -112,8 +112,12 @@ class PricingRecommendationService:
             # Deliberately not guarded. An unknown pin state must never be
             # reported as "not pinned": every pinned night would then look like
             # ordinary open inventory and could be repriced on that basis.
+            # Keyed by date and carrying the row, because the override's own
+            # price is what `pinned_price` means. A set of dates could only
+            # answer "is this pinned", which is how this path came to report
+            # the published price as the pinned one.
             overrides = {
-                row.get("date")
+                row.get("date"): row
                 for row in self._client.overrides(lid, self._pms)
                 if isinstance(row.get("date"), str)
             }
@@ -157,9 +161,18 @@ class PricingRecommendationService:
                     listing_occupancy=listing_occ,
                     demand=row.get("demand_desc"),
                     pickup_7_days=None,
-                    pinned_price=(
-                        _number(row.get("price")) if day in overrides else None
-                    ),
+                    # The override's price, never the published one. They are
+                    # different concepts -- `current_price` is what PriceLabs
+                    # publishes for the night, `pinned_price` is what the
+                    # override holds it at -- and on a pinned date they often
+                    # differ, which is the whole reason REMOVE_PIN exists.
+                    #
+                    # Substituting one for the other made this path disagree
+                    # with `pricing_tools._current_state`, which reads the
+                    # override. Both feed the same fingerprint, so every
+                    # REMOVE_PIN on a diverged date was refused as STALE --
+                    # permanently, and precisely on the case the action is for.
+                    pinned_price=_override_price(overrides.get(day)),
                     last_refreshed_at=entry.get("last_refreshed_at"),
                     events=_text(row.get("events")),
                 )
@@ -186,6 +199,22 @@ class PricingRecommendationService:
                 )
 
         return out
+
+
+def _override_price(row: dict[str, Any] | None) -> float | None:
+    """The price an override holds a night at, or None.
+
+    None covers three different situations on purpose -- no override, an
+    override with no price, an override whose price will not parse -- because
+    the safe answer to all three is the same: do not claim a pinned price.
+
+    Falling back to the published nightly price would manufacture agreement
+    between the two paths while describing a pin that does not exist.
+    """
+    if not row:
+        return None
+
+    return _number(row.get("price"))
 
 
 def _text(raw: Any) -> str | None:
