@@ -34,7 +34,7 @@ from app.pricing_policy import (
     MarketState,
     PriceAction,
     Recommendation,
-    clamp_move,
+    cap_safe_price,
     finalise,
     to_payload,
 )
@@ -181,7 +181,7 @@ def recommend_night(
         ):
             return build(
                 PriceAction.LOWER,
-                round(clamp_move(price, max(history_adr, price * 0.90))),
+                cap_safe_price(price, max(history_adr, price * 0.90)),
                 (
                     f"{days_out}d out and still open; asking ${price:.0f} against "
                     f"${history_adr:.0f} that this property converts at "
@@ -193,7 +193,7 @@ def recommend_night(
         if price < state.market_p25 and signals:
             return build(
                 PriceAction.RAISE,
-                round(clamp_move(price, min(state.market_p25, price * 1.10))),
+                cap_safe_price(price, min(state.market_p25, price * 1.10)),
                 (
                     f"{days_out}d out, but this date is strong: "
                     f"{', '.join(signals)}; asking ${price:.0f} is below the "
@@ -218,7 +218,7 @@ def recommend_night(
 
         return build(
             PriceAction.RAISE,
-            round(clamp_move(price, min(state.market_p25, price * 1.10))),
+            cap_safe_price(price, min(state.market_p25, price * 1.10)),
             (
                 f"Asking ${price:.0f} is below the market p25 of "
                 f"${state.market_p25:.0f} (booked median "
