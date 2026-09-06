@@ -684,6 +684,9 @@ class PricingRecommendation(BaseModel):
     pinned_price: float | None = None
     #: The provider's event label for the night, when it reports one.
     events: str | None = None
+    #: This night satisfied both the history-backed LOWER rule and the
+    #: market-based RAISE rule. Explanation only; it changed nothing.
+    market_signal_conflict: bool = False
     last_refreshed_at: str | None = None
     #: Whether the evidence is too old to act on. Unknown age counts as stale.
     stale: bool = False

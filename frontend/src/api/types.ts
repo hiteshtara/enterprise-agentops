@@ -666,6 +666,11 @@ export interface PricingRecommendation {
   pinned_price: number | null
   /** The provider's event label for the night, when it reports one. */
   events: string | null
+  /**
+   * This night satisfied both the history-backed LOWER rule and the
+   * market-based RAISE rule. Explanation only; it changed nothing.
+   */
+  market_signal_conflict: boolean
   last_refreshed_at: string | null
   /** Evidence too old to act on. Unknown age counts as stale. */
   stale: boolean

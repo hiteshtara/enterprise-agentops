@@ -46,6 +46,7 @@ function opportunity(over: Partial<RevenueOpportunity> = {}): RevenueOpportunity
     pickup_7_days: null,
     pinned_price: null,
     events: null,
+    market_signal_conflict: false,
     last_refreshed_at: '2026-09-06T10:00:00+00:00',
     stale: false,
     uplift: 20,

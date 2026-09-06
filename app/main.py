@@ -154,12 +154,16 @@ from app.overview import OverviewService
 from app.pricing_cleanup import PricingCleanupStore
 from app.pricing_cleanup_runner import PricingCleanupRunner, summarise
 from app.pricing_config import (
+    BANDS as PRICING_BANDS,
+)
+from app.pricing_config import (
     MAX_CHANGE_PER_RUN,
     bands_for,
 )
 from app.pricing_config import (
     writes_enabled as pricing_writes_enabled,
 )
+from app.pricing_history import load_history
 from app.pricing_policy import WRITE_ACTIONS, PriceAction
 from app.pricing_recommendations import payloads as pricing_payloads
 from app.pricing_service import (
@@ -255,6 +259,48 @@ pricelabs_recommendations = (
     if pricelabs_client is not None
     else None
 )
+
+
+def build_recommendations() -> list:
+    """The one path that produces recommendations. Both routes use it.
+
+    History is loaded here rather than in either route, so the two cannot
+    drift: a route that fetched its own would eventually be the route that
+    forgot to, and the difference would show up as LOWER appearing on one
+    screen and not the other.
+
+    **A failure to load history is not an empty history.** `load_history`
+    returns None on failure, and that None is passed straight through to
+    `build`, which then behaves exactly as it did before any of this existed:
+    RAISE and HOLD still work, and LOWER stays unreachable because
+    `history_adr` is None. That is the safe direction -- the alternative,
+    substituting `{}`, would look identical to "these properties have no
+    bookings" and silently suppress a price reduction on the strength of a
+    network error.
+
+    Raises `PriceLabsUnavailable` only if the *pricing* read fails, which is
+    what the routes already handle. History failure is logged, not raised.
+    """
+    if pricelabs_recommendations is None:
+        raise PriceLabsUnavailable("PriceLabs is not configured")
+
+    history = None
+
+    problem = None if pricelabs_client is not None else "no PriceLabs client"
+
+    if pricelabs_client is not None:
+        history, problem = load_history(
+            pricelabs_client,
+            [band.listing_id for band in PRICING_BANDS],
+        )
+
+    if problem:
+        # Observable rather than silent: a board with no LOWER on it should be
+        # explainable, and "we could not read the bookings" is a different
+        # explanation from "nothing is worth lowering".
+        logger.warning("Pricing history unavailable: %s", problem)
+
+    return pricelabs_recommendations.build(history=history)
 
 # One write client, shared by the approved-action path and by cleanup. They
 # are the same capability -- an override write -- and giving cleanup its own
@@ -1868,7 +1914,7 @@ def get_pricing_recommendations(
         )
 
     try:
-        recommendations = pricelabs_recommendations.build()
+        recommendations = build_recommendations()
 
     except PriceLabsUnavailable as exc:
         raise HTTPException(
@@ -1916,7 +1962,7 @@ def get_revenue_opportunities(
         )
 
     try:
-        recommendations = pricelabs_recommendations.build()
+        recommendations = build_recommendations()
 
     except PriceLabsUnavailable as exc:
         raise HTTPException(

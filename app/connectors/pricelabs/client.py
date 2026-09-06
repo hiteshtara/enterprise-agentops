@@ -44,6 +44,20 @@ OVERRIDES_PATH = "/v1/listings/{listing_id}/overrides"
 #: the API answers 400. Verified live 2026-09-04.
 NEIGHBORHOOD_PATH = "/v1/neighborhood_data"
 
+#: Reservations received from the connected PMS, with rental revenue.
+#: Verified read-only against this account on 2026-09-06.
+RESERVATIONS_PATH = "/v1/reservation_data"
+
+#: Rows per reservation page. The provider paginates with `limit`/`offset` and
+#: a boolean `next_page`; a caller that reads one page silently truncates the
+#: history, so `reservations` walks until `next_page` is false.
+RESERVATIONS_PAGE_SIZE = 500
+
+#: Refuses to walk forever if the provider never lowers `next_page`. Ten pages
+#: is far past this account's ~1000 reservations; hitting it means something is
+#: wrong with the cursor, not that there is more history.
+MAX_RESERVATION_PAGES = 40
+
 
 class PriceLabsClient:
     """Read-only access to the PriceLabs REST API.
@@ -134,6 +148,87 @@ class PriceLabsClient:
             raise PriceLabsUnavailable("PriceLabs overrides had an unexpected shape")
 
         return [row for row in rows if isinstance(row, dict)]
+
+    def reservations(
+        self,
+        listing_id: str,
+        pms: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """Booking history for one listing, as minimal internal records.
+
+        **Constructed, never forwarded.** The provider returns `guestName` and
+        `channelConfirmationCode` alongside the pricing fields; neither is
+        read here, so neither can reach a trace, an audit event, a metric or a
+        browser. Only what pricing history needs is carried:
+        `listing_id`, `booked_date`, `check_in`, `no_of_days`,
+        `rental_revenue`, `booking_status`, plus `reservation_id` for
+        de-duplication across pages.
+
+        Pagination is honoured to completion. `start_date`/`end_date` bound the
+        request; filtering to what is *usable* as history is a separate
+        decision and lives in `app.pricing_history`.
+        """
+        collected: list[dict[str, Any]] = []
+
+        seen: set[str] = set()
+
+        offset = 0
+
+        for _ in range(MAX_RESERVATION_PAGES):
+            payload = self._request(
+                "GET",
+                f"{RESERVATIONS_PATH}?listing_id={listing_id}&pms={pms}"
+                f"&start_date={start_date}&end_date={end_date}"
+                f"&limit={RESERVATIONS_PAGE_SIZE}&offset={offset}",
+            )
+
+            if not isinstance(payload, dict):
+                raise PriceLabsUnavailable(
+                    "PriceLabs reservations had an unexpected shape"
+                )
+
+            rows = payload.get("data")
+
+            if not isinstance(rows, list):
+                raise PriceLabsUnavailable(
+                    "PriceLabs reservations had an unexpected shape"
+                )
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+
+                reservation_id = row.get("reservation_id")
+
+                # The same reservation appearing twice would double its weight
+                # in a median. Cheap to prevent, hard to notice if it happened.
+                if reservation_id in seen:
+                    continue
+
+                seen.add(reservation_id)
+
+                collected.append(
+                    {
+                        "reservation_id": reservation_id,
+                        "listing_id": row.get("listing_id"),
+                        "booked_date": row.get("booked_date"),
+                        "check_in": row.get("check_in"),
+                        "no_of_days": row.get("no_of_days"),
+                        "rental_revenue": row.get("rental_revenue"),
+                        "booking_status": row.get("booking_status"),
+                    }
+                )
+
+            if not payload.get("next_page") or not rows:
+                return collected
+
+            offset += RESERVATIONS_PAGE_SIZE
+
+        raise PriceLabsUnavailable(
+            "PriceLabs reservations did not stop paginating"
+        )
 
     def neighborhood_data(
         self,

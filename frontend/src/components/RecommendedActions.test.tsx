@@ -45,6 +45,7 @@ function rec(over: Partial<PricingRecommendation> = {}): PricingRecommendation {
     pickup_7_days: 9,
     pinned_price: null,
     events: null,
+    market_signal_conflict: false,
     stale: false,
     last_refreshed_at: '2026-09-04T11:00:00+00:00',
     ...over,

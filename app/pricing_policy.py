@@ -123,6 +123,11 @@ class Recommendation:
     #: True when this listing's own switch forces a person to decide a RAISE.
     requires_human: bool = False
     notes: tuple[str, ...] = field(default=())
+    #: This night independently satisfied both the history-backed LOWER rule
+    #: and the market-based RAISE rule. Diagnostic only -- it never changes
+    #: which action was chosen, and exists so a reader can see that the
+    #: precedence was a decision rather than an accident.
+    market_signal_conflict: bool = False
 
     @property
     def is_actionable(self) -> bool:
@@ -522,6 +527,7 @@ def to_payload(rec: Recommendation) -> dict:
         "listing_occupancy": rec.state.listing_occupancy,
         "demand": rec.state.demand,
         "pickup_7_days": rec.state.pickup_7_days,
+        "market_signal_conflict": rec.market_signal_conflict,
         "pinned_price": rec.state.pinned_price,
         "events": rec.state.events,
         "last_refreshed_at": rec.state.last_refreshed_at,
