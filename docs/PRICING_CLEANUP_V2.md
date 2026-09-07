@@ -327,6 +327,59 @@ Exactly-once is therefore not available at any lease length or retry policy.
 What *is* available is never doing it twice automatically, and that is what
 `DELETE_STARTED` buys.
 
+### Closing a row a person settled by hand
+
+`NEEDS_REVIEW` and `UNKNOWN_CLEANUP_STATE` are terminal for *automation*, not
+for the obligation. The override may still be live at the provider, and
+somebody has to deal with it. Until 2026-09-07 there was no way to record that
+they had, so a stranded row stayed in the queue forever.
+
+`MANUALLY_RESOLVED` is that record. It means:
+
+> A person investigated an obligation automation had already failed closed on,
+> performed or confirmed the necessary provider-side action manually, and then
+> recorded that resolution in AgentGuard.
+
+**It never means AgentGuard deleted the override.** That is what `CLEANED_UP`
+means. Reusing `CLEANED_UP` here would put a false claim into the one record a
+reviewer trusts, which is why this is a distinct state rather than a note on an
+existing one.
+
+`PricingCleanupStore.record_manual_resolution` is bookkeeping and nothing else.
+The store holds no provider client, so there is no path from it to an override:
+it cannot set one, remove one, retry a cleanup, claim a row, cross the delete
+boundary, or adopt ownership.
+
+Reachable only from `NEEDS_REVIEW` and `UNKNOWN_CLEANUP_STATE`, enforced by the
+`WHERE` clause rather than an `if`. Everything else is refused:
+
+* `PENDING_WRITE` / `ACTIVE` — still automation's to finish.
+* `CLAIMED` — another process may be working on it right now.
+* `DELETE_STARTED` — an ambiguous external boundary. A person must investigate
+  it, but closing it here would let a stale worker's DELETE land afterwards
+  against a row someone had declared settled. **It stays hands off.**
+* `CLEANED_UP` / `VANISHED` / `MANUALLY_RESOLVED` — already settled. A second
+  submission is refused rather than rewriting history.
+
+Nothing is cleared for tidiness: `approval_id`, `run_id`, `reason_sent`,
+`provider_created_at`, `marker`, and automation's own `resolution` and
+`resolved_at` all survive. The person's account goes in its own three columns
+(`manual_resolution`, `resolved_by_user_id`, `manually_resolved_at`) so neither
+voice overwrites the other.
+
+**Route:** `POST /pricing/cleanup/{cleanup_id}/manual-resolution`, `ADMINISTER`
+only, never a model tool. The body carries the explanation and nothing else —
+the actor comes from the authenticated token. It is deliberately aimable by
+cleanup id, unlike `POST /pricing/cleanup/run`: the distinction is the side
+effect, not the principle. `run` performs an irreversible provider DELETE and
+so must not be pointed at a night of someone's choosing; this performs no
+provider action at all and is a record *about* something already done
+elsewhere, which is meaningless without saying which row.
+
+Audited as `PRICING_CLEANUP_MANUALLY_RESOLVED`, carrying the cleanup id,
+listing, stay date, previous state, the resolution text, the originating
+approval and run, and the authenticated actor.
+
 ### Expired claims fail closed
 
 A claim carries `lease_until`. When it lapses without being released, the row

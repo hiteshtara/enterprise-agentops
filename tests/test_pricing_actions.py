@@ -2497,3 +2497,321 @@ def test_the_outcomes_routes_are_get_only(api):
     for route in api.module.app.routes:
         if getattr(route, "path", None) in paths:
             assert route.methods == {"GET"}
+
+
+# -- recording a manual resolution ----------------------------------------
+
+
+def needs_review_row(api, stay_date="2026-09-08"):
+    """A row parked in NEEDS_REVIEW the way the 2026-09-07 incident parked one."""
+    from app.pricing_cleanup import build_reason
+
+    store = api.module.pricelabs_cleanups
+
+    record = store.record_intent(
+        listing_id=BUNKERS,
+        pms="lodgify",
+        stay_date=stay_date,
+        old_price=217.0,
+        new_price=196.0,
+        currency="USD",
+        cleanup_at="2026-09-06T00:00:00+00:00",
+        approval_id="ap-incident",
+        run_id="run-incident",
+    )
+
+    marked = build_reason(record.marker, "1d out and still open")
+
+    store.record_reason_sent(record.id, marked)
+    # The confirming re-read never came back.
+    store.mark_active(record.id, None, marked)
+
+    return store.get(record.id)
+
+
+class RefusingClients:
+    """Any provider call during this request is a test failure."""
+
+    def __getattr__(self, name):
+        def explode(*a, **k):
+            raise AssertionError(f"provider call {name!r} during manual resolution")
+
+        return explode
+
+
+def test_an_administrator_can_record_a_manual_resolution(api):
+    record = needs_review_row(api)
+
+    response = api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "Removed the override in the PriceLabs UI; confirmed gone."},
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["state"] == "MANUALLY_RESOLVED"
+    assert body["manual_resolution"].startswith("Removed the override")
+    assert body["manually_resolved_at"]
+    # ...and automation's own account is still there, untouched and distinct.
+    assert "cannot be verified as ours" in body["resolution"]
+    assert body["resolution"] != body["manual_resolution"]
+
+
+def test_the_endpoint_performs_no_provider_read_or_write(api):
+    """Bookkeeping only. Any provider call at all fails this test."""
+    record = needs_review_row(api)
+
+    api.module.pricelabs_client = RefusingClients()
+    api.module.pricelabs_write_client = RefusingClients()
+
+    response = api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "handled by hand"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "MANUALLY_RESOLVED"
+
+
+def test_no_claim_is_acquired_by_the_endpoint(api):
+    record = needs_review_row(api)
+
+    api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "handled"},
+    )
+
+    settled = api.module.pricelabs_cleanups.get(record.id)
+
+    assert settled.claim_token is None
+    assert settled.lease_until is None
+    assert settled.claimed_at is None
+
+
+def test_recording_a_manual_resolution_requires_administer(api):
+    record = needs_review_row(api)
+
+    for role in ("VIEWER", "OPERATOR", "APPROVER"):
+        response = api.client(role).post(
+            f"/pricing/cleanup/{record.id}/manual-resolution",
+            json={"resolution": "let me in"},
+        )
+
+        assert response.status_code == 403
+
+    assert (
+        api.module.pricelabs_cleanups.get(record.id).state == "NEEDS_REVIEW"
+    ), "a refused attempt changes nothing"
+
+
+def test_an_anonymous_caller_cannot_record_a_resolution(api):
+    record = needs_review_row(api)
+
+    response = api.anonymous().post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "no token"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_the_actor_comes_from_the_token_not_the_body(api):
+    """An identity a caller can type is not an identity."""
+    record = needs_review_row(api)
+
+    response = api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={
+            "resolution": "handled",
+            "resolved_by_user_id": "somebody-else",
+            "state": "CLEANED_UP",
+            "request_id": "forged",
+            "actor_source": "JOB",
+            "instance_id": "forged",
+        },
+    )
+
+    assert response.status_code == 200
+
+    settled = api.module.pricelabs_cleanups.get(record.id)
+
+    assert settled.resolved_by_user_id != "somebody-else"
+    assert settled.state == "MANUALLY_RESOLVED"
+
+    event = next(
+        e
+        for e in api.module.audit_store.list_events(limit=20)
+        if e["event_type"] == "PRICING_CLEANUP_MANUALLY_RESOLVED"
+    )
+
+    assert event["actor_user_id"] == settled.resolved_by_user_id
+    assert event["actor_source"] != "JOB"
+    assert event["request_id"] != "forged"
+    assert event["instance_id"] != "forged"
+
+
+def test_an_empty_resolution_is_rejected(api):
+    record = needs_review_row(api)
+
+    for empty in ("", "   "):
+        response = api.client("ADMIN").post(
+            f"/pricing/cleanup/{record.id}/manual-resolution",
+            json={"resolution": empty},
+        )
+
+        assert response.status_code in (400, 422)
+
+    assert api.module.pricelabs_cleanups.get(record.id).state == "NEEDS_REVIEW"
+
+
+def test_a_row_still_in_play_is_refused_with_a_conflict(api):
+    """An ACTIVE obligation is automation's to finish, not a person's to close."""
+    from app.pricing_cleanup import build_reason
+
+    store = api.module.pricelabs_cleanups
+    record = store.record_intent(
+        listing_id=BUNKERS,
+        pms="lodgify",
+        stay_date="2026-09-20",
+        old_price=200.0,
+        new_price=180.0,
+        currency="USD",
+        cleanup_at="2026-09-19T00:00:00+00:00",
+        approval_id="ap-2",
+        run_id="run-2",
+    )
+    store.mark_active(
+        record.id,
+        "2026-09-07T01:00:00.000Z",
+        build_reason(record.marker, "because"),
+        provider_updated_at="2026-09-07T01:00:00.000Z",
+    )
+
+    response = api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "I say it is done"},
+    )
+
+    assert response.status_code == 409
+    assert "ACTIVE" in response.json()["detail"]
+    assert store.get(record.id).state == "ACTIVE"
+
+
+def test_a_second_submission_conflicts_rather_than_rewriting(api):
+    record = needs_review_row(api)
+    path = f"/pricing/cleanup/{record.id}/manual-resolution"
+
+    first = api.client("ADMIN").post(path, json={"resolution": "the real account"})
+
+    assert first.status_code == 200
+
+    second = api.client("ADMIN").post(path, json={"resolution": "a different story"})
+
+    assert second.status_code == 409
+
+    settled = api.module.pricelabs_cleanups.get(record.id)
+
+    assert settled.manual_resolution == "the real account"
+
+
+def test_an_unknown_cleanup_id_is_a_404(api):
+    response = api.client("ADMIN").post(
+        "/pricing/cleanup/does-not-exist/manual-resolution",
+        json={"resolution": "handled"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_the_audit_event_records_the_human_decision(api):
+    record = needs_review_row(api)
+
+    api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "Removed it in the PriceLabs UI and re-read to confirm."},
+    )
+
+    event = next(
+        e
+        for e in api.module.audit_store.list_events(limit=20)
+        if e["event_type"] == "PRICING_CLEANUP_MANUALLY_RESOLVED"
+    )
+
+    details = event["details"]
+
+    assert details["cleanup_id"] == record.id
+    assert details["listing_id"] == BUNKERS
+    assert details["stay_date"] == "2026-09-08"
+    assert details["previous_state"] == "NEEDS_REVIEW"
+    assert details["approval_id"] == "ap-incident"
+    assert details["run_id"] == "run-incident"
+    assert "PriceLabs UI" in details["resolution"]
+    assert event["actor_user_id"]
+    # Provenance attaches from the request, not the body.
+    assert event["request_id"]
+    assert event["actor_source"] == "API"
+    assert event["instance_id"] == api.module.provenance.INSTANCE_ID
+
+
+def test_the_declared_source_is_recorded_when_the_console_sends_it(api):
+    record = needs_review_row(api)
+
+    api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "handled"},
+        headers={"X-AgentGuard-Source": "UI"},
+    )
+
+    event = next(
+        e
+        for e in api.module.audit_store.list_events(limit=20)
+        if e["event_type"] == "PRICING_CLEANUP_MANUALLY_RESOLVED"
+    )
+
+    assert event["actor_source"] == "UI"
+
+
+def test_a_manually_resolved_row_leaves_the_workload_view(api):
+    record = needs_review_row(api)
+
+    before = api.client("ADMIN").get("/pricing/cleanup").json()
+
+    assert before["needs_review"] == 1
+
+    api.client("ADMIN").post(
+        f"/pricing/cleanup/{record.id}/manual-resolution",
+        json={"resolution": "handled"},
+    )
+
+    after = api.client("ADMIN").get("/pricing/cleanup").json()
+
+    assert after["needs_review"] == 0
+    assert after["needs_attention"] == []
+
+
+def test_the_workload_gives_an_investigator_what_they_need(api):
+    """Enough to find the override in PriceLabs; nothing that could act on it."""
+    needs_review_row(api)
+
+    row = api.client("ADMIN").get("/pricing/cleanup").json()["needs_attention"][0]
+
+    assert row["marker"]
+    assert row["reason_sent"]
+    assert row["provider_created_at"] is None
+    assert row["approval_id"] == "ap-incident"
+    assert row["run_id"] == "run-incident"
+
+    # The fence around the irreversible DELETE is still not projected.
+    assert "claim_token" not in row
+    assert "lease_until" not in row
+    assert "claimed_at" not in row
+
+
+def test_the_manual_resolution_route_is_not_a_model_tool(api):
+    """Governance capability, not something the model can reach for."""
+    names = {t["name"] for t in api.client("ADMIN").get("/tools").json()}
+
+    assert not any("manual" in n for n in names)
+    assert not any("cleanup" in n for n in names)

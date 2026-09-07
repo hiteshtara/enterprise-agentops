@@ -129,9 +129,11 @@ from app.models import (
     LoginRequest,
     LoginResponse,
     LowerOpportunity,
+    ManualResolutionRequest,
     Overview,
     PricingActionRequest,
     PricingBandsOut,
+    PricingCleanupRecordOut,
     PricingCleanupRunOut,
     PricingCleanupWorkloadOut,
     PricingOutcomeListOut,
@@ -160,6 +162,7 @@ from app.opportunity_priority import rank as rank_opportunities
 from app.opportunity_priority import summarise_priorities
 from app.overview import OverviewService
 from app.pricing_cleanup import PricingCleanupStore
+from app.pricing_cleanup import to_payload as cleanup_payload
 from app.pricing_cleanup_runner import PricingCleanupRunner, summarise
 from app.pricing_config import (
     BANDS as PRICING_BANDS,
@@ -2196,6 +2199,96 @@ def pricing_cleanup_workload(
     the connector is later removed.
     """
     return PricingCleanupWorkloadOut(**pricelabs_cleanups.workload())
+
+
+@app.post(
+    "/pricing/cleanup/{cleanup_id}/manual-resolution",
+    response_model=PricingCleanupRecordOut,
+)
+def record_manual_cleanup_resolution(
+    cleanup_id: str,
+    body: ManualResolutionRequest,
+    user: User = Depends(require_administer),
+) -> PricingCleanupRecordOut:
+    """Record that a person settled an obligation automation gave up on.
+
+    **This changes nothing at PriceLabs.** It writes one database row. It
+    cannot set an override, remove one, retry a cleanup, claim a row, cross
+    the `DELETE_STARTED` boundary or adopt ownership -- `PricingCleanupStore`
+    holds no provider client of any kind, so there is no path from here to the
+    provider to guard against.
+
+    The row becomes `MANUALLY_RESOLVED`, **never `CLEANED_UP`**. Reusing the
+    latter would put a false claim -- that the automatic worker removed the
+    override -- into the one record a reviewer trusts.
+
+    **Deliberately aimable by cleanup id**, unlike `POST /pricing/cleanup/run`
+    which takes no input at all. The distinction is the side effect, not the
+    principle: `run` performs an irreversible provider DELETE and so must not
+    be pointed at a night of someone's choosing; this performs no provider
+    action and is a record *about* a decision already carried out elsewhere,
+    which is meaningless without saying which row.
+
+    Only `NEEDS_REVIEW` and `UNKNOWN_CLEANUP_STATE` may be closed this way. A
+    row still in play, already settled, or already manually resolved does not
+    match the store's guard and returns 409 rather than rewriting history.
+
+    The actor comes from the authenticated token. It is not in the request
+    model, so there is nowhere for a caller to put one.
+    """
+    record = pricelabs_cleanups.get(cleanup_id)
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No such cleanup obligation.",
+        )
+
+    previous_state = record.state
+
+    try:
+        settled = pricelabs_cleanups.record_manual_resolution(
+            cleanup_id,
+            body.resolution,
+            resolved_by_user_id=user.user_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not settled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This obligation is {previous_state}. Only an obligation "
+                "automation has already failed closed on "
+                "(NEEDS_REVIEW or UNKNOWN_CLEANUP_STATE) can be resolved by "
+                "hand, and only once."
+            ),
+        )
+
+    # The human decision is itself auditable. `request_id`, `actor_source` and
+    # `instance_id` attach from the request context; none is accepted from the
+    # body.
+    audit_store.record(
+        "PRICING_CLEANUP_MANUALLY_RESOLVED",
+        {
+            "cleanup_id": cleanup_id,
+            "listing_id": record.listing_id,
+            "stay_date": record.stay_date,
+            "previous_state": previous_state,
+            "resolution": body.resolution.strip(),
+            "approval_id": record.approval_id,
+            "run_id": record.run_id,
+            "resolved_by": user.user_id,
+        },
+        run_id=record.run_id,
+        actor_user_id=user.user_id,
+    )
+
+    return PricingCleanupRecordOut(
+        **cleanup_payload(pricelabs_cleanups.get(cleanup_id))
+    )
 
 
 @app.post(

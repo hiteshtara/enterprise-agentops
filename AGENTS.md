@@ -247,9 +247,19 @@ Invariants that tests enforce — don't break them silently:
 ### Audit event types
 
 `TOOL_REQUESTED`, `TOOL_EXECUTED`, `TOOL_FAILED`, `APPROVAL_REQUIRED`,
-`APPROVAL_GRANTED`, `APPROVAL_DENIED`, `AGENT_FAILED`, `AGENT_MAX_ITERATIONS`. These
-are bare strings, not an enum — grep `audit_store.record` before adding a new one.
-`GET /audit/events` returns them newest-first.
+`APPROVAL_GRANTED`, `APPROVAL_DENIED`, `AGENT_FAILED`, `AGENT_MAX_ITERATIONS`,
+`AUTHORIZATION_DENIED`, `PRICING_CLEANUP`, `PRICING_CLEANUP_STALE_OWNER`,
+`PRICING_CLEANUP_MANUALLY_RESOLVED`. These are bare strings, not an enum — grep
+`audit_store.record` before adding a new one. `GET /audit/events` returns them
+newest-first.
+
+Every event also carries **operational provenance**: `request_id` (one HTTP
+request; every event it writes shares it), `actor_source` (`UI`/`API`/`CLI`/
+`JOB`/`TEST`, declared by the client, never inferred from a user-agent) and
+`instance_id` (the backend process). These identify a *process and a request*,
+never a person — no IP, user-agent or device field exists, by design. All three
+are null for events written before they existed and for events written outside
+an HTTP request. See `app/provenance.py`.
 
 Every event written during a run carries that run's `run_id`.
 
