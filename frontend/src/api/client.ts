@@ -47,6 +47,11 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: {
         'Content-Type': 'application/json',
+        // Declares which surface the request came from, so the audit trail
+        // can tell a console click from a script. Operational attribution
+        // only -- it identifies this application, not the person using it,
+        // and nothing is authorized on it.
+        'X-AgentGuard-Source': 'UI',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...init?.headers,
       },

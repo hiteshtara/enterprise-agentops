@@ -13,6 +13,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import provenance
 from app.agent import AgentService
 from app.approval_store import ApprovalStore
 from app.audit_store import AuditStore
@@ -221,8 +222,54 @@ app.add_middleware(
     # Authorization is required: the console sends a bearer token, which makes
     # every request preflighted. Omitting it fails the preflight in a browser
     # while leaving TestClient (which does not preflight) passing.
-    allow_headers=["Authorization", "Content-Type"],
+    #
+    # `X-AgentGuard-Source` is listed for the same reason: a custom header
+    # makes a request non-simple, so a browser will not send it unless the
+    # preflight allows it.
+    allow_headers=["Authorization", "Content-Type", provenance.SOURCE_HEADER],
+    # So a caller can correlate its own logs with ours without guessing.
+    expose_headers=["X-Request-Id"],
 )
+
+
+@app.middleware("http")
+async def bind_provenance(request: Request, call_next):
+    """Give every request an id and a declared source, for the audit trail.
+
+    This exists because of the 2026-09-07 incident: five pricing approvals in
+    ninety seconds that the audit log could not attribute, because every event
+    carried the same shared demo identity and nothing else. The source was
+    eventually recovered from a uvicorn access log that happened to survive.
+
+    Three deliberate limits:
+
+    * **It records a process and a request, never a person.** No IP, no
+      user-agent, no device fingerprint.
+    * **`actor_source` is declared, not detected.** It comes from an explicit
+      header, and an unrecognised value normalises to `API` rather than
+      failing the request -- provenance must never be able to break the thing
+      it observes.
+    * **Nothing is authorized on any of it.** These fields are read after the
+      fact; a caller that lies about its source gains nothing.
+    """
+    request_id = provenance.new_request_id()
+
+    tokens = provenance.bind(
+        request_id,
+        provenance.normalise_source(request.headers.get(provenance.SOURCE_HEADER)),
+    )
+
+    try:
+        response = await call_next(request)
+
+    finally:
+        # Reset even when the handler raised, so a failed request cannot leave
+        # its id bound for whatever runs next on this context.
+        provenance.reset(tokens)
+
+    response.headers["X-Request-Id"] = request_id
+
+    return response
 
 database = Database()
 

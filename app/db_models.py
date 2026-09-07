@@ -111,6 +111,38 @@ class AuditEventRecord(Base):
         nullable=False,
     )
 
+    # -- operational provenance. Identifies a process and a request, never a
+    # person: no IP, no user-agent, no device fingerprint. See
+    # `app/provenance.py` for why these three and no more.
+
+    #: One HTTP request. Every event written while handling it shares this, so
+    #: five actions in ninety seconds can be told apart from one script loop.
+    #: Null outside a request -- a scheduled job is not an HTTP call, and
+    #: inventing an id would imply a caller that does not exist.
+    request_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    #: UI / API / CLI / JOB / TEST, declared by the client and normalised to a
+    #: closed set. Nothing is authorized on it.
+    actor_source: Mapped[str | None] = mapped_column(
+        String(8),
+        nullable=True,
+        index=True,
+    )
+
+    #: The backend process that wrote the event. A stale server, a second
+    #: backend, or a test process pointed at the wrong database each stamp a
+    #: different value -- the distinction the 2026-09-07 incident could not
+    #: make. Survives the process itself.
+    instance_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
     created_at: Mapped[str] = mapped_column(
         String(40),
         nullable=False,
@@ -1238,10 +1270,15 @@ class PricingActionOutcomeRecord(Base):
         index=True,
     )
 
+    #: `server_default` as well as `default` so the model and the migration
+    #: agree. Without it every later `--autogenerate` proposes dropping the
+    #: default the table actually has, which is exactly the kind of unrelated
+    #: change that gets swept into an unrelated revision.
     reconcile_pass_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,
+        server_default="0",
     )
 
     #: **When we noticed**, not when it happened. The provider's

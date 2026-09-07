@@ -50,11 +50,25 @@ class ApprovalResponse(BaseModel):
 
 
 class AuditEvent(BaseModel):
+    """One audited event, with operational provenance.
+
+    `request_id` / `actor_source` / `instance_id` identify a *process and a
+    request*, never a person: there is no IP, user-agent or device field here
+    and none is intended. They exist so an incident can be read afterwards.
+
+    All three are optional: events written before this existed, and events
+    written outside an HTTP request such as a scheduled job, legitimately
+    carry null rather than a fabricated value.
+    """
+
     id: int
     run_id: str | None = None
     actor_user_id: str | None = None
     event_type: str
     details: dict[str, Any]
+    request_id: str | None = None
+    actor_source: str | None = None
+    instance_id: str | None = None
     created_at: str
 
 
