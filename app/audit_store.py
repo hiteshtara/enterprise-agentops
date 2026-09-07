@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from app.database import Database, get_database
 from app.db_models import AuditEventRecord
+from app.provenance import snapshot
 
 
 class AuditStore:
@@ -21,11 +22,15 @@ class AuditStore:
         run_id: str | None = None,
         actor_user_id: str | None = None,
     ) -> None:
+        # Provenance is read from the ambient request context rather than
+        # passed in, so every existing call site is stamped without being
+        # touched -- and a caller cannot forge it by choosing an argument.
         event = AuditEventRecord(
             event_type=event_type,
             details_json=json.dumps(details),
             run_id=run_id,
             actor_user_id=actor_user_id,
+            **snapshot(),
         )
 
         with self._database.session() as session:
@@ -62,6 +67,9 @@ class AuditStore:
                     "actor_user_id": event.actor_user_id,
                     "event_type": event.event_type,
                     "details": json.loads(event.details_json),
+                    "request_id": event.request_id,
+                    "actor_source": event.actor_source,
+                    "instance_id": event.instance_id,
                     "created_at": event.created_at,
                 }
                 for event in events

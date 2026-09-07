@@ -532,6 +532,16 @@ class PriceLabsPricingTools:
 
                 marked = build_reason(record.marker, reason)
 
+                # What we are about to send, recorded before we send it.
+                #
+                # If the confirming re-read then fails, the row still carries
+                # the text AgentGuard composed, so a person investigating an
+                # ambiguous write has something to compare the provider's
+                # stored reason against. Evidence of intent only: it does not
+                # set `provider_created_at`, does not make the row ACTIVE, and
+                # grants no cleanup authority whatsoever.
+                self._cleanups.record_reason_sent(record.id, marked)
+
                 result = self._writer.set_override(
                     listing_id,
                     self._pms,

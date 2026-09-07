@@ -344,6 +344,44 @@ class PricingCleanupStore:
 
         return record
 
+    def record_reason_sent(self, record_id: str, reason_sent: str) -> bool:
+        """Record what we are *about* to send, before we send it.
+
+        **This is evidence of intent, not of acceptance.** It says only that
+        AgentGuard composed this exact `reason` and was about to POST it. It
+        says nothing about whether the provider received or stored it, and it
+        must never be read as though it did.
+
+        Why it exists: `reason_sent` used to be written only by `mark_active`,
+        which runs after a successful confirming re-read. A write whose
+        re-read failed therefore left a row with an override possibly live at
+        the provider and **no local record of what we had sent** -- so a
+        person investigating later had nothing to compare against. That is
+        exactly what happened to the 2026-09-08 row in the incident of
+        2026-09-07 (see docs/PRICING_CLEANUP_V2.md).
+
+        Restricted to `PENDING_WRITE` by the `WHERE` clause: this is the only
+        window in which the value is genuinely unsent, and a later caller must
+        not be able to rewrite the recorded intent of a settled row.
+
+        It grants nothing. `provider_created_at` is still unset, the row is
+        still not ACTIVE, and ownership still requires all four checks.
+        """
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                # Intent is recordable only while the write has not happened.
+                .where(
+                    PricingCleanupRecord.state == CleanupState.PENDING_WRITE.value
+                )
+                .values(reason_sent=reason_sent)
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
+
     def mark_active(
         self,
         record_id: str,
