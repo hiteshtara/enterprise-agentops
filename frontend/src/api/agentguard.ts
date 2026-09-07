@@ -26,6 +26,8 @@ import type {
   PricingRecommendationPage,
   RevenueOpportunityPage,
   PricingActionOutcomePage,
+  PricingCleanupRecord,
+  PricingCleanupWorkload,
   ReconcilerHealth,
   ReconcileResponse,
   RunDetail,
@@ -350,4 +352,34 @@ export function getPricingOutcomes(
 /** Whether outcome reconciliation is actually running. **Read-only.** */
 export function getReconcilerHealth(): Promise<ReconcilerHealth> {
   return request<ReconcilerHealth>('/pricing/outcomes/health')
+}
+
+/**
+ * What cleanup currently owes. **Read-only.**
+ *
+ * Looking at the queue never changes it: there is no companion function here
+ * that runs a pass, and the console has no path to a provider DELETE.
+ */
+export function getCleanupWorkload(): Promise<PricingCleanupWorkload> {
+  return request<PricingCleanupWorkload>('/pricing/cleanup')
+}
+
+/**
+ * Records that a person already settled an obligation, by hand, elsewhere.
+ *
+ * **This does not change PriceLabs.** It writes one row so a stranded
+ * obligation stops being reported as outstanding. It cannot remove an
+ * override, retry a cleanup, or claim a row — the server has no provider
+ * client on this path.
+ *
+ * The actor is taken from the authenticated token, never sent from here.
+ */
+export function recordManualResolution(
+  cleanupId: string,
+  resolution: string,
+): Promise<PricingCleanupRecord> {
+  return request<PricingCleanupRecord>(
+    `/pricing/cleanup/${encodeURIComponent(cleanupId)}/manual-resolution`,
+    { method: 'POST', body: JSON.stringify({ resolution }) },
+  )
 }

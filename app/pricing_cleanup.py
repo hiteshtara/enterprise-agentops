@@ -106,12 +106,38 @@ class CleanupState(str, Enum):
     VANISHED = "VANISHED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     UNKNOWN_CLEANUP_STATE = "UNKNOWN_CLEANUP_STATE"
+    #: A person investigated an obligation automation had already failed
+    #: closed on, performed or confirmed the necessary provider-side action
+    #: themselves, and recorded that here.
+    #:
+    #: **It never means AgentGuard deleted the override.** That is what
+    #: `CLEANED_UP` means, and reusing it here would put a false claim in the
+    #: one place a reviewer goes to find out what actually happened. The
+    #: distinction is the entire reason this state exists rather than a
+    #: comment on an existing one.
+    #:
+    #: Reachable only from `NEEDS_REVIEW` and `UNKNOWN_CLEANUP_STATE` -- the
+    #: two states automation has already given up on. A row still in play is
+    #: not something a person may close by assertion.
+    MANUALLY_RESOLVED = "MANUALLY_RESOLVED"
 
 
 TERMINAL_STATES: frozenset[CleanupState] = frozenset(
     {
         CleanupState.CLEANED_UP,
         CleanupState.VANISHED,
+        CleanupState.NEEDS_REVIEW,
+        CleanupState.UNKNOWN_CLEANUP_STATE,
+        CleanupState.MANUALLY_RESOLVED,
+    }
+)
+
+#: The only states a person may close by hand: the ones automation has already
+#: refused to touch. A row that is still in play -- unwritten, live, claimed,
+#: or stopped at the delete boundary -- is not closable by assertion, because
+#: the question there is what the *provider* did, not what a person decided.
+MANUALLY_RESOLVABLE_STATES: frozenset[CleanupState] = frozenset(
+    {
         CleanupState.NEEDS_REVIEW,
         CleanupState.UNKNOWN_CLEANUP_STATE,
     }
@@ -631,6 +657,80 @@ class PricingCleanupStore:
 
             return result.rowcount == 1
 
+    def record_manual_resolution(
+        self,
+        record_id: str,
+        resolution: str,
+        resolved_by_user_id: str,
+    ) -> bool:
+        """Record that a person closed an obligation automation gave up on.
+
+        **Bookkeeping only.** This writes to one row and nothing else. The
+        store holds no PriceLabs reader and no writer, so there is no code
+        path from here to an override -- it cannot set one, remove one, retry
+        a cleanup, claim a row, cross the delete boundary, or adopt
+        ownership. It records a decision a person already carried out
+        elsewhere.
+
+        **It never means AgentGuard deleted the override.** The row becomes
+        `MANUALLY_RESOLVED`, not `CLEANED_UP`, precisely so the audit trail
+        cannot be read as claiming the automatic worker did something it did
+        not.
+
+        Permitted only from `NEEDS_REVIEW` and `UNKNOWN_CLEANUP_STATE` -- the
+        states automation has already refused to act on. The predicate is in
+        the `WHERE` clause rather than an `if`, so a row that is still in play
+        cannot be closed by assertion even by a caller that gets it wrong:
+
+        * `PENDING_WRITE` / `ACTIVE` -- still automation's to finish.
+        * `CLAIMED` -- another process may be working on it right now.
+        * `DELETE_STARTED` -- an ambiguous external boundary. A person must
+          investigate it, but closing it here would let a stale worker's
+          DELETE land afterwards against a row someone had declared settled.
+        * `CLEANED_UP` / `VANISHED` / `MANUALLY_RESOLVED` -- already settled.
+          A second submission is refused rather than rewriting history.
+
+        **Nothing is cleared.** `approval_id`, `run_id`, `reason_sent`,
+        `provider_created_at`, `marker`, and automation's own `resolution` and
+        `resolved_at` all survive untouched. Tidying away the evidence of why
+        a row needed a person is exactly the wrong instinct here.
+
+        Returns True when this call settled the row, False when it did not
+        match -- so a duplicate submission is a no-op a caller can detect.
+        """
+        text = (resolution or "").strip()
+
+        if not text:
+            raise ValueError(
+                "A manual resolution must say what was done or verified."
+            )
+
+        if not (resolved_by_user_id or "").strip():
+            raise ValueError("A manual resolution must record who made it.")
+
+        with self._database.session() as session:
+            result = session.execute(
+                update(PricingCleanupRecord)
+                .where(PricingCleanupRecord.id == record_id)
+                # The guard. Never widen this to include a state automation
+                # might still act on.
+                .where(
+                    PricingCleanupRecord.state.in_(
+                        [s.value for s in MANUALLY_RESOLVABLE_STATES]
+                    )
+                )
+                .values(
+                    state=CleanupState.MANUALLY_RESOLVED.value,
+                    manual_resolution=text,
+                    resolved_by_user_id=resolved_by_user_id,
+                    manually_resolved_at=datetime.now(UTC).isoformat(),
+                )
+            )
+
+            session.commit()
+
+            return result.rowcount == 1
+
     def resolve(
         self,
         record_id: str,
@@ -906,7 +1006,17 @@ def _age_hours(stamp: str | None, moment: str) -> float | None:
 
 
 def to_payload(record: PricingCleanupRecord) -> dict[str, Any]:
-    """Console projection. Carries no credential and no provider internals."""
+    """Console projection. Carries no credential and no provider internals.
+
+    Enough for an administrator to investigate a row automation refused, and
+    nothing that could be used to act on one.
+
+    `marker` is included deliberately, and is not a secret: it is written into
+    the provider's own `reason` field, so it is the string an admin reads in
+    the PriceLabs UI to identify which override a row is talking about.
+    Possessing it grants nothing. `claim_token` and `lease_until` are the
+    opposite -- they *fence* the irreversible DELETE -- and stay out.
+    """
     return {
         "id": record.id,
         "listing_id": record.listing_id,
@@ -917,8 +1027,19 @@ def to_payload(record: PricingCleanupRecord) -> dict[str, Any]:
         "state": record.state,
         "adopted": record.adopted,
         "approval_id": record.approval_id,
+        "run_id": record.run_id,
+        # What an investigator needs: which override, what we meant to send,
+        # and whether the provider ever confirmed it.
+        "marker": record.marker,
+        "reason_sent": record.reason_sent,
+        "provider_created_at": record.provider_created_at,
         "created_at": record.created_at,
         "cleanup_at": record.cleanup_at,
+        # Automation's verdict...
         "resolved_at": record.resolved_at,
         "resolution": record.resolution,
+        # ...and, separately, the person's.
+        "manual_resolution": record.manual_resolution,
+        "resolved_by_user_id": record.resolved_by_user_id,
+        "manually_resolved_at": record.manually_resolved_at,
     }

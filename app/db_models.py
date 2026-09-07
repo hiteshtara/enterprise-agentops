@@ -1023,6 +1023,37 @@ class PricingCleanupRecord(Base):
         index=True,
     )
 
+    # -- manual resolution.
+    #
+    # Kept separate from `resolution` / `resolved_at` on purpose. Those hold
+    # what *automation* concluded -- "the change was sent but could not be
+    # read back", and when it gave up. Overwriting them to record a human
+    # closing the row would destroy the very history a reviewer needs, and
+    # would leave one field speaking in two voices. So the person gets their
+    # own three.
+
+    #: What the person says they did or verified, in their words. Required by
+    #: `record_manual_resolution`; a row closed with no explanation is not a
+    #: resolution, it is a row someone made quiet.
+    manual_resolution: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    #: Who closed it. Never taken from a request body -- the route reads it
+    #: from the authenticated context.
+    resolved_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+
+    #: When the person closed it, as distinct from when automation gave up.
+    manually_resolved_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
 
 class PricingActionOutcomeRecord(Base):
     """What happened after one executed pricing action. Observational only.

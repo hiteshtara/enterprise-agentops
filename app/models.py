@@ -967,10 +967,35 @@ class PricingCleanupRecordOut(BaseModel):
     state: str
     adopted: bool
     approval_id: str | None = None
+    run_id: str | None = None
+    #: The string written into the provider's own `reason`, so an admin can
+    #: identify which override a row refers to in the PriceLabs UI. Not a
+    #: secret and not a capability -- unlike `claim_token`, which fences the
+    #: DELETE and is never projected.
+    marker: str | None = None
+    reason_sent: str | None = None
+    provider_created_at: str | None = None
     created_at: str
     cleanup_at: str
+    #: Automation's verdict, and when it gave up.
     resolved_at: str | None = None
     resolution: str | None = None
+    #: A person's, kept separate so neither overwrites the other.
+    manual_resolution: str | None = None
+    resolved_by_user_id: str | None = None
+    manually_resolved_at: str | None = None
+
+
+class ManualResolutionRequest(BaseModel):
+    """A person recording what they already did about a stranded obligation.
+
+    **The body carries the explanation and nothing else.** There is no actor
+    field, no state field, no cleanup id and no provenance field, because an
+    identity a caller can type is not an identity. All of those come from the
+    authenticated server context or the URL.
+    """
+
+    resolution: str = Field(min_length=1, max_length=2000)
 
 
 class PricingCleanupWorkloadOut(BaseModel):

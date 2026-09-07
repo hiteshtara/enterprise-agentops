@@ -18,6 +18,7 @@ import { RunsPage } from './pages/RunsPage'
 import { ToolsPage } from './pages/ToolsPage'
 import { OpportunitiesPage } from './pages/OpportunitiesPage'
 import { OutcomesPage } from './pages/OutcomesPage'
+import { CleanupPage } from './pages/CleanupPage'
 import { VacancyPage } from './pages/VacancyPage'
 
 function Console() {
@@ -36,6 +37,7 @@ function Console() {
         <Route path="/vacancy" element={<VacancyPage />} />
         <Route path="/opportunities" element={<OpportunitiesPage />} />
         <Route path="/outcomes" element={<OutcomesPage />} />
+        <Route path="/cleanup" element={<CleanupPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:runId" element={<RunDetailPage />} />

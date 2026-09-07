@@ -23,6 +23,7 @@ describe('Layout navigation', () => {
       'Vacancy',
       'Opportunities',
       'Outcomes',
+      'Cleanup',
       'Knowledge',
       'Runs',
       'Approvals',

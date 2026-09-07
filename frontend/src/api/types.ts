@@ -869,3 +869,53 @@ export interface ReconcilerHealth {
   cancelled_after_booking: number
   reopened: number
 }
+
+/**
+ * One stored cleanup obligation.
+ *
+ * Carries what an administrator needs to *investigate* a row automation
+ * refused — including `marker`, the string written into the provider's own
+ * `reason`, which is how you identify the override in the PriceLabs UI.
+ *
+ * It carries no `claim_token` and no `lease_until`. Those fence the
+ * irreversible DELETE; the marker only names things.
+ */
+export interface PricingCleanupRecord {
+  id: string
+  listing_id: string
+  stay_date: string
+  old_price?: number | null
+  new_price: number
+  currency: string
+  state: string
+  adopted: boolean
+  approval_id?: string | null
+  run_id?: string | null
+  marker?: string | null
+  reason_sent?: string | null
+  provider_created_at?: string | null
+  created_at: string
+  cleanup_at: string
+  /** Automation's verdict, and when it gave up. */
+  resolved_at?: string | null
+  resolution?: string | null
+  /** A person's, kept separate so neither overwrites the other. */
+  manual_resolution?: string | null
+  resolved_by_user_id?: string | null
+  manually_resolved_at?: string | null
+}
+
+export interface PricingCleanupWorkload {
+  counted_at: string
+  pending_write: number
+  active: number
+  due_now: number
+  claimed: number
+  delete_started: number
+  needs_review: number
+  unknown_cleanup_state: number
+  oldest_overdue_at?: string | null
+  oldest_overdue_hours?: number | null
+  /** Rows automation will never resolve on its own. */
+  needs_attention: PricingCleanupRecord[]
+}
