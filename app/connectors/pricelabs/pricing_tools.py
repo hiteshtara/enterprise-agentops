@@ -105,11 +105,97 @@ class PriceLabsPricingTools:
         writer: PriceLabsWriteClient,
         pms: str = "lodgify",
         cleanups: PricingCleanupStore | None = None,
+        outcomes: Any = None,
+        evidence_source: Any = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._pms = pms
         self._cleanups = cleanups
+        # Outcome tracking is observational and entirely optional. Both of
+        # these absent means no row is recorded and the write path behaves
+        # exactly as it did before -- the tracker is never a dependency of
+        # changing a price.
+        self._outcomes = outcomes
+        self._evidence_source = evidence_source
+
+    def _record_outcome(
+        self,
+        *,
+        ctx: ExecutionContext,
+        listing_id: str,
+        stay_date: str,
+        action: str,
+        write_outcome: str,
+        state: MarketState,
+        currency: str,
+        proposed_price: float | None,
+        cleanup_id: str | None,
+    ) -> None:
+        """Record what we just did, for later observation. Never raises.
+
+        **Analytics may not fail a pricing action.** The price has already
+        moved at the provider by the time this runs; an exception here would
+        turn a successful, irreversible write into a reported failure, and
+        the one thing worse than losing a row of analytics is a caller
+        believing a live price change did not happen. So every failure is
+        swallowed and surfaced through the reconciler-health view instead,
+        where a stalled or failing tracker is visible without being confused
+        for "nothing booked".
+
+        Evidence is derived **server-side** here. It is never taken from the
+        tool's arguments: a caller supplying the market data its own decision
+        is later judged against is not evidence, it is assertion.
+        """
+        if self._outcomes is None:
+            return
+
+        try:
+            evidence: dict[str, Any] = {}
+
+            if self._evidence_source is not None:
+                evidence = self._evidence_source(listing_id, stay_date) or {}
+
+            bands = bands_for(listing_id)
+
+            evidence = {
+                "history_adr": evidence.get("historical_lead_band_adr"),
+                "history_sample_count": evidence.get("history_sample_count"),
+                "market_p25": state.market_p25,
+                "market_booked_median": state.market_booked_median,
+                "demand": state.demand,
+                "listing_occupancy": evidence.get("listing_occupancy"),
+                "market_occupancy": state.market_occupancy,
+                "market_signal_conflict": evidence.get(
+                    "market_signal_conflict"
+                ),
+                "hard_floor": bands.hard_floor if bands else None,
+                "owner_floor": evidence.get("owner_floor"),
+                "observed_commission_rate": evidence.get(
+                    "observed_commission_rate"
+                ),
+            }
+
+            self._outcomes.record_execution(
+                approval_id=ctx.approval_id,
+                run_id=ctx.run_id,
+                listing_id=listing_id,
+                stay_date=stay_date,
+                action=action,
+                executed_at=datetime.now(UTC).isoformat(),
+                write_outcome=write_outcome,
+                cleanup_id=cleanup_id,
+                price_before=state.current_price,
+                price_after=proposed_price,
+                currency=currency,
+                days_out=_days_out(stay_date),
+                evidence=evidence,
+            )
+
+        except Exception:  # noqa: BLE001 - see the docstring
+            # Deliberately silent here. Visibility is the health view's job;
+            # raising would be the actual harm.
+            return
 
     def _current_state(
         self,
@@ -385,6 +471,8 @@ class PriceLabsPricingTools:
                 stay_date,
             )
 
+        record = None
+
         try:
             if parsed is PriceAction.REMOVE_PIN:
                 result = self._writer.remove_override(
@@ -392,6 +480,18 @@ class PriceLabsPricingTools:
                     self._pms,
                     stay_date,
                     automation_enabled=bands.automation_enabled,
+                )
+
+                self._record_outcome(
+                    ctx=ctx,
+                    listing_id=listing_id,
+                    stay_date=stay_date,
+                    action=parsed.value,
+                    write_outcome=result.outcome.value,
+                    state=state,
+                    currency=currency,
+                    proposed_price=None,
+                    cleanup_id=None,
                 )
 
             else:
@@ -442,6 +542,21 @@ class PriceLabsPricingTools:
                     automation_enabled=bands.automation_enabled,
                 )
 
+                # Before `_confirm`, which has early returns: the price has
+                # already moved by now, so the outcome row must exist
+                # regardless of which of those paths is taken.
+                self._record_outcome(
+                    ctx=ctx,
+                    listing_id=listing_id,
+                    stay_date=stay_date,
+                    action=parsed.value,
+                    write_outcome=result.outcome.value,
+                    state=state,
+                    currency=currency,
+                    proposed_price=float(proposed_price),
+                    cleanup_id=record.id,
+                )
+
                 confirmation = self._confirm(record, marked, result)
 
                 if confirmation is not None:
@@ -451,6 +566,23 @@ class PriceLabsPricingTools:
             return _refused("WRITES_DISABLED", str(exc), stay_date)
 
         except PriceLabsUnavailable:
+            # Ambiguous: the change may already be live. The row is kept with
+            # UNKNOWN_WRITE_STATE rather than dropped, so an action that may
+            # have happened cannot silently vanish from a denominator.
+            self._record_outcome(
+                ctx=ctx,
+                listing_id=listing_id,
+                stay_date=stay_date,
+                action=parsed.value,
+                write_outcome=WriteOutcome.UNKNOWN_WRITE_STATE.value,
+                state=state,
+                currency=currency,
+                proposed_price=(
+                    float(proposed_price) if proposed_price is not None else None
+                ),
+                cleanup_id=record.id if record is not None else None,
+            )
+
             return {
                 "outcome": WriteOutcome.UNKNOWN_WRITE_STATE.value,
                 "stay_date": stay_date,
@@ -510,3 +642,14 @@ def _age_hours(stamp: str | None) -> float | None:
         when = when.replace(tzinfo=UTC)
 
     return (datetime.now(UTC) - when).total_seconds() / 3600.0
+
+
+def _days_out(stay_date: str) -> int | None:
+    """Nights between today and arrival, or None if the date cannot be read."""
+    try:
+        stay = _dt.date.fromisoformat(stay_date)
+
+    except (TypeError, ValueError):
+        return None
+
+    return (stay - datetime.now(UTC).date()).days

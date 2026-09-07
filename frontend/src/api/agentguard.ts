@@ -25,6 +25,8 @@ import type {
   PricingRecommendation,
   PricingRecommendationPage,
   RevenueOpportunityPage,
+  PricingActionOutcomePage,
+  ReconcilerHealth,
   ReconcileResponse,
   RunDetail,
   RunMetrics,
@@ -323,4 +325,29 @@ export function submitPricingAction(
       reason: recommendation.reason,
     }),
   })
+}
+
+/**
+ * Executed pricing actions and what was observed afterwards. **Read-only.**
+ *
+ * Deliberately has no companion write function. Nothing on this page can
+ * change a price, and nothing it reports is a causal claim -- the payload
+ * carries its own disclaimer for exactly that reason.
+ */
+export function getPricingOutcomes(
+  params: { listing_id?: string; action?: string } = {},
+): Promise<PricingActionOutcomePage> {
+  const query = new URLSearchParams()
+
+  if (params.listing_id) query.set('listing_id', params.listing_id)
+  if (params.action) query.set('action', params.action)
+
+  const suffix = query.toString() ? `?${query}` : ''
+
+  return request<PricingActionOutcomePage>(`/pricing/outcomes${suffix}`)
+}
+
+/** Whether outcome reconciliation is actually running. **Read-only.** */
+export function getReconcilerHealth(): Promise<ReconcilerHealth> {
+  return request<ReconcilerHealth>('/pricing/outcomes/health')
 }

@@ -826,6 +826,115 @@ class PricingCleanupOut(BaseModel):
     detail: str
 
 
+class PricingOutcomeOut(BaseModel):
+    """One executed pricing action and what was observed afterwards.
+
+    **Neither reservation id appears here, and there is no branch that adds
+    one.** They are join keys into records that are personal; they exist for
+    write-once correctness and idempotent reconciliation, and for nothing a
+    reader needs.
+
+    `first_*` is what was observed *after the action* and never changes.
+    `current_*` is what is true now. Keeping both is what separates "never
+    booked" from "booked after the action, later cancelled".
+
+    Every outcome field is optional and `None` means **unknown** -- not yet
+    reconciled, or the provider could not be read. A client must never render
+    it as `false`, `0`, `$0.00` or "did not book".
+    """
+
+    id: str
+    approval_id: str
+    run_id: str
+    cleanup_id: str | None = None
+    listing_id: str
+    stay_date: str
+    action: str
+    executed_at: str
+    write_outcome: str
+    price_before: float | None = None
+    price_after: float | None = None
+    currency: str | None = None
+    days_out: int | None = None
+
+    #: The evidence the decision rested on, as of the decision.
+    history_adr: float | None = None
+    history_sample_count: int | None = None
+    market_p25: float | None = None
+    market_booked_median: float | None = None
+    demand: str | None = None
+    listing_occupancy: float | None = None
+    market_occupancy: float | None = None
+    market_signal_conflict: bool | None = None
+    hard_floor: float | None = None
+    owner_floor: float | None = None
+    observed_commission_rate: float | None = None
+
+    #: The first post-action booking. Frozen once written.
+    first_booked_at: str | None = None
+    first_booking_lead_days: int | None = None
+    #: Hours, not days: a booking 6.5 hours after a reduction must not be
+    #: reported as "0 days".
+    first_hours_from_action: float | None = None
+    #: `rental_revenue / no_of_days` -- a stay average, never this night's
+    #: rate. The UI label must say so.
+    first_realized_stay_adr: float | None = None
+    first_booking_channel: str | None = None
+
+    current_booking_status: str | None = None
+    current_realized_stay_adr: float | None = None
+    current_booking_channel: str | None = None
+    #: The *first* post-action booking later cancelled. Not "empty now" -- a
+    #: rebooked night carries `True` here with a `booked` current status.
+    cancelled_after_booking: bool | None = None
+
+    last_reconciled_at: str | None = None
+    reconcile_pass_count: int = 0
+    #: When **we noticed**, not when it happened. The provider does not say.
+    cancellation_first_observed_at: str | None = None
+    #: "Routine polling stopped", never "immutable truth".
+    finalized_at: str | None = None
+    reopened_at: str | None = None
+
+
+class PricingOutcomeListOut(BaseModel):
+    """The outcomes board, with wording that resists a causal reading."""
+
+    outcomes: list[PricingOutcomeOut] = []
+    executed: int = 0
+    booked_after_action: int = 0
+    booked_then_cancelled: int = 0
+    never_booked: int = 0
+    unknown: int = 0
+    #: Carried in the payload rather than left to the client, so every
+    #: consumer of this endpoint states it.
+    disclaimer: str = (
+        "This records what happened after a pricing action, not because of "
+        "one."
+    )
+
+
+class PricingReconcilerHealthOut(BaseModel):
+    """Whether reconciliation is actually running.
+
+    Exists to separate two things that otherwise look identical: "nothing
+    booked" and "the reconciliation job stopped". A stale
+    `oldest_unreconciled_age_hours` is the signal.
+    """
+
+    checked_at: str
+    outcomes: int
+    unreconciled: int
+    oldest_unreconciled_executed_at: str | None = None
+    oldest_unreconciled_age_hours: float | None = None
+    last_successful_reconciliation_at: str | None = None
+    finalized: int
+    awaiting_first_booking: int
+    booked_currently: int
+    cancelled_after_booking: int
+    reopened: int
+
+
 class PricingCleanupRecordOut(BaseModel):
     """One stored cleanup obligation, as `pricing_cleanup.to_payload` builds it.
 

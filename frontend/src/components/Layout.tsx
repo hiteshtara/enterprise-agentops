@@ -22,6 +22,7 @@ const NAV: NavItem[] = [
     end: false,
     permission: 'VIEW_RUNS',
   },
+  { to: '/outcomes', label: 'Outcomes', end: false, permission: 'VIEW_RUNS' },
   { to: '/knowledge', label: 'Knowledge', end: false, permission: 'VIEW_RUNS' },
   { to: '/runs', label: 'Runs', end: false, permission: 'VIEW_RUNS' },
   { to: '/approvals', label: 'Approvals', end: false, permission: 'VIEW_APPROVALS' },
