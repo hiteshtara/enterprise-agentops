@@ -158,13 +158,23 @@ class PriceLabsClient:
     ) -> list[dict[str, Any]]:
         """Booking history for one listing, as minimal internal records.
 
-        **Constructed, never forwarded.** The provider returns `guestName` and
-        `channelConfirmationCode` alongside the pricing fields; neither is
-        read here, so neither can reach a trace, an audit event, a metric or a
-        browser. Only what pricing history needs is carried:
+        **Constructed, never forwarded.** The provider returns `guestName`,
+        `channelConfirmationCode`, `guest_count`, `listing_name`, `total_cost`
+        and `cleaning_fees` alongside the pricing fields; none is read here,
+        so none can reach a trace, an audit event, a metric or a browser.
+
+        Nine named fields are carried, and each one earns its place:
         `listing_id`, `booked_date`, `check_in`, `no_of_days`,
-        `rental_revenue`, `booking_status`, plus `reservation_id` for
-        de-duplication across pages.
+        `rental_revenue` and `booking_status` for pricing history;
+        `reservation_id` for de-duplication across pages; `check_out` because
+        a night is occupied when `check_in <= night < check_out` and the
+        arrival date alone cannot say whether a multi-night stay covers it;
+        and `booking_channel` for outcome analysis -- a coarse category
+        (`bcom` / `airbnb` / `vrbo` / `manual` / `others`, verified populated
+        on every row sampled 2026-09-06), not an identifier.
+
+        Adding a field here is an explicit decision each time. There is no
+        passthrough, no `**rest`, and no `dict(row)`.
 
         Pagination is honoured to completion. `start_date`/`end_date` bound the
         request; filtering to what is *usable* as history is a separate
@@ -227,9 +237,11 @@ class PriceLabsClient:
                         "listing_id": row.get("listing_id"),
                         "booked_date": row.get("booked_date"),
                         "check_in": row.get("check_in"),
+                        "check_out": row.get("check_out"),
                         "no_of_days": row.get("no_of_days"),
                         "rental_revenue": row.get("rental_revenue"),
                         "booking_status": row.get("booking_status"),
+                        "booking_channel": row.get("booking_channel"),
                     }
                 )
 

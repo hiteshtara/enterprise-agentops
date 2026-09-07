@@ -990,3 +990,286 @@ class PricingCleanupRecord(Base):
         nullable=True,
         index=True,
     )
+
+
+class PricingActionOutcomeRecord(Base):
+    """What happened after one executed pricing action. Observational only.
+
+    One row per **executed** action -- not per approval (a rejected one never
+    happened) and not per recommendation (thousands, mostly unexecuted).
+
+    Two halves that must never be confused:
+
+    * ``first_*`` is what happened *after the action*. It is written once, on
+      the first qualifying post-action booking, and is never touched again --
+      not by a cancellation, not by a rebooking. The store enforces this with
+      a conditional UPDATE, so it is a property of the schema rather than of
+      caller discipline.
+    * ``current_*`` is what is true *now*, and is overwritten every pass.
+
+    Keeping both is what distinguishes "never booked" from "booked after the
+    action, later cancelled" -- materially different outcomes that a single
+    mutable status column would collapse into one.
+
+    **Nothing here is a causal claim.** There is no attribution column and no
+    uplift figure, because the counterfactual is not observed. A booking after
+    a price change is adjacency in time, nothing more.
+
+    Every outcome column is nullable, and null means *unknown*: not yet
+    reconciled, or the provider could not be read. Unknown must never be
+    rendered as ``False``, ``0`` or "did not book".
+    """
+
+    __tablename__ = "pricing_action_outcomes"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+    )
+
+    # -- identity and linkage. Ids only; no content copied from those tables.
+
+    approval_id: Mapped[str] = mapped_column(
+        String(36),
+        nullable=False,
+        index=True,
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        nullable=False,
+        index=True,
+    )
+
+    #: Null for REMOVE_PIN, which creates no cleanup obligation.
+    cleanup_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+    )
+
+    listing_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    stay_date: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        index=True,
+    )
+
+    # -- what we did
+
+    action: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+    )
+
+    #: The provider's own timestamp for the change where available, so
+    #: "how long after the action did it book" is measured against when the
+    #: price actually moved rather than when we decided to move it.
+    executed_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        index=True,
+    )
+
+    #: CONFIRMED_APPLIED or UNKNOWN_WRITE_STATE. An ambiguous write is kept
+    #: rather than dropped, so it cannot silently vanish from a denominator.
+    write_outcome: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+
+    #: The **published** price before the change. Deliberately not
+    #: `pricing_cleanups.old_price`, which is the previous *override* and is
+    #: null when there was none.
+    price_before: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    price_after: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    currency: Mapped[str | None] = mapped_column(
+        String(8),
+        nullable=True,
+    )
+
+    days_out: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    # -- the evidence the decision rested on, as of the decision.
+    #
+    # Captured server-side at execution time and never accepted from a
+    # caller. It cannot be recomputed later: market readings are overwritten
+    # by the provider, history depends on the reservation set as it stood, and
+    # floors and commission are configuration that changes. Recomputing in a
+    # year answers "what would we decide today", which is a different and
+    # useless question.
+
+    history_adr: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    history_sample_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    market_p25: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    market_booked_median: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    demand: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    listing_occupancy: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    market_occupancy: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    market_signal_conflict: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+
+    hard_floor: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    owner_floor: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    observed_commission_rate: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    # -- the first post-action booking. WRITE ONCE.
+
+    #: The provider's `booked_date`, which carries a time component, so the
+    #: gap between action and booking is measured in hours rather than
+    #: rounded to a day.
+    first_booked_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    #: `stay_date - booked_date`, in days. Date-based on purpose: check-in
+    #: semantics are date-based, so hours would imply precision the stay date
+    #: does not have.
+    first_booking_lead_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    #: `booked_date - executed_at`, in hours. A booking six hours after a
+    #: reduction must not be reported as "0 days".
+    first_hours_from_action: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    #: `rental_revenue / no_of_days` -- a **stay average**, never the realized
+    #: rate for this individual night. The name carries "stay" permanently so
+    #: it cannot be compared against the night's price by accident.
+    first_realized_stay_adr: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    #: Needed for write-once correctness and idempotent reconciliation. It is
+    #: a join key into a record that *is* personal, so it is never projected
+    #: through the API or the console.
+    first_reservation_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    first_booking_channel: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+
+    # -- what is true now. Overwritten every pass.
+
+    #: booked / cancelled / none. Null means unknown -- never "did not book".
+    current_booking_status: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
+
+    #: Never projected. See `first_reservation_id`.
+    current_reservation_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    current_realized_stay_adr: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    current_booking_channel: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+
+    #: **The first post-action booking later cancelled** -- not "the night is
+    #: empty now". A night can be rebooked, in which case this stays True
+    #: while `current_booking_status` is `booked` and the reservation ids
+    #: differ. Collapsing the two would lose the distinction.
+    cancelled_after_booking: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+
+    # -- reconciliation bookkeeping
+
+    last_reconciled_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )
+
+    reconcile_pass_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    #: **When we noticed**, not when it happened. The provider's
+    #: `cancelled_on` is the Unix epoch sentinel on 445 of 450 cancelled
+    #: reservations observed 2026-09-06, so the event time is unavailable.
+    #: Naming this `cancelled_at` would launder a poll timestamp into an
+    #: event timestamp. The true moment lies between the previous pass and
+    #: this one; the cadence is the whole resolution we have.
+    cancellation_first_observed_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    #: "Routine polling stopped", never "immutable historical truth". A later
+    #: pass that disagrees clears this.
+    finalized_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )
+
+    reopened_at: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
+    created_at: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=lambda: datetime.now(UTC).isoformat(),
+    )

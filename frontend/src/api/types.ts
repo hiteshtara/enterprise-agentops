@@ -772,3 +772,100 @@ export interface PricingOutcome {
   needs_human: boolean
   refusal?: string | null
 }
+
+/**
+ * One executed pricing action and what was observed afterwards.
+ *
+ * Two halves that must not be confused. `first_*` is what happened *after the
+ * action* and is frozen once written -- a later cancellation never erases it.
+ * `current_*` is what is true now. Keeping both is what separates "never
+ * booked" from "booked after the action, later cancelled".
+ *
+ * **`null` means unknown**, not `false` and not zero: the row may not be
+ * reconciled yet, or the provider read may have failed. Render it as unknown.
+ *
+ * Neither reservation id is present, and the server has no branch that emits
+ * one.
+ */
+export interface PricingActionOutcome {
+  id: string
+  approval_id: string
+  run_id: string
+  cleanup_id?: string | null
+  listing_id: string
+  stay_date: string
+  action: string
+  executed_at: string
+  write_outcome: string
+  price_before?: number | null
+  price_after?: number | null
+  currency?: string | null
+  days_out?: number | null
+
+  /** The evidence the decision rested on, as of the decision. */
+  history_adr?: number | null
+  history_sample_count?: number | null
+  market_p25?: number | null
+  market_booked_median?: number | null
+  demand?: string | null
+  listing_occupancy?: number | null
+  market_occupancy?: number | null
+  market_signal_conflict?: boolean | null
+  hard_floor?: number | null
+  owner_floor?: number | null
+  observed_commission_rate?: number | null
+
+  first_booked_at?: string | null
+  first_booking_lead_days?: number | null
+  /** Hours. A booking 6.5h after a reduction is never shown as "0 days". */
+  first_hours_from_action?: number | null
+  /** `rental_revenue / no_of_days` -- a stay average, not this night's rate. */
+  first_realized_stay_adr?: number | null
+  first_booking_channel?: string | null
+
+  current_booking_status?: 'booked' | 'cancelled' | 'none' | null
+  current_realized_stay_adr?: number | null
+  current_booking_channel?: string | null
+  /** The *first* post-action booking cancelled. A rebooked night keeps this. */
+  cancelled_after_booking?: boolean | null
+
+  last_reconciled_at?: string | null
+  reconcile_pass_count: number
+  /** When **we noticed**. The provider does not report the event time. */
+  cancellation_first_observed_at?: string | null
+  /** "Routine polling stopped", never "immutable truth". */
+  finalized_at?: string | null
+  reopened_at?: string | null
+}
+
+export interface PricingActionOutcomePage {
+  outcomes: PricingActionOutcome[]
+  executed: number
+  booked_after_action: number
+  booked_then_cancelled: number
+  never_booked: number
+  /** Not yet reconciled, or the provider could not be read. Not "no". */
+  unknown: number
+  /** Carried in the payload so every consumer states it. */
+  disclaimer: string
+}
+
+/**
+ * Whether reconciliation is running.
+ *
+ * Exists to separate a stopped job from a quiet market: both report zero
+ * bookings, and `oldest_unreconciled_age_hours` is what tells them apart.
+ */
+export interface ReconcilerHealth {
+  checked_at: string
+  outcomes: number
+  unreconciled: number
+  oldest_unreconciled_executed_at?: string | null
+  oldest_unreconciled_age_hours?: number | null
+  last_successful_reconciliation_at?: string | null
+  finalized: number
+  awaiting_first_booking: number
+  booked_currently: number
+  cancelled_after_booking: number
+  reopened: number
+}

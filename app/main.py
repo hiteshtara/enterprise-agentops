@@ -133,8 +133,11 @@ from app.models import (
     PricingBandsOut,
     PricingCleanupRunOut,
     PricingCleanupWorkloadOut,
+    PricingOutcomeListOut,
+    PricingOutcomeOut,
     PricingRecommendation,
     PricingRecommendationPage,
+    PricingReconcilerHealthOut,
     ReconcileResponse,
     RevenueOpportunity,
     RevenueOpportunityPage,
@@ -168,8 +171,11 @@ from app.pricing_config import (
     writes_enabled as pricing_writes_enabled,
 )
 from app.pricing_history import load_history
+from app.pricing_outcomes import PricingOutcomeStore
+from app.pricing_outcomes import to_payload as outcome_payload
 from app.pricing_policy import WRITE_ACTIONS, PriceAction
 from app.pricing_recommendations import payloads as pricing_payloads
+from app.pricing_reconciler import PricingOutcomeReconciler
 from app.pricing_service import (
     HORIZON_DAYS,
     PricingRecommendationService,
@@ -326,11 +332,51 @@ pricelabs_cleanups = PricingCleanupStore(database=database)
 
 # The write path. Registered as a DANGEROUS, non-model-callable tool, and
 # inert until both ENABLE_PRICING_WRITES and the listing's own switch are on.
+# Observational record of every executed pricing action. Always constructed,
+# for the same reason as the cleanup store: what we did outlives the
+# credential that did it.
+pricelabs_outcomes = PricingOutcomeStore(database=database)
+
+
+def pricing_evidence(listing_id: str, stay_date: str) -> dict:
+    """The recommendation for one night, for the outcome snapshot.
+
+    Server-derived, at execution time. Evidence is never taken from the tool's
+    arguments -- a caller supplying the market data its own decision is later
+    judged against is assertion, not evidence.
+
+    Returns `{}` rather than raising: this feeds an observational record, and
+    failing to describe an action must never fail the action.
+    """
+    try:
+        for row in build_recommendations():
+            if row["listing_id"] == listing_id and row["stay_date"] == stay_date:
+                return row
+
+    except Exception:  # noqa: BLE001 - observational; see the docstring
+        return {}
+
+    return {}
+
+
 pricelabs_pricing_tools = (
     PriceLabsPricingTools(
         reader=pricelabs_client,
         writer=pricelabs_write_client,
         cleanups=pricelabs_cleanups,
+        outcomes=pricelabs_outcomes,
+        evidence_source=pricing_evidence,
+    )
+    if pricelabs_client is not None
+    else None
+)
+
+# Observes booking outcomes. Constructed with a **reader only** -- there is no
+# writer parameter, so no path through it can reach a pricing endpoint.
+pricelabs_outcome_reconciler = (
+    PricingOutcomeReconciler(
+        reader=pricelabs_client,
+        outcomes=pricelabs_outcomes,
     )
     if pricelabs_client is not None
     else None
@@ -1996,6 +2042,81 @@ def get_revenue_opportunities(
         lower_summary=summarise_lower(lower_rows),
         lower_opportunities=[LowerOpportunity(**row) for row in lower_rows],
     )
+
+
+@app.get(
+    "/pricing/outcomes",
+    response_model=PricingOutcomeListOut,
+)
+def pricing_outcomes(
+    listing_id: str | None = None,
+    action: str | None = None,
+    user: User = Depends(require_view_runs),
+) -> PricingOutcomeListOut:
+    """What happened after each executed pricing action. **Read-only.**
+
+    Observational. There is no attribution here, no incremental revenue, no
+    uplift and no ROI figure, because the counterfactual is not observed: we
+    do not know what that night would have done at the old price. A booking
+    after a price change is adjacency in time, and the `disclaimer` field
+    carries that wording into every consumer of this endpoint.
+
+    Neither reservation id is projected — see `pricing_outcomes.to_payload`.
+
+    The counts distinguish four cases, and `unknown` is a real one: a row not
+    yet reconciled, or one whose provider read failed, is **not** "never
+    booked".
+    """
+    rows = [
+        outcome_payload(record)
+        for record in pricelabs_outcomes.list_outcomes(
+            listing_id=listing_id,
+            action=action,
+        )
+    ]
+
+    booked = sum(
+        1
+        for r in rows
+        if r["current_booking_status"] == "booked"
+    )
+
+    cancelled = sum(1 for r in rows if r["cancelled_after_booking"] is True)
+
+    never = sum(
+        1
+        for r in rows
+        if r["current_booking_status"] == "none"
+        and r["first_booked_at"] is None
+    )
+
+    unknown = sum(1 for r in rows if r["current_booking_status"] is None)
+
+    return PricingOutcomeListOut(
+        outcomes=[PricingOutcomeOut(**row) for row in rows],
+        executed=len(rows),
+        booked_after_action=booked,
+        booked_then_cancelled=cancelled,
+        never_booked=never,
+        unknown=unknown,
+    )
+
+
+@app.get(
+    "/pricing/outcomes/health",
+    response_model=PricingReconcilerHealthOut,
+)
+def pricing_outcomes_health(
+    user: User = Depends(require_view_runs),
+) -> PricingReconcilerHealthOut:
+    """Whether reconciliation is running. **Read-only.**
+
+    Without this, a stopped reconciler and a quiet market look identical: rows
+    stay unreconciled, every count reads zero, and the board understates
+    everything while appearing healthy. `oldest_unreconciled_age_hours` is the
+    number that tells them apart.
+    """
+    return PricingReconcilerHealthOut(**pricelabs_outcomes.health())
 
 
 @app.get(

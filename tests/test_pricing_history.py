@@ -195,14 +195,27 @@ def test_a_cursor_that_never_stops_is_refused_rather_than_walked_forever():
 # -- what leaves the connector --------------------------------------------
 
 
+#: Every field the connector constructs, and nothing else. Widening this set
+#: is an explicit decision each time, which is exactly why the assertion is
+#: an equality against a literal rather than a subset check: a field that
+#: appears without someone editing this line is a bug.
+#:
+#: `check_out` and `booking_channel` were added 2026-09-06 for outcome
+#: tracking. `check_out` because a night is occupied when
+#: `check_in <= night < check_out`, and the arrival date alone cannot say
+#: whether a multi-night stay covers a given night; `booking_channel` because
+#: it is a coarse category (`bcom` / `airbnb` / `vrbo` / `manual` / `others`)
+#: rather than an identifier.
 MINIMAL_FIELDS = {
     "reservation_id",
     "listing_id",
     "booked_date",
     "check_in",
+    "check_out",
     "no_of_days",
     "rental_revenue",
     "booking_status",
+    "booking_channel",
 }
 
 

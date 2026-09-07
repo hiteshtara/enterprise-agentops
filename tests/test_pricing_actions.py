@@ -2349,3 +2349,151 @@ def test_lower_is_blocked_for_every_property_before_any_provider_access(
         assert provider.touched == [], f"{band.slug}: provider was contacted"
         assert result["refusal"] == "UNVERIFIED_BEHAVIOUR", band.slug
         assert "Booking.com" in result["message"], band.slug
+
+
+# -- the outcomes board and reconciler health -----------------------------
+
+
+def outcome_row(api, **over):
+    fields = {
+        "approval_id": "ap-1",
+        "run_id": "run-1",
+        "cleanup_id": "cl-1",
+        "listing_id": BUNKERS,
+        "stay_date": "2026-09-10",
+        "action": "LOWER",
+        "executed_at": "2026-09-06T10:00:00+00:00",
+        "write_outcome": "CONFIRMED_APPLIED",
+        "price_before": 182.0,
+        "price_after": 164.0,
+        "currency": "USD",
+        "days_out": 4,
+        "evidence": {"history_adr": 149.5, "history_sample_count": 9},
+    }
+
+    fields.update(over)
+
+    return api.module.pricelabs_outcomes.record_execution(**fields)
+
+
+def test_the_outcomes_route_is_read_only_and_starts_empty(api):
+    """An empty table is a legitimate state, not a broken one."""
+    response = api.client("ADMIN").get("/pricing/outcomes")
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["outcomes"] == []
+    assert body["executed"] == 0
+    assert body["never_booked"] == 0
+    assert body["unknown"] == 0
+
+
+def test_the_outcomes_route_never_projects_a_reservation_id(api):
+    record = outcome_row(api)
+
+    api.module.pricelabs_outcomes.note_first_booking(
+        record.id,
+        __import__(
+            "app.pricing_outcomes", fromlist=["BookingObservation"]
+        ).BookingObservation(
+            reservation_id="r-secret",
+            booked_at="2026-09-06T16:30:00.000Z",
+            status="booked",
+            realized_stay_adr=170.0,
+            channel="bcom",
+            check_out="2026-09-12",
+        ),
+        stay_date="2026-09-10",
+        executed_at="2026-09-06T10:00:00+00:00",
+    )
+
+    body = api.client("ADMIN").get("/pricing/outcomes").json()
+    text = json.dumps(body)
+
+    assert "r-secret" not in text
+    assert "reservation_id" not in text
+    assert body["outcomes"][0]["first_booking_channel"] == "bcom"
+    assert body["outcomes"][0]["first_hours_from_action"] == 6.5
+
+
+def test_the_outcomes_route_carries_the_no_causation_wording(api):
+    """Every consumer of this endpoint gets the disclaimer, not just the UI."""
+    body = api.client("ADMIN").get("/pricing/outcomes").json()
+
+    assert body["disclaimer"] == (
+        "This records what happened after a pricing action, not because of "
+        "one."
+    )
+
+
+def test_the_outcomes_payload_makes_no_revenue_claim(api):
+    outcome_row(api)
+
+    body = api.client("ADMIN").get("/pricing/outcomes").json()
+    text = json.dumps(body).lower()
+
+    for forbidden in (
+        "attributed",
+        "incremental",
+        "uplift",
+        "roi",
+        "caused",
+        "revenue_impact",
+    ):
+        assert forbidden not in text
+
+
+def test_an_unreconciled_outcome_counts_as_unknown_not_as_never_booked(api):
+    """The distinction the whole design turns on."""
+    outcome_row(api)
+
+    body = api.client("ADMIN").get("/pricing/outcomes").json()
+
+    assert body["unknown"] == 1
+    assert body["never_booked"] == 0
+    assert body["outcomes"][0]["current_booking_status"] is None
+
+
+def test_the_outcomes_route_filters_without_exposing_a_selector(api):
+    outcome_row(api)
+    outcome_row(api, listing_id="681301___748348", stay_date="2026-09-11")
+
+    both = api.client("ADMIN").get("/pricing/outcomes").json()
+    one = api.client("ADMIN").get(
+        "/pricing/outcomes",
+        params={"listing_id": BUNKERS},
+    ).json()
+
+    assert both["executed"] == 2
+    assert one["executed"] == 1
+
+
+def test_reconciler_health_tells_a_stopped_job_from_a_quiet_market(api):
+    outcome_row(api)
+
+    body = api.client("ADMIN").get("/pricing/outcomes/health").json()
+
+    assert body["outcomes"] == 1
+    assert body["unreconciled"] == 1
+    assert body["last_successful_reconciliation_at"] is None
+    assert body["oldest_unreconciled_age_hours"] is not None
+    assert body["booked_currently"] == 0
+
+
+def test_every_role_may_read_the_outcomes_board(api):
+    for role in ("VIEWER", "OPERATOR", "APPROVER", "ADMIN"):
+        assert api.client(role).get("/pricing/outcomes").status_code == 200
+        assert (
+            api.client(role).get("/pricing/outcomes/health").status_code == 200
+        )
+
+
+def test_the_outcomes_routes_are_get_only(api):
+    """No verb through which a reader could change an outcome."""
+    paths = {"/pricing/outcomes", "/pricing/outcomes/health"}
+
+    for route in api.module.app.routes:
+        if getattr(route, "path", None) in paths:
+            assert route.methods == {"GET"}
