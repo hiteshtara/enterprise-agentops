@@ -132,6 +132,7 @@ from app.models import (
     PricingActionRequest,
     PricingBandsOut,
     PricingCleanupRunOut,
+    PricingCleanupWorkloadOut,
     PricingRecommendation,
     PricingRecommendationPage,
     ReconcileResponse,
@@ -1995,6 +1996,38 @@ def get_revenue_opportunities(
         lower_summary=summarise_lower(lower_rows),
         lower_opportunities=[LowerOpportunity(**row) for row in lower_rows],
     )
+
+
+@app.get(
+    "/pricing/cleanup",
+    response_model=PricingCleanupWorkloadOut,
+)
+def pricing_cleanup_workload(
+    user: User = Depends(require_view_runs),
+) -> PricingCleanupWorkloadOut:
+    """What cleanup owes, for someone deciding whether to run a pass.
+
+    **This changes nothing.** It counts rows and returns them; it does not
+    claim, reconcile, expire a lease, or move a row between states. Looking at
+    the queue must never be a way of altering it, which is why this is a
+    separate GET rather than a dry-run mode on the POST -- a flag that
+    switches between "report" and "act" is one typo away from acting.
+
+    It takes no input for the same reason `POST /pricing/cleanup/run` does not:
+    there is no id, listing or date to supply, so this cannot be used to hunt
+    for one night's record.
+
+    A `DELETE_STARTED` row appears here and stays here. Surfacing it is the
+    whole intent -- automation will never resolve it -- but nothing in this
+    endpoint or anywhere else offers to retry it. See
+    docs/PRICING_CLEANUP_V2.md section 4a.
+
+    No connector guard: `pricelabs_cleanups` is built whether or not PriceLabs
+    is configured, precisely so an obligation outlives the credential that
+    created it. A pin stranded at the provider must stay visible here even if
+    the connector is later removed.
+    """
+    return PricingCleanupWorkloadOut(**pricelabs_cleanups.workload())
 
 
 @app.post(

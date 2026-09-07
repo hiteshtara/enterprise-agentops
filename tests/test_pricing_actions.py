@@ -4,6 +4,7 @@ Every price and date here is invented. No test in this file reaches PriceLabs.
 """
 
 import datetime
+import json
 
 import pytest
 
@@ -1701,6 +1702,97 @@ def test_the_cleanup_route_is_unavailable_without_a_connector(api):
     api.module.pricelabs_cleanup_runner = None
 
     assert api.client("ADMIN").post("/pricing/cleanup/run").status_code == 503
+
+
+# -- the read-only workload view ------------------------------------------
+
+
+def test_the_workload_route_reports_the_queue_without_running_a_pass(api):
+    """Looking at the work is not doing the work."""
+    runner = install_runner(api, RecordingRunner())
+
+    response = api.client("ADMIN").get("/pricing/cleanup")
+
+    assert response.status_code == 200
+    assert runner.calls == [], "reading the queue must not drive the runner"
+
+    body = response.json()
+
+    assert body["due_now"] == 0
+    assert body["delete_started"] == 0
+    assert body["oldest_overdue_hours"] is None
+    assert body["needs_attention"] == []
+
+
+def test_the_workload_route_surfaces_a_row_stuck_at_the_delete_boundary(api):
+    """The state automation will never resolve is the one a person must see."""
+    from app.pricing_cleanup import build_reason
+
+    store = api.module.pricelabs_cleanups
+
+    record = store.record_intent(
+        listing_id=BUNKERS,
+        pms="lodgify",
+        stay_date="2026-09-20",
+        old_price=200.0,
+        new_price=180.0,
+        currency="USD",
+        cleanup_at="2026-09-06T00:00:00+00:00",
+        approval_id="ap-1",
+        run_id="run-1",
+    )
+    store.mark_active(
+        record.id,
+        provider_created_at="2026-09-05T09:00:00.000Z",
+        reason_sent=build_reason(record.marker, "because"),
+    )
+    assert store.claim(record.id, "tok-1")
+    assert store.begin_delete(record.id, "tok-1")
+
+    body = api.client("ADMIN").get("/pricing/cleanup").json()
+
+    assert body["delete_started"] == 1
+    assert body["needs_attention"][0]["stay_date"] == "2026-09-20"
+    assert body["needs_attention"][0]["state"] == "DELETE_STARTED"
+
+    # The fencing token is not part of the projection, and nothing in the
+    # response offers a way to retry, force or re-run the row.
+    assert "tok-1" not in json.dumps(body)
+    assert store.get(record.id).state == "DELETE_STARTED"
+
+
+def test_the_workload_route_takes_no_input(api):
+    """No id, listing or date -- it cannot be used to hunt for one night."""
+    response = api.client("ADMIN").get(
+        "/pricing/cleanup",
+        params={"listing_id": BUNKERS, "stay_date": "2026-12-25"},
+    )
+
+    assert response.status_code == 200
+    assert "listing_id" not in response.json()
+
+
+def test_every_role_may_read_the_workload(api):
+    """Nothing is hidden from a VIEWER; roles differ in what they may cause.
+
+    Running a pass still requires ADMINISTER -- that separation is the point.
+    """
+    for role in ("VIEWER", "OPERATOR", "APPROVER", "ADMIN"):
+        assert api.client(role).get("/pricing/cleanup").status_code == 200
+
+    for role in ("VIEWER", "OPERATOR", "APPROVER"):
+        assert api.client(role).post("/pricing/cleanup/run").status_code == 403
+
+
+def test_the_workload_route_survives_a_missing_connector(api):
+    """An obligation outlives the credential that created it.
+
+    The runner may be gone; a pin stranded at the provider must still be
+    visible, so this route has no connector guard.
+    """
+    api.module.pricelabs_cleanup_runner = None
+
+    assert api.client("ADMIN").get("/pricing/cleanup").status_code == 200
 
 
 def test_a_provider_outage_surfaces_as_a_gateway_error_not_a_trace(api):
