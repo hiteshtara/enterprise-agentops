@@ -27,6 +27,16 @@ import { Empty, ErrorState, Loading } from '../components/States'
  *     re-reads PriceLabs and refuses if the state moved.
  *   * **An unknown outcome is not a failure and offers no retry.** The price
  *     may already be live, so the card says to check PriceLabs and stops.
+ *
+ * **Review reads; it does not begin anything.** It used to call
+ * `submitPricingAction`, which parked a real DANGEROUS approval on the server
+ * -- so with pricing writes switched off an owner could only ever reach a red
+ * "Failed. ENABLE_PRICING_WRITES is not enabled", having created a run, an
+ * approval and two audit events that could never succeed. A shut safety switch
+ * is not a failed pricing action, and looking at the evidence for a
+ * recommendation is not requesting one. Review is now pure local expansion of
+ * the payload `GET /vacancy/recommendations` already returned: it issues no
+ * request, so it *cannot* create anything.
  */
 const GENERIC_FAILURE = 'The action could not be submitted. Try again.'
 
@@ -83,6 +93,26 @@ function Evidence({ rec }: { rec: PricingRecommendation }) {
     ['Auto-raise ceiling', money(rec.auto_raise_ceiling)],
     ['Absolute ceiling', money(rec.absolute_ceiling)],
     ['Confidence', rec.confidence],
+    // What this property actually converts at in this lead band -- evidence
+    // about the property, never a target price.
+    [
+      'Historical lead-band ADR',
+      rec.historical_lead_band_adr === null
+        ? '—'
+        : `${money(rec.historical_lead_band_adr)} (n=${rec.history_sample_count ?? 0})`,
+    ],
+    [
+      'Gap to that history',
+      rec.historical_reference_gap_dollars === null
+        ? '—'
+        : `${money(rec.historical_reference_gap_dollars)} / ${rec.historical_reference_gap_pct ?? 0}%`,
+    ],
+    [
+      'Observed Booking.com commission',
+      rec.observed_commission_rate === null
+        ? 'not observed'
+        : `${rec.observed_commission_rate}%`,
+    ],
     ['PriceLabs refreshed', rec.last_refreshed_at ?? 'unknown'],
     ['State fingerprint', rec.fingerprint],
   ]
@@ -99,6 +129,22 @@ function Evidence({ rec }: { rec: PricingRecommendation }) {
       </dl>
       {rec.owner_floor_basis ? (
         <p className="vac-note">Owner floor basis: {rec.owner_floor_basis}</p>
+      ) : null}
+      {rec.below_owner_floor ? (
+        <p className="vac-note vac-flag">
+          This proposal is below the owner floor. It stays above the hard floor, but it
+          is an explicit vacancy decision rather than a routine change.
+        </p>
+      ) : null}
+      {rec.market_signal_conflict ? (
+        <p className="vac-note vac-flag">
+          Market-signal conflict: this property&rsquo;s own realised history and the
+          comp set disagree about the direction. Near-term history takes precedence
+          here; both sides are shown above.
+        </p>
+      ) : null}
+      {rec.booking_com_warning ? (
+        <p className="vac-note vac-flag">{rec.booking_com_warning}</p>
       ) : null}
       <p className="vac-reason">{rec.reason}</p>
       {rec.blocked_reason ? <p className="vac-note">{rec.blocked_reason}</p> : null}
@@ -166,6 +212,7 @@ function ActionCard({
   rec: PricingRecommendation
   writesEnabled: boolean
 }) {
+  const [reviewing, setReviewing] = useState(false)
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [outcome, setOutcome] = useState<PricingOutcome | null>(null)
   const [error, setError] = useState<unknown>(null)
@@ -178,7 +225,26 @@ function ActionCard({
 
   const applyLabel = isRemovePin ? 'Return to dynamic pricing' : 'Approve & Apply'
 
-  async function onReview() {
+  /**
+   * Expand the evidence. **Deliberately not async and deliberately not a
+   * request.** Everything shown is already in the payload the page fetched, so
+   * reviewing a recommendation cannot create a run, an approval, an audit
+   * event, a cleanup row, or reach PriceLabs -- not because it is careful, but
+   * because it calls nothing.
+   */
+  function onReview() {
+    setError(null)
+    setReviewing(true)
+  }
+
+  /**
+   * The separate, deliberate step: park a real approval on the server.
+   *
+   * Only reachable when pricing writes are actually available. Requesting an
+   * approval that provably cannot execute is what produced doomed approvals
+   * and a red failure box for a switch that was simply off.
+   */
+  async function onRequestApproval() {
     setBusy(true)
     setError(null)
 
@@ -252,18 +318,20 @@ function ActionCard({
         <p className="vac-note">Always requires a human decision.</p>
       ) : null}
 
-      <details className="vac-details">
-        <summary>Show details</summary>
-        <Evidence rec={rec} />
-      </details>
-
       {error ? (
         <div className="state state-error" role="alert">
           {error instanceof ApiError ? error.message : GENERIC_FAILURE}
         </div>
       ) : null}
 
-      {outcome ? (
+      {outcome && outcome.refusal ? (
+        // A refusal means the action never left AgentGuard: a switch was off,
+        // the state had moved, or a guardrail said no. Nothing was attempted,
+        // so this is not a failure and is not red.
+        <div className="state state-warn" role="status">
+          <strong>Not attempted.</strong> {outcome.message}
+        </div>
+      ) : outcome ? (
         <div className={`state ${outcomeTone(outcome.outcome)}`} role="status">
           {outcome.outcome === 'CONFIRMED_APPLIED' ? (
             <>
@@ -299,16 +367,62 @@ function ActionCard({
           </div>
         </div>
       ) : rec.blocked_reason ? (
+        // Unchanged behaviour: a verification gate blocks this action outright,
+        // so there is nothing to review towards. The gate's own words are kept
+        // alongside the owner-facing sentence.
         <div className="state state-warn" role="note">
           Price changes are currently disabled pending expiry verification.
+          <div className="vac-note">{rec.blocked_reason}</div>
+        </div>
+      ) : reviewing ? (
+        <div className="vac-review">
+          <Evidence rec={rec} />
+
+          {isRemovePin ? (
+            <p className="vac-note">
+              Removing this override returns pricing control for {rec.stay_date} to
+              PriceLabs dynamic pricing. Nothing is written in its place. It does not
+              guarantee a higher price, more revenue, or a booking — PriceLabs may price
+              the night above or below {money(rec.current_price)}.
+            </p>
+          ) : null}
+
+          {writesEnabled ? (
+            <div className="row" style={{ gap: 8 }}>
+              <button type="button" disabled={busy} onClick={onRequestApproval}>
+                {busy ? 'Preparing…' : 'Request approval'}
+              </button>
+              <button type="button" disabled={busy} onClick={() => setReviewing(false)}>
+                Close
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="state state-warn" role="note">
+                <strong>LIVE PRICING IS OFF</strong>
+                <div>Review only — nothing can be sent to PriceLabs.</div>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <button type="button" disabled title="Live pricing is off">
+                  Request approval
+                </button>
+                <span className="faint">
+                  Start a live pricing session to request approval.
+                </span>
+                <button type="button" onClick={() => setReviewing(false)}>
+                  Close
+                </button>
+              </div>
+            </>
+          )}
         </div>
       ) : (
         <div className="row" style={{ gap: 8 }}>
-          <button type="button" disabled={busy} onClick={onReview}>
-            {busy ? 'Preparing…' : 'Review'}
+          <button type="button" onClick={onReview}>
+            Review
           </button>
           {!writesEnabled ? (
-            <span className="faint">Pricing changes are turned off — review only.</span>
+            <span className="faint">Live pricing is off — review only.</span>
           ) : null}
         </div>
       )}

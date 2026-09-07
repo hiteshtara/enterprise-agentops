@@ -129,14 +129,24 @@ describe('RecommendedActions', () => {
 
     renderWithRouter(<RecommendedActions />)
 
-    await userEvent.setup().click(await screen.findByRole('button', { name: 'Review' }))
+    const reviewUser = userEvent.setup()
+
+    await reviewUser.click(await screen.findByRole('button', { name: 'Review' }))
 
     expect(await screen.findByText('Hard floor')).toBeInTheDocument()
     expect(screen.getByText('Auto-raise ceiling')).toBeInTheDocument()
     expect(screen.getByText('Absolute ceiling')).toBeInTheDocument()
     expect(screen.getByText('Market p25')).toBeInTheDocument()
     expect(screen.getByText('State fingerprint')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Approve & Apply/ })).toBeInTheDocument()
+
+    // Review only reads. Approving is a separate, deliberate step.
+    expect(api.submitPricingAction).not.toHaveBeenCalled()
+
+    await reviewUser.click(screen.getByRole('button', { name: 'Request approval' }))
+
+    expect(
+      await screen.findByRole('button', { name: /Approve & Apply/ }),
+    ).toBeInTheDocument()
   })
 
   it('reports a stored override without claiming the channel price changed', async () => {
@@ -171,6 +181,7 @@ describe('RecommendedActions', () => {
     renderWithRouter(<RecommendedActions />)
 
     await user.click(await screen.findByRole('button', { name: 'Review' }))
+    await user.click(await screen.findByRole('button', { name: 'Request approval' }))
     await user.click(await screen.findByRole('button', { name: /Approve & Apply/ }))
 
     expect(await screen.findByText('Override stored.')).toBeInTheDocument()
@@ -207,6 +218,7 @@ describe('RecommendedActions', () => {
     renderWithRouter(<RecommendedActions />)
 
     await user.click(await screen.findByRole('button', { name: 'Review' }))
+    await user.click(await screen.findByRole('button', { name: 'Request approval' }))
     await user.click(await screen.findByRole('button', { name: /Approve & Apply/ }))
 
     expect(
@@ -241,6 +253,7 @@ describe('RecommendedActions', () => {
     renderWithRouter(<RecommendedActions />)
 
     await user.click(await screen.findByRole('button', { name: 'Review' }))
+    await user.click(await screen.findByRole('button', { name: 'Request approval' }))
     await user.click(await screen.findByRole('button', { name: 'Reject' }))
 
     expect(await screen.findByText(/Nothing was changed/)).toBeInTheDocument()
@@ -311,11 +324,13 @@ describe('RecommendedActions', () => {
       screen.getByText('Your fixed $179 price is now below the current market range.'),
     ).toBeInTheDocument()
 
-    // Technical detail is behind the fold, not on the card.
-    expect(screen.getByText('Show details')).toBeInTheDocument()
-    expect(screen.queryByText('State fingerprint')?.closest('details')).toBeTruthy()
+    // Technical detail stays behind Review, not on the card.
+    expect(screen.queryByText('State fingerprint')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument()
 
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Review' }))
+    const u2 = userEvent.setup()
+    await u2.click(screen.getByRole('button', { name: 'Review' }))
+    await u2.click(await screen.findByRole('button', { name: 'Request approval' }))
 
     expect(
       await screen.findByRole('button', { name: 'Return to dynamic pricing' }),
@@ -353,15 +368,16 @@ describe('RecommendedActions', () => {
 
     renderWithRouter(<RecommendedActions />)
 
-    // The card face stays owner-facing; the technical reason is available but
-    // folded away, so the reason a control is off is never merely asserted.
+    // The card face stays owner-facing, and the gate's own words sit with it.
+    // There is no Review to fold them behind: a blocked action has nothing to
+    // review towards, so the reason a control is off is stated outright.
     await screen.findByText(
       'Price changes are currently disabled pending expiry verification.',
     )
 
-    const technical = screen.getByText('lead_time_expiry has not been verified')
-
-    expect(technical.closest('details')).toBeTruthy()
+    expect(
+      screen.getByText('lead_time_expiry has not been verified'),
+    ).toBeInTheDocument()
 
     // No path to approval exists while it is blocked.
     expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument()
