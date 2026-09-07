@@ -90,9 +90,7 @@ function Freshness({ health }: { health: ReconcilerHealth | null }) {
     <div className={`callout ${stale ? 'tone-warn' : 'tone-neutral'}`}>
       <strong>{stale ? 'Reconciliation is behind.' : 'Reconciliation'}</strong>{' '}
       {health.unreconciled} of {health.outcomes} actions not yet reconciled
-      {age !== null && age !== undefined
-        ? `; the oldest has waited ${hours(age)}`
-        : ''}
+      {age !== null && age !== undefined ? `; the oldest has waited ${hours(age)}` : ''}
       . Last successful pass: {when(health.last_successful_reconciliation_at)}.
       {stale
         ? ' Until it catches up, an unreconciled row means unknown — not that the night went unsold.'
@@ -104,7 +102,10 @@ function Freshness({ health }: { health: ReconcilerHealth | null }) {
 export function OutcomesPage() {
   const [action, setAction] = useUrlFilter<Action>('action', ACTIONS)
 
-  const outcomes = useAsync(() => getPricingOutcomes(action ? { action } : {}), [action])
+  const outcomes = useAsync(
+    () => getPricingOutcomes(action ? { action } : {}),
+    [action],
+  )
   const health = useAsync(() => getReconcilerHealth(), [])
 
   return (
@@ -240,7 +241,9 @@ export function OutcomesPage() {
                       <td>{row.first_booking_channel ?? '—'}</td>
                       <td>{money(row.first_realized_stay_adr)}</td>
                       <td>
-                        {row.last_reconciled_at ? when(row.last_reconciled_at) : 'never'}
+                        {row.last_reconciled_at
+                          ? when(row.last_reconciled_at)
+                          : 'never'}
                         {row.finalized_at ? ' · polling stopped' : ''}
                         {row.reopened_at ? ' · reopened' : ''}
                       </td>
@@ -253,7 +256,9 @@ export function OutcomesPage() {
 
           <p className="footnote">
             {'"Polling stopped" means routine reconciliation ended for that row, not '}
-            {'that the record can never change. A later pass that disagrees reopens it. '}
+            {
+              'that the record can never change. A later pass that disagrees reopens it. '
+            }
             {'Cancellation times are when AgentGuard noticed — PriceLabs does not '}
             {'report when a cancellation happened.'}
           </p>

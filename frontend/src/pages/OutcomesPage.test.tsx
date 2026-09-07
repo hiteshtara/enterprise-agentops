@@ -227,9 +227,7 @@ describe('OutcomesPage', () => {
 
     await screen.findByRole('table')
 
-    expect(
-      screen.getByText(/stay average, not this night/i),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/stay average, not this night/i)).toBeInTheDocument()
   })
 
   it('warns when reconciliation is behind rather than showing zeros', async () => {
@@ -245,9 +243,7 @@ describe('OutcomesPage', () => {
     renderWithRouter(<OutcomesPage />)
 
     expect(await screen.findByText(/Reconciliation is behind/)).toBeInTheDocument()
-    expect(
-      screen.getByText(/not that the night went unsold/),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/not that the night went unsold/)).toBeInTheDocument()
   })
 
   it('treats an empty board as a legitimate state', async () => {
