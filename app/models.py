@@ -949,6 +949,42 @@ class PricingReconcilerHealthOut(BaseModel):
     reopened: int
 
 
+class PricingSessionOut(BaseModel):
+    """Whether the owner has a live pricing window open, and for what.
+
+    **Status only — it confers nothing.** A live session is one clause of the
+    write gate; the two deployment controls are evaluated separately and
+    first, so `mode: "LIVE"` does not mean a write is possible. The console
+    reads `writes_enabled` from the recommendations payload alongside this and
+    only offers a write path when both agree.
+    """
+
+    mode: str
+    active: bool
+    expires_at: str | None = None
+    remaining_seconds: int = 0
+    listing_ids: list[str] = []
+    started_by_user_id: str | None = None
+    #: The deployment ceiling, echoed so one fetch answers "can I act?" without
+    #: the console having to reconcile two sources.
+    deployment_writes_enabled: bool = False
+    deployment_listing_ids: list[str] = []
+    max_session_minutes: int = 30
+
+
+class PricingSessionRequest(BaseModel):
+    """Opening a window: which listings, and for how long.
+
+    No actor field. Identity comes from the token, and a caller has nowhere to
+    put one. No "all listings" flag either -- the selection is always explicit,
+    so opening a window across the whole portfolio is a thing someone did on
+    purpose rather than a default they accepted.
+    """
+
+    listing_ids: list[str] = Field(min_length=1)
+    duration_minutes: int | None = Field(default=None, ge=1, le=30)
+
+
 class PricingCleanupRecordOut(BaseModel):
     """One stored cleanup obligation, as `pricing_cleanup.to_payload` builds it.
 

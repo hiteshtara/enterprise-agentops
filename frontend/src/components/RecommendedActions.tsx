@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import {
   getPricingRecommendations,
+  getPricingSession,
   resolveApproval,
   submitPricingAction,
 } from '../api/agentguard'
+import { PricingSessionControl } from './PricingSessionControl'
 import type {
   ApprovalRequest,
   PricingOutcome,
@@ -210,6 +212,13 @@ function ActionCard({
   writesEnabled,
 }: {
   rec: PricingRecommendation
+  /**
+   * Whether a write is possible for *this listing, right now*: the deployment
+   * kill switch, the deployment allowlist and an active session covering it,
+   * all agreeing. Anything less and the card stays review-only, because
+   * offering an approval that provably cannot execute is the bug this whole
+   * piece of work removed.
+   */
   writesEnabled: boolean
 }) {
   const [reviewing, setReviewing] = useState(false)
@@ -430,14 +439,33 @@ function ActionCard({
   )
 }
 
-export function RecommendedActions() {
+export function RecommendedActions({
+  canAdminister = false,
+}: {
+  canAdminister?: boolean
+}) {
   const { data, error, loading } = useAsync(getPricingRecommendations, [])
+  const session = useAsync(getPricingSession, [], { intervalMs: 15_000 })
 
   if (loading) return <Loading label="Building pricing recommendations" />
   if (error) return <ErrorState error={error} />
   if (!data) return null
 
   const actionable = data.recommendations.filter((rec) => rec.actionable)
+
+  /**
+   * All three layers must agree before a card offers a write path. The
+   * session alone is never enough -- it narrows the deployment controls and
+   * cannot widen them, so the console must not imply otherwise.
+   */
+  const live = session.data
+  const liveFor = (listingId: string) =>
+    Boolean(
+      data.writes_enabled &&
+      live?.deployment_writes_enabled &&
+      live.mode === 'LIVE' &&
+      live.listing_ids.includes(listingId),
+    )
 
   return (
     <section className="vac-section">
@@ -448,6 +476,8 @@ export function RecommendedActions() {
         individually.
       </p>
 
+      <PricingSessionControl bands={data.bands} canAdminister={canAdminister} />
+
       <PolicyBanner
         writesEnabled={data.writes_enabled}
         unblocked={data.unblocked_actions}
@@ -456,7 +486,11 @@ export function RecommendedActions() {
       {actionable.length ? (
         <div className="grid">
           {actionable.map((rec) => (
-            <ActionCard key={rec.id} rec={rec} writesEnabled={data.writes_enabled} />
+            <ActionCard
+              key={rec.id}
+              rec={rec}
+              writesEnabled={liveFor(rec.listing_id)}
+            />
           ))}
         </div>
       ) : (

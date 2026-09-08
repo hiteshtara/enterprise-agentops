@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { useAuth } from '../auth/context'
+import { PricingSessionBadge } from './PricingSessionControl'
 import type { Permission } from '../api/types'
 
 interface NavItem {
@@ -91,6 +92,10 @@ export function Layout({
             ),
           )}
         </nav>
+
+        {/* Always visible: the owner must be able to tell at a glance whether
+            clicking Approve anywhere can reach PriceLabs. */}
+        <PricingSessionBadge />
 
         {user ? (
           <div className="identity">

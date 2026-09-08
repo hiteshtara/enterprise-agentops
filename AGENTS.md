@@ -249,7 +249,8 @@ Invariants that tests enforce — don't break them silently:
 `TOOL_REQUESTED`, `TOOL_EXECUTED`, `TOOL_FAILED`, `APPROVAL_REQUIRED`,
 `APPROVAL_GRANTED`, `APPROVAL_DENIED`, `AGENT_FAILED`, `AGENT_MAX_ITERATIONS`,
 `AUTHORIZATION_DENIED`, `PRICING_CLEANUP`, `PRICING_CLEANUP_STALE_OWNER`,
-`PRICING_CLEANUP_MANUALLY_RESOLVED`. These are bare strings, not an enum — grep
+`PRICING_CLEANUP_MANUALLY_RESOLVED`, `PRICING_SESSION_STARTED`,
+`PRICING_SESSION_ENDED`. These are bare strings, not an enum — grep
 `audit_store.record` before adding a new one. `GET /audit/events` returns them
 newest-first.
 
@@ -443,6 +444,32 @@ that produced them.
   development database.
 - **New model modules must be imported in `alembic/env.py`**, or autogenerate will
   propose dropping their tables.
+
+### Owner live-pricing session
+
+- **The session only ever narrows.** The write gate is
+  `writes_enabled() AND listing in automation_allowlist() AND a live session
+  covers it AND verification AND approval AND fingerprint AND guardrails`.
+  The session is the third clause. It cannot widen either environment control,
+  and deleting it would loosen nothing the deployment does not already permit.
+- **In memory, single process, gone on restart.** `app/pricing_session.py`
+  holds one session in a module global behind a lock. "Restart means SAFE
+  MODE" is a property of the substrate, not a rule to remember. The audit
+  trail is separate and durable, so the history persists while the capability
+  does not. A multi-worker deployment needs this reconsidered, not scaled.
+- **Absolute expiry, evaluated on read.** `expires_at` is computed once and
+  never extended; activity does not prolong it. No timer and no background
+  thread — a lapsed session is inert the instant it lapses.
+- **Cleanup never requires a session.** It is restorative, bounded by an
+  obligation it already recorded, and runs unattended; gating it would strand
+  every override the moment nobody was watching. It still requires both
+  environment switches, unchanged.
+- **`LIVE_SESSION_REQUIRED` is distinct from `WRITES_DISABLED`.** The first
+  means the owner has not opened a window; the second means an operator must
+  change a deployment setting. Different people fix them.
+- **The console never offers a write path the deployment forbids.** The
+  session payload carries the deployment ceiling so one fetch answers "can I
+  act?", and a card offers approval only when all three layers agree.
 
 ### Identity and authorization invariants
 
