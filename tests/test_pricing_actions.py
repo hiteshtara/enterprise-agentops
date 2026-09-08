@@ -2815,3 +2815,193 @@ def test_the_manual_resolution_route_is_not_a_model_tool(api):
 
     assert not any("manual" in n for n in names)
     assert not any("cleanup" in n for n in names)
+
+
+# -- the owner live pricing session ---------------------------------------
+
+
+BUNKERS_SLUG = "boston-bunkers"
+
+
+def reset_sessions(api):
+    api.module.SESSIONS.end()
+
+
+def test_the_session_starts_safe(api):
+    reset_sessions(api)
+
+    body = api.client("VIEWER").get("/pricing/session").json()
+
+    assert body["mode"] == "SAFE"
+    assert body["active"] is False
+    assert body["listing_ids"] == []
+    assert body["max_session_minutes"] == 30
+
+
+def test_every_role_may_see_whether_pricing_is_live(api):
+    """Knowing whether the system can reach PriceLabs is not privileged."""
+    reset_sessions(api)
+
+    for role in ("VIEWER", "OPERATOR", "APPROVER", "ADMIN"):
+        assert api.client(role).get("/pricing/session").status_code == 200
+
+
+def test_only_an_administrator_may_start_or_end_a_session(api):
+    reset_sessions(api)
+
+    for role in ("VIEWER", "OPERATOR", "APPROVER"):
+        start = api.client(role).post(
+            "/pricing/session", json={"listing_ids": [BUNKERS]}
+        )
+        end = api.client(role).delete("/pricing/session")
+
+        assert start.status_code == 403
+        assert end.status_code == 403
+
+    assert api.module.SESSIONS.active() is None, "no window was opened"
+
+
+def test_an_anonymous_caller_cannot_start_a_session(api):
+    reset_sessions(api)
+
+    response = api.anonymous().post(
+        "/pricing/session", json={"listing_ids": [BUNKERS]}
+    )
+
+    assert response.status_code == 401
+    assert api.module.SESSIONS.active() is None
+
+
+def test_an_administrator_opens_and_ends_a_window(api):
+    reset_sessions(api)
+
+    started = api.client("ADMIN").post(
+        "/pricing/session",
+        json={"listing_ids": [BUNKERS], "duration_minutes": 15},
+    )
+
+    assert started.status_code == 200
+
+    body = started.json()
+
+    assert body["mode"] == "LIVE"
+    assert body["listing_ids"] == [BUNKERS]
+    assert 0 < body["remaining_seconds"] <= 15 * 60
+
+    ended = api.client("ADMIN").delete("/pricing/session").json()
+
+    assert ended["mode"] == "SAFE"
+    assert ended["active"] is False
+
+
+def test_an_empty_listing_selection_is_refused(api):
+    reset_sessions(api)
+
+    response = api.client("ADMIN").post(
+        "/pricing/session", json={"listing_ids": []}
+    )
+
+    assert response.status_code == 422
+    assert api.module.SESSIONS.active() is None
+
+
+def test_a_listing_with_no_owner_bands_is_refused(api):
+    """A window that silently covers nothing is worse than one that fails."""
+    reset_sessions(api)
+
+    response = api.client("ADMIN").post(
+        "/pricing/session", json={"listing_ids": ["not-a-listing"]}
+    )
+
+    assert response.status_code == 400
+    assert "not-a-listing" in response.json()["detail"]
+    assert api.module.SESSIONS.active() is None
+
+
+def test_a_duration_beyond_the_cap_is_refused(api):
+    reset_sessions(api)
+
+    response = api.client("ADMIN").post(
+        "/pricing/session",
+        json={"listing_ids": [BUNKERS], "duration_minutes": 120},
+    )
+
+    assert response.status_code == 422
+    assert api.module.SESSIONS.active() is None
+
+
+def test_the_session_view_carries_the_deployment_ceiling(api):
+    """So the console never offers a write path the deployment forbids."""
+    reset_sessions(api)
+
+    api.client("ADMIN").post("/pricing/session", json={"listing_ids": [BUNKERS]})
+
+    body = api.client("ADMIN").get("/pricing/session").json()
+
+    assert body["mode"] == "LIVE"
+    # Writes are off in the test environment, and the payload says so even
+    # while a session is open.
+    assert body["deployment_writes_enabled"] is False
+    assert body["deployment_listing_ids"] == []
+
+    reset_sessions(api)
+
+
+def test_starting_and_ending_a_session_is_audited(api):
+    reset_sessions(api)
+
+    api.client("ADMIN").post("/pricing/session", json={"listing_ids": [BUNKERS]})
+    api.client("ADMIN").delete("/pricing/session")
+
+    events = api.module.audit_store.list_events(limit=20)
+    kinds = [e["event_type"] for e in events]
+
+    assert "PRICING_SESSION_STARTED" in kinds
+    assert "PRICING_SESSION_ENDED" in kinds
+
+    started = next(
+        e for e in events if e["event_type"] == "PRICING_SESSION_STARTED"
+    )
+
+    assert started["details"]["listing_ids"] == [BUNKERS]
+    assert started["details"]["expires_at"]
+    assert started["actor_user_id"]
+    # Provenance attaches from the request, not the body.
+    assert started["request_id"]
+    assert started["instance_id"] == api.module.provenance.INSTANCE_ID
+
+
+def test_the_actor_is_taken_from_the_token_not_the_body(api):
+    reset_sessions(api)
+
+    api.client("ADMIN").post(
+        "/pricing/session",
+        json={
+            "listing_ids": [BUNKERS],
+            "started_by_user_id": "somebody-else",
+            "duration_minutes": 5,
+        },
+    )
+
+    session = api.module.SESSIONS.active()
+
+    assert session is not None
+    assert session.started_by_user_id != "somebody-else"
+
+    reset_sessions(api)
+
+
+def test_ending_when_nothing_is_open_is_harmless(api):
+    reset_sessions(api)
+
+    response = api.client("ADMIN").delete("/pricing/session")
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "SAFE"
+
+
+def test_the_session_is_not_a_model_tool(api):
+    """Opening a pricing window is a governance act, not a capability."""
+    names = {t["name"] for t in api.client("ADMIN").get("/tools").json()}
+
+    assert not any("session" in n for n in names)

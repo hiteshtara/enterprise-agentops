@@ -10,6 +10,7 @@ import type {
 import { PageHeader } from '../components/Layout'
 import { Empty, ErrorState, Loading } from '../components/States'
 import { RecommendedActions } from '../components/RecommendedActions'
+import { useAuth } from '../auth/context'
 import { useAsync } from '../hooks/useAsync'
 import { useUrlFilter } from '../hooks/useUrlFilter'
 
@@ -358,6 +359,8 @@ function PropertyCard({ property }: { property: VacancyProperty }) {
 }
 
 function Board({ board }: { board: VacancyBoard }) {
+  const { can } = useAuth()
+
   const { summary } = board
 
   const freshness = freshnessLine(board.properties)
@@ -400,7 +403,7 @@ function Board({ board }: { board: VacancyBoard }) {
         />
       </div>
 
-      <RecommendedActions />
+      <RecommendedActions canAdminister={can('ADMINISTER')} />
 
       <section className="vac-section">
         <h2 className="card-title">Unbookable gaps</h2>

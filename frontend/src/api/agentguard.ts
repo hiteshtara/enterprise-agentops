@@ -26,6 +26,7 @@ import type {
   PricingRecommendationPage,
   RevenueOpportunityPage,
   PricingActionOutcomePage,
+  PricingSession,
   PricingCleanupRecord,
   PricingCleanupWorkload,
   ReconcilerHealth,
@@ -382,4 +383,34 @@ export function recordManualResolution(
     `/pricing/cleanup/${encodeURIComponent(cleanupId)}/manual-resolution`,
     { method: 'POST', body: JSON.stringify({ resolution }) },
   )
+}
+
+/** Whether live pricing is open, and whether the deployment would allow it. */
+export function getPricingSession(): Promise<PricingSession> {
+  return request<PricingSession>('/pricing/session')
+}
+
+/**
+ * Opens a deliberate pricing window. **This changes no price.**
+ *
+ * It narrows what is already permitted: the deployment controls are still
+ * checked first, and every individual change still needs its own approval, a
+ * fresh fingerprint and the guardrails. The actor comes from the token.
+ */
+export function startPricingSession(
+  listingIds: string[],
+  durationMinutes: number,
+): Promise<PricingSession> {
+  return request<PricingSession>('/pricing/session', {
+    method: 'POST',
+    body: JSON.stringify({
+      listing_ids: listingIds,
+      duration_minutes: durationMinutes,
+    }),
+  })
+}
+
+/** Closes the window immediately. Safe to call when none is open. */
+export function endPricingSession(): Promise<PricingSession> {
+  return request<PricingSession>('/pricing/session', { method: 'DELETE' })
 }

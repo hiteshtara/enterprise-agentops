@@ -141,6 +141,8 @@ from app.models import (
     PricingRecommendation,
     PricingRecommendationPage,
     PricingReconcilerHealthOut,
+    PricingSessionOut,
+    PricingSessionRequest,
     ReconcileResponse,
     RevenueOpportunity,
     RevenueOpportunityPage,
@@ -169,6 +171,7 @@ from app.pricing_config import (
 )
 from app.pricing_config import (
     MAX_CHANGE_PER_RUN,
+    automation_allowlist,
     bands_for,
 )
 from app.pricing_config import (
@@ -185,6 +188,13 @@ from app.pricing_service import (
     PricingRecommendationService,
     bands_payload,
     unblocked_actions,
+)
+from app.pricing_session import (
+    MAX_SESSION_MINUTES,
+    SESSIONS,
+)
+from app.pricing_session import (
+    to_payload as session_payload,
 )
 from app.reconciliation import (
     DEFAULT_STALE_AFTER_SECONDS,
@@ -416,6 +426,7 @@ pricelabs_pricing_tools = (
         cleanups=pricelabs_cleanups,
         outcomes=pricelabs_outcomes,
         evidence_source=pricing_evidence,
+        sessions=SESSIONS,
     )
     if pricelabs_client is not None
     else None
@@ -2092,6 +2103,108 @@ def get_revenue_opportunities(
         lower_summary=summarise_lower(lower_rows),
         lower_opportunities=[LowerOpportunity(**row) for row in lower_rows],
     )
+
+
+def _session_view() -> PricingSessionOut:
+    """One payload answering both "is a window open" and "would it matter".
+
+    The deployment ceiling travels with the session state deliberately. A
+    console that knew only about the session would happily offer a write path
+    while `ENABLE_PRICING_WRITES` was shut -- which is exactly the doomed
+    approval this whole piece of work exists to remove.
+    """
+    body = session_payload(SESSIONS.active())
+    allowed = automation_allowlist()
+
+    return PricingSessionOut(
+        **body,
+        deployment_writes_enabled=pricing_writes_enabled(),
+        deployment_listing_ids=sorted(
+            band.listing_id for band in PRICING_BANDS if band.slug in allowed
+        ),
+        max_session_minutes=MAX_SESSION_MINUTES,
+    )
+
+
+@app.get("/pricing/session", response_model=PricingSessionOut)
+def read_pricing_session(
+    user: User = Depends(require_view_runs),
+) -> PricingSessionOut:
+    """Whether live pricing is open. **Read-only, and readable by everyone.**
+
+    Nothing is hidden from a VIEWER: knowing whether the system can currently
+    reach PriceLabs is exactly the thing every role should be able to see. Only
+    *changing* it needs ADMINISTER.
+    """
+    return _session_view()
+
+
+@app.post("/pricing/session", response_model=PricingSessionOut)
+def start_pricing_session(
+    body: PricingSessionRequest,
+    user: User = Depends(require_administer),
+) -> PricingSessionOut:
+    """Open a deliberate pricing window.
+
+    **This does not change a price and does not make one possible on its own.**
+    It narrows: the deployment kill switch and the environment allowlist are
+    still checked first, and every individual change still needs its own
+    approval, a fresh fingerprint and the guardrails afterwards.
+
+    A listing with no owner bands is refused rather than accepted and ignored
+    -- a window that silently covers nothing is worse than one that fails.
+    """
+    unknown = [lid for lid in body.listing_ids if bands_for(lid) is None]
+
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No owner pricing bands for: {', '.join(sorted(unknown))}",
+        )
+
+    try:
+        session = SESSIONS.start(
+            listing_ids=set(body.listing_ids),
+            started_by_user_id=user.user_id,
+            duration_minutes=body.duration_minutes or MAX_SESSION_MINUTES,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    audit_store.record(
+        "PRICING_SESSION_STARTED",
+        {
+            "session_id": session.id,
+            "listing_ids": sorted(session.listing_ids),
+            "expires_at": session.expires_at.isoformat(),
+            "started_by": user.user_id,
+        },
+        actor_user_id=user.user_id,
+    )
+
+    return _session_view()
+
+
+@app.delete("/pricing/session", response_model=PricingSessionOut)
+def end_pricing_session(
+    user: User = Depends(require_administer),
+) -> PricingSessionOut:
+    """Close the window immediately. Safe to call when none is open."""
+    ended = SESSIONS.end()
+
+    if ended is not None:
+        audit_store.record(
+            "PRICING_SESSION_ENDED",
+            {
+                "session_id": ended.id,
+                "listing_ids": sorted(ended.listing_ids),
+                "ended_by": user.user_id,
+            },
+            actor_user_id=user.user_id,
+        )
+
+    return _session_view()
 
 
 @app.get(

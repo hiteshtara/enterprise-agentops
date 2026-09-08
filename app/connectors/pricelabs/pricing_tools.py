@@ -107,6 +107,7 @@ class PriceLabsPricingTools:
         cleanups: PricingCleanupStore | None = None,
         outcomes: Any = None,
         evidence_source: Any = None,
+        sessions: Any = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -118,6 +119,12 @@ class PriceLabsPricingTools:
         # changing a price.
         self._outcomes = outcomes
         self._evidence_source = evidence_source
+        # The owner live-session store. `None` means this deployment has no
+        # session layer at all and the two environment controls are the whole
+        # gate -- the behaviour before sessions existed. It is never a way to
+        # *skip* a configured session: `main.py` wires one in, and a caller
+        # cannot reach this constructor.
+        self._sessions = sessions
 
     def _record_outcome(
         self,
@@ -431,6 +438,36 @@ class PriceLabsPricingTools:
                 (
                     "Pricing automation is not enabled for this listing; "
                     "no price was changed."
+                ),
+                stay_date,
+            )
+
+        # The owner's live session, checked **third** and only ever narrowing.
+        #
+        # Both deployment controls are already satisfied by the time execution
+        # reaches here, which is the point: a session cannot bring a listing
+        # into scope that `PRICELABS_AUTOMATION_ENABLED` excludes, and cannot
+        # make a write possible while `ENABLE_PRICING_WRITES` is shut. Deleting
+        # this check would widen nothing beyond what the deployment already
+        # permits; deleting either check above would.
+        #
+        # A distinct refusal code on purpose. `WRITES_DISABLED` means a
+        # deployment switch is off and an operator must change it;
+        # `LIVE_SESSION_REQUIRED` means the deployment is willing and the owner
+        # simply has not opened a window. Those call for different actions by
+        # different people, so they are different refusals.
+        #
+        # Owner-initiated writes only. The cleanup worker does not come through
+        # this tool: it is restorative, bounded by an obligation it already
+        # recorded, proves ownership against four fields, and runs unattended
+        # by design. Gating it on a session would strand every override the
+        # moment nobody was watching.
+        if self._sessions is not None and not self._sessions.permits(listing_id):
+            return _refused(
+                "LIVE_SESSION_REQUIRED",
+                (
+                    "No live pricing session covers this listing, so nothing "
+                    "was sent. Start a pricing session and try again."
                 ),
                 stay_date,
             )

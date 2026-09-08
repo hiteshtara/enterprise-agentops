@@ -919,3 +919,27 @@ export interface PricingCleanupWorkload {
   /** Rows automation will never resolve on its own. */
   needs_attention: PricingCleanupRecord[]
 }
+
+/**
+ * Whether the owner has a live pricing window open.
+ *
+ * **Status, not permission.** A live session is one clause of the write gate;
+ * the deployment kill switch and listing allowlist are checked separately and
+ * first, so `mode: 'LIVE'` does not mean a write is possible. That is why the
+ * deployment ceiling travels in the same payload — a console reading only the
+ * session would happily offer a write path the deployment forbids, which is
+ * the doomed-approval bug all over again.
+ */
+export interface PricingSession {
+  mode: 'SAFE' | 'LIVE'
+  active: boolean
+  expires_at?: string | null
+  remaining_seconds: number
+  listing_ids: string[]
+  started_by_user_id?: string | null
+  /** The deployment kill switch. False means nothing can be written at all. */
+  deployment_writes_enabled: boolean
+  /** Listings the deployment permits. A session cannot widen this. */
+  deployment_listing_ids: string[]
+  max_session_minutes: number
+}

@@ -9,6 +9,41 @@ import type { PricingRecommendation, PricingRecommendationPage } from '../api/ty
 vi.mock('../api/agentguard')
 
 /**
+ * A deployment that permits live pricing, with a session covering the fixture
+ * listing. Needed wherever a test exercises the write path: a card only offers
+ * approval when the deployment controls *and* an active session agree.
+ */
+function liveSession(over: Record<string, unknown> = {}) {
+  vi.mocked(api.getPricingSession).mockResolvedValue({
+    mode: 'LIVE',
+    active: true,
+    expires_at: '2026-09-07T13:00:00+00:00',
+    remaining_seconds: 1800,
+    listing_ids: ['inv-1'],
+    started_by_user_id: 'user-1',
+    deployment_writes_enabled: true,
+    deployment_listing_ids: ['inv-1'],
+    max_session_minutes: 30,
+    ...over,
+  } as never)
+}
+
+/** The current deployment: writes off, no session. */
+function safeMode() {
+  vi.mocked(api.getPricingSession).mockResolvedValue({
+    mode: 'SAFE',
+    active: false,
+    expires_at: null,
+    remaining_seconds: 0,
+    listing_ids: [],
+    started_by_user_id: null,
+    deployment_writes_enabled: false,
+    deployment_listing_ids: [],
+    max_session_minutes: 30,
+  } as never)
+}
+
+/**
  * The reported V1 blocker: an owner opens /vacancy with pricing writes off,
  * clicks Review, and gets a red "Failed. ENABLE_PRICING_WRITES is not enabled".
  *
@@ -104,6 +139,8 @@ async function review() {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  safeMode()
+  safeMode()
 })
 
 describe('Review, with pricing writes disabled', () => {
@@ -302,6 +339,9 @@ describe('a refusal is not a failure', () => {
    * red. They are different facts and now look different.
    */
   async function applyWith(outcome: Record<string, unknown>) {
+    // The write path needs all three layers agreeing, so this block opts into
+    // a live deployment and a session covering the fixture listing.
+    liveSession()
     serve(page({ writes_enabled: true, unblocked_actions: ['LOWER'] }))
 
     vi.mocked(api.submitPricingAction).mockResolvedValue({
@@ -361,5 +401,62 @@ describe('a refusal is not a failure', () => {
 
     expect(await screen.findByText(/Failed\./)).toBeInTheDocument()
     expect(screen.queryByText('Not attempted.')).not.toBeInTheDocument()
+  })
+})
+
+describe('all three layers must agree before a write path appears', () => {
+  /**
+   * The session narrows; it never widens. A card offers approval only when
+   * the deployment kill switch, the deployment allowlist and an active
+   * session covering that listing all agree. Anything less stays review-only,
+   * because an approval that provably cannot execute is the bug this work
+   * removed.
+   */
+  async function reviewWith(over: Record<string, unknown>) {
+    vi.mocked(api.getPricingSession).mockResolvedValue({
+      mode: 'LIVE',
+      active: true,
+      expires_at: '2026-09-07T13:00:00+00:00',
+      remaining_seconds: 1800,
+      listing_ids: ['inv-1'],
+      started_by_user_id: 'user-1',
+      deployment_writes_enabled: true,
+      deployment_listing_ids: ['inv-1'],
+      max_session_minutes: 30,
+      ...over,
+    } as never)
+
+    serve(page({ writes_enabled: true, unblocked_actions: ['LOWER'] }))
+
+    renderWithRouter(<RecommendedActions />)
+    await review()
+  }
+
+  it('offers Request approval when every layer agrees', async () => {
+    await reviewWith({})
+
+    expect(screen.getByRole('button', { name: 'Request approval' })).toBeEnabled()
+    expect(screen.queryByText('LIVE PRICING IS OFF')).not.toBeInTheDocument()
+  })
+
+  it('stays review-only when the session excludes this listing', async () => {
+    await reviewWith({ listing_ids: ['some-other-listing'] })
+
+    expect(screen.getByText('LIVE PRICING IS OFF')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Request approval' })).toBeDisabled()
+  })
+
+  it('stays review-only when the deployment kill switch is shut', async () => {
+    await reviewWith({ deployment_writes_enabled: false })
+
+    expect(screen.getByText('LIVE PRICING IS OFF')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Request approval' })).toBeDisabled()
+  })
+
+  it('stays review-only when no session is open', async () => {
+    await reviewWith({ mode: 'SAFE', active: false, listing_ids: [] })
+
+    expect(screen.getByText('LIVE PRICING IS OFF')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Request approval' })).toBeDisabled()
   })
 })

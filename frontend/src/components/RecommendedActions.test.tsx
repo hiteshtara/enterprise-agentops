@@ -8,6 +8,26 @@ import type { PricingRecommendation, PricingRecommendationPage } from '../api/ty
 
 vi.mock('../api/agentguard')
 
+/**
+ * A deployment that permits live pricing, with a session covering the fixture
+ * listing. Needed wherever a test exercises the write path: a card only offers
+ * approval when the deployment controls *and* an active session agree.
+ */
+function liveSession(over: Record<string, unknown> = {}) {
+  vi.mocked(api.getPricingSession).mockResolvedValue({
+    mode: 'LIVE',
+    active: true,
+    expires_at: '2026-09-07T13:00:00+00:00',
+    remaining_seconds: 1800,
+    listing_ids: ['inv-1'],
+    started_by_user_id: 'user-1',
+    deployment_writes_enabled: true,
+    deployment_listing_ids: ['inv-1'],
+    max_session_minutes: 30,
+    ...over,
+  } as never)
+}
+
 function rec(over: Partial<PricingRecommendation> = {}): PricingRecommendation {
   return {
     id: 'inv-1:2026-09-20',
@@ -83,7 +103,10 @@ const approval = {
 }
 
 describe('RecommendedActions', () => {
-  beforeEach(() => vi.resetAllMocks())
+  beforeEach(() => {
+    vi.resetAllMocks()
+    liveSession()
+  })
 
   it('shows only actionable recommendations', async () => {
     vi.mocked(api.getPricingRecommendations).mockResolvedValue(
