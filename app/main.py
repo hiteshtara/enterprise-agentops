@@ -231,7 +231,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=LOCAL_CONSOLE_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    # DELETE is here for exactly one route -- ending a pricing session --
+    # and was missing when that route shipped, so the button could not work
+    # from a browser at all. `TestClient` sends no preflight, so the backend
+    # tests passed; only clicking it in a real browser showed the failure.
+    # Any future verb the console needs must be added here as well.
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     # Authorization is required: the console sends a bearer token, which makes
     # every request preflighted. Omitting it fails the preflight in a browser
     # while leaving TestClient (which does not preflight) passing.
